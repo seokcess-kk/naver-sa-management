@@ -6,29 +6,27 @@
  * 흐름:
  *   1. RSC 가 advertiserId 한정 prisma.campaign.findMany 결과를 props 로 전달
  *   2. 사용자가 행을 다중 선택 (체크박스, 헤더 select all)
- *   3. 일괄 액션 버튼 클릭 → 4단계 모달 (SPEC 11.3)
- *      step "input"   : 선택 카운트 + 액션별 입력 (예산일 때)
- *      step "preview" : 전/후 비교 표 (계산은 클라이언트 — 실제 적용은 확정 후)
- *      step "submit"  : Server Action 진행 중
- *      step "result"  : 성공·실패 분리 + ChangeBatch ID 노출
- *   4. 결과 화면에서 "닫고 새로고침" → router.refresh()
+ *   3. 일괄 액션 버튼 클릭 → 4단계 모달 (SPEC 11.3) — 공통 BulkActionModal 위임
+ *   4. 결과 화면 닫기 → router.refresh()
+ *
+ * F-2.3 리팩터링:
+ *   - 기존 자체 모달(input/preview/submit/result + ResultView + Stat)을
+ *     `components/forms/bulk-action-modal.tsx` 로 추출.
+ *   - 본 파일은 캠페인 액션별 입력/프리뷰 render prop 만 정의.
+ *   - bulkUpdateCampaigns 시그니처 / UX 변경 X.
  *
  * 안티패턴 회피:
  *   - 즉시 적용 X (사용자 확정 거침)
  *   - 미리보기 단계 생략 X
- *   - ChangeBatch ID 결과 화면에 의무 노출
- *   - TanStack Virtual 도입 X (캠페인은 수십 row, 일반 Table 충분)
+ *   - ChangeBatch ID 결과 화면에 의무 노출 (BulkActionModal 책임)
+ *   - TanStack Virtual 도입 X (캠페인은 수십 row)
  *
- * SPEC 6.2 F-2.1·F-2.3 / 6.6 / 11.3 공통 패턴 / 안전장치 1·2.
- *
- * 참고: 캠페인 단건 작업은 staging 패턴이 아닌 다중 선택 모달이 staging 역할.
- *       (키워드 인라인 편집 F-3.2 만 staging 누적 패턴 — 셀 편집 즉시 반영 X)
+ * SPEC 6.2 F-2.1·F-2.3 / 6.6 / 11.3 / 안전장치 1·2.
  */
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
-import { CopyIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -38,14 +36,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -58,6 +48,10 @@ import {
 } from "@/components/ui/table"
 import { CampaignStatusBadge } from "@/components/dashboard/campaign-status-badge"
 import { SyncCampaignsButton } from "@/components/dashboard/sync-campaigns-button"
+import {
+  BulkActionModal,
+  type BulkActionResult,
+} from "@/components/forms/bulk-action-modal"
 import { bulkUpdateCampaigns } from "@/app/(dashboard)/[advertiserId]/campaigns/actions"
 import type { CampaignStatus } from "@/lib/generated/prisma/client"
 
@@ -85,9 +79,11 @@ export type CampaignRow = {
 
 type Action = "toggleOn" | "toggleOff" | "budget"
 
-type Step = "input" | "preview" | "submit" | "result"
-
-type BulkResult = Awaited<ReturnType<typeof bulkUpdateCampaigns>>
+/** BulkActionModal 의 TInput — 액션별 페이로드 */
+type BulkInput =
+  | { action: "toggleOn" }
+  | { action: "toggleOff" }
+  | { action: "budget"; dailyBudget: number }
 
 // =============================================================================
 // 메인 컴포넌트
@@ -145,13 +141,73 @@ export function CampaignsTable({
     setModalAction(action)
   }
 
-  function closeModal(refresh: boolean) {
+  function handleClosed(didApply: boolean) {
     setModalAction(null)
-    if (refresh) {
+    if (didApply) {
       setSelected(new Set())
       router.refresh()
     }
   }
+
+  // -- 액션별 onSubmit / 모달 props 구성 -------------------------------------
+  const modalProps = React.useMemo(() => {
+    if (modalAction === null) return null
+
+    const title =
+      modalAction === "toggleOn"
+        ? "ON으로 변경 (일괄)"
+        : modalAction === "toggleOff"
+          ? "OFF로 변경 (일괄)"
+          : "일 예산 변경 (일괄)"
+
+    async function onSubmit(input: BulkInput): Promise<BulkActionResult> {
+      let payload: Parameters<typeof bulkUpdateCampaigns>[1]
+      if (input.action === "toggleOn") {
+        payload = {
+          action: "toggle",
+          items: selectedRows.map((r) => ({
+            campaignId: r.id,
+            userLock: false,
+          })),
+        }
+      } else if (input.action === "toggleOff") {
+        payload = {
+          action: "toggle",
+          items: selectedRows.map((r) => ({
+            campaignId: r.id,
+            userLock: true,
+          })),
+        }
+      } else {
+        payload = {
+          action: "budget",
+          items: selectedRows.map((r) => ({
+            campaignId: r.id,
+            dailyBudget: input.dailyBudget,
+          })),
+        }
+      }
+      const res = await bulkUpdateCampaigns(advertiserId, payload)
+      // BulkActionModal 의 BulkActionResult 형태로 매핑 (campaignId → id).
+      // 결과 화면의 displayName 매칭은 nccCampaignId 기반.
+      return {
+        batchId: res.batchId,
+        total: res.total,
+        success: res.success,
+        failed: res.failed,
+        items: res.items.map((it) => {
+          const row = selectedRows.find((r) => r.id === it.campaignId)
+          return {
+            id: row?.nccCampaignId ?? it.campaignId,
+            ok: it.ok,
+            error: it.error,
+          }
+        }),
+      }
+    }
+
+    return { title, onSubmit, action: modalAction }
+  }, [modalAction, selectedRows, advertiserId])
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -295,12 +351,29 @@ export function CampaignsTable({
         </Table>
       </div>
 
-      {modalAction !== null && (
-        <BulkActionModal
-          advertiserId={advertiserId}
-          action={modalAction}
-          rows={selectedRows}
-          onClose={closeModal}
+      {modalProps !== null && (
+        <BulkActionModal<CampaignRow, BulkInput>
+          open
+          onOpenChange={(o) => {
+            if (!o) setModalAction(null)
+          }}
+          title={modalProps.title}
+          itemLabel="캠페인"
+          selectedItems={selectedRows}
+          renderInput={(items, onReady) => (
+            <CampaignBulkInput
+              action={modalProps.action}
+              items={items}
+              onReady={onReady}
+            />
+          )}
+          renderPreview={(items, input) => (
+            <CampaignBulkPreview items={items} input={input} />
+          )}
+          onSubmit={modalProps.onSubmit}
+          getItemDisplayName={(c) => c.name}
+          getItemId={(c) => c.nccCampaignId}
+          onClosed={handleClosed}
         />
       )}
     </div>
@@ -308,245 +381,85 @@ export function CampaignsTable({
 }
 
 // =============================================================================
-// 4단계 일괄 액션 모달 (SPEC 11.3)
+// 캠페인 input 단계 — 액션별 폼
 // =============================================================================
 
-function BulkActionModal({
-  advertiserId,
+function CampaignBulkInput({
   action,
-  rows,
-  onClose,
+  items,
+  onReady,
 }: {
-  advertiserId: string
   action: Action
-  rows: CampaignRow[]
-  onClose: (refresh: boolean) => void
+  items: CampaignRow[]
+  onReady: (input: BulkInput) => void
 }) {
-  // toggleOn / toggleOff 는 별도 입력 없음 → 시작부터 preview 단계로 진입.
-  // budget 만 input 단계에서 새 예산값을 받음.
-  const [step, setStep] = React.useState<Step>(
-    action === "budget" ? "input" : "preview",
-  )
-  const [budgetInput, setBudgetInput] = React.useState("")
-  const [submitting, setSubmitting] = React.useState(false)
-  const [result, setResult] = React.useState<BulkResult | null>(null)
-
-  const title = React.useMemo(() => {
-    if (action === "toggleOn") return "ON으로 변경 (일괄)"
-    if (action === "toggleOff") return "OFF로 변경 (일괄)"
-    return "일 예산 변경 (일괄)"
+  // toggleOn / toggleOff: 별도 입력 없음 → mount 즉시 onReady 호출
+  React.useEffect(() => {
+    if (action === "toggleOn") onReady({ action: "toggleOn" })
+    else if (action === "toggleOff") onReady({ action: "toggleOff" })
+    // budget 은 사용자 입력 대기
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [action])
 
-  // budget 입력 검증 (preview 진입 차단)
-  const parsedBudget = React.useMemo(() => {
-    if (action !== "budget") return null
-    const trimmed = budgetInput.trim()
-    if (trimmed === "") return null
-    const n = Number(trimmed)
-    if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return null
-    return n
-  }, [action, budgetInput])
+  const [budgetInput, setBudgetInput] = React.useState("")
 
-  const previewItems = React.useMemo(
-    () => buildPreview(action, rows, parsedBudget),
-    [action, rows, parsedBudget],
-  )
-
-  async function handleConfirm() {
-    setStep("submit")
-    setSubmitting(true)
-    try {
-      let payload:
-        | {
-            action: "toggle"
-            items: Array<{ campaignId: string; userLock: boolean }>
-          }
-        | {
-            action: "budget"
-            items: Array<{ campaignId: string; dailyBudget: number }>
-          }
-
-      if (action === "toggleOn") {
-        payload = {
-          action: "toggle",
-          items: rows.map((r) => ({ campaignId: r.id, userLock: false })),
-        }
-      } else if (action === "toggleOff") {
-        payload = {
-          action: "toggle",
-          items: rows.map((r) => ({ campaignId: r.id, userLock: true })),
-        }
-      } else {
-        if (parsedBudget === null) {
-          toast.error("유효한 일 예산을 입력하세요 (0 이상의 정수)")
-          setStep("input")
-          setSubmitting(false)
-          return
-        }
-        payload = {
-          action: "budget",
-          items: rows.map((r) => ({
-            campaignId: r.id,
-            dailyBudget: parsedBudget,
-          })),
-        }
-      }
-
-      const res = await bulkUpdateCampaigns(advertiserId, payload)
-      setResult(res)
-      setStep("result")
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      toast.error(`일괄 변경 오류: ${msg}`)
-      setStep("preview")
-    } finally {
-      setSubmitting(false)
-    }
+  if (action !== "budget") {
+    // mount 즉시 preview 로 진입하므로 짧은 안내만
+    return (
+      <p className="text-sm text-muted-foreground">
+        {items.length}개 캠페인의 ON/OFF 를 변경합니다. 미리보기로 이동
+        중...
+      </p>
+    )
   }
 
-  function handleClose() {
-    // result 단계에서는 갱신, 그 외는 그냥 닫기
-    onClose(step === "result")
-  }
+  const trimmed = budgetInput.trim()
+  const n = trimmed === "" ? null : Number(trimmed)
+  const valid =
+    n !== null && Number.isFinite(n) && n >= 0 && Number.isInteger(n)
 
   return (
-    <Dialog open onOpenChange={(open) => !open && handleClose()}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>
-            {rows.length}개 캠페인 선택됨. 변경은 미리보기 확인 후 적용됩니다.
-          </DialogDescription>
-        </DialogHeader>
-
-        {step === "input" && action === "budget" && (
-          <div className="flex flex-col gap-3">
-            <div>
-              <Label htmlFor="bulk-budget">새 일 예산 (원)</Label>
-              <Input
-                id="bulk-budget"
-                type="number"
-                inputMode="numeric"
-                min={0}
-                step={1000}
-                value={budgetInput}
-                onChange={(e) => setBudgetInput(e.target.value)}
-                placeholder="예: 50000"
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                선택한 모든 캠페인에 동일 예산이 적용됩니다. 0 이상의 정수.
-              </p>
-            </div>
-          </div>
-        )}
-
-        {step === "preview" && (
-          <PreviewTable items={previewItems} action={action} />
-        )}
-
-        {step === "submit" && (
-          <div className="py-8 text-center text-sm text-muted-foreground">
-            적용 중... ({rows.length}건)
-          </div>
-        )}
-
-        {step === "result" && result && <ResultView result={result} />}
-
-        <DialogFooter>
-          {step === "input" && (
-            <>
-              <Button variant="outline" onClick={handleClose}>
-                취소
-              </Button>
-              <Button
-                onClick={() => setStep("preview")}
-                disabled={action === "budget" && parsedBudget === null}
-              >
-                미리보기
-              </Button>
-            </>
-          )}
-          {step === "preview" && (
-            <>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  // budget 은 input 단계로 복귀해 값 수정. toggle 은 input 단계 없음 → 모달 닫기.
-                  if (action === "budget") setStep("input")
-                  else handleClose()
-                }}
-                disabled={submitting}
-              >
-                {action === "budget" ? "뒤로" : "취소"}
-              </Button>
-              <Button onClick={handleConfirm} disabled={submitting}>
-                확정 적용
-              </Button>
-            </>
-          )}
-          {step === "result" && (
-            <Button onClick={handleClose}>닫고 새로고침</Button>
-          )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <div className="flex flex-col gap-3">
+      <div>
+        <Label htmlFor="bulk-budget">새 일 예산 (원)</Label>
+        <Input
+          id="bulk-budget"
+          type="number"
+          inputMode="numeric"
+          min={0}
+          step={1000}
+          value={budgetInput}
+          onChange={(e) => setBudgetInput(e.target.value)}
+          placeholder="예: 50000"
+        />
+        <p className="mt-1 text-xs text-muted-foreground">
+          선택한 모든 캠페인에 동일 예산이 적용됩니다. 0 이상의 정수.
+        </p>
+      </div>
+      <div className="flex justify-end">
+        <Button
+          onClick={() => valid && onReady({ action: "budget", dailyBudget: n! })}
+          disabled={!valid}
+        >
+          미리보기
+        </Button>
+      </div>
+    </div>
   )
 }
 
 // =============================================================================
-// 미리보기 표 (전/후 비교)
+// 캠페인 preview 단계 — 전/후 비교 표
 // =============================================================================
 
-type PreviewItem = {
-  id: string
-  name: string
-  beforeLabel: string
-  afterLabel: string
-}
-
-function buildPreview(
-  action: Action,
-  rows: CampaignRow[],
-  parsedBudget: number | null,
-): PreviewItem[] {
-  return rows.map((r) => {
-    if (action === "toggleOn") {
-      return {
-        id: r.id,
-        name: r.name,
-        beforeLabel: r.userLock ? "OFF" : "ON",
-        afterLabel: "ON",
-      }
-    }
-    if (action === "toggleOff") {
-      return {
-        id: r.id,
-        name: r.name,
-        beforeLabel: r.userLock ? "OFF" : "ON",
-        afterLabel: "OFF",
-      }
-    }
-    return {
-      id: r.id,
-      name: r.name,
-      beforeLabel:
-        r.useDailyBudget && r.dailyBudget !== null
-          ? `${r.dailyBudget.toLocaleString()}원`
-          : "—",
-      afterLabel:
-        parsedBudget !== null ? `${parsedBudget.toLocaleString()}원` : "—",
-    }
-  })
-}
-
-function PreviewTable({
+function CampaignBulkPreview({
   items,
-  action,
+  input,
 }: {
-  items: PreviewItem[]
-  action: Action
+  items: CampaignRow[]
+  input: BulkInput
 }) {
-  const valueLabel = action === "budget" ? "일 예산" : "ON/OFF"
+  const valueLabel = input.action === "budget" ? "일 예산" : "ON/OFF"
   return (
     <div className="max-h-72 overflow-y-auto rounded-md border">
       <Table>
@@ -558,117 +471,36 @@ function PreviewTable({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {items.map((it) => (
-            <TableRow key={it.id}>
-              <TableCell className="max-w-xs truncate font-medium">
-                {it.name}
-              </TableCell>
-              <TableCell className="text-muted-foreground">
-                {it.beforeLabel}
-              </TableCell>
-              <TableCell className="font-medium">{it.afterLabel}</TableCell>
-            </TableRow>
-          ))}
+          {items.map((r) => {
+            const before = computeBefore(r, input)
+            const after = computeAfter(r, input)
+            return (
+              <TableRow key={r.id}>
+                <TableCell className="max-w-xs truncate font-medium">
+                  {r.name}
+                </TableCell>
+                <TableCell className="text-muted-foreground">{before}</TableCell>
+                <TableCell className="font-medium">{after}</TableCell>
+              </TableRow>
+            )
+          })}
         </TableBody>
       </Table>
     </div>
   )
 }
 
-// =============================================================================
-// 결과 뷰 (성공/실패 분리 + ChangeBatch ID)
-// =============================================================================
-
-function ResultView({ result }: { result: BulkResult }) {
-  const successItems = result.items.filter((i) => i.ok)
-  const failedItems = result.items.filter((i) => !i.ok)
-
-  function copyBatchId() {
-    navigator.clipboard
-      .writeText(result.batchId)
-      .then(() => toast.success("ChangeBatch ID 복사됨"))
-      .catch(() => toast.error("복사 실패"))
+function computeBefore(r: CampaignRow, input: BulkInput): string {
+  if (input.action === "budget") {
+    return r.useDailyBudget && r.dailyBudget !== null
+      ? `${r.dailyBudget.toLocaleString()}원`
+      : "—"
   }
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-3 gap-2">
-        <Stat label="요청" value={result.total} />
-        <Stat label="성공" value={result.success} accent="emerald" />
-        <Stat label="실패" value={result.failed} accent="destructive" />
-      </div>
-
-      <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
-        <span className="text-xs text-muted-foreground">ChangeBatch ID</span>
-        <code className="flex-1 truncate font-mono text-xs">
-          {result.batchId}
-        </code>
-        <Button
-          size="icon-xs"
-          variant="ghost"
-          onClick={copyBatchId}
-          title="ID 복사"
-        >
-          <CopyIcon />
-        </Button>
-      </div>
-      <p className="text-[11px] text-muted-foreground">
-        롤백 페이지(F-6.4)에서 본 ID 로 변경 이력을 조회·되돌릴 수 있습니다.
-      </p>
-
-      {failedItems.length > 0 && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/5">
-          <div className="border-b border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive">
-            실패 {failedItems.length}건
-          </div>
-          <ul className="max-h-40 overflow-y-auto px-3 py-2 text-xs">
-            {failedItems.map((it) => (
-              <li
-                key={it.campaignId}
-                className="border-b border-destructive/10 py-1 last:border-0"
-              >
-                <span className="font-mono text-muted-foreground">
-                  {it.campaignId}
-                </span>
-                <span className="ml-2 text-destructive">
-                  {it.error ?? "원인 미상"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {successItems.length > 0 && failedItems.length === 0 && (
-        <p className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900/40 dark:bg-emerald-900/20 dark:text-emerald-300">
-          모든 변경이 성공적으로 적용되었습니다.
-        </p>
-      )}
-    </div>
-  )
+  return r.userLock ? "OFF" : "ON"
 }
 
-function Stat({
-  label,
-  value,
-  accent,
-}: {
-  label: string
-  value: number
-  accent?: "emerald" | "destructive"
-}) {
-  const valueClass =
-    accent === "emerald"
-      ? "text-emerald-700 dark:text-emerald-400"
-      : accent === "destructive"
-        ? "text-destructive"
-        : "text-foreground"
-  return (
-    <div className="rounded-md border bg-background p-2">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={`mt-0.5 font-mono text-lg font-medium ${valueClass}`}>
-        {value}
-      </div>
-    </div>
-  )
+function computeAfter(r: CampaignRow, input: BulkInput): string {
+  if (input.action === "toggleOn") return "ON"
+  if (input.action === "toggleOff") return "OFF"
+  return `${input.dailyBudget.toLocaleString()}원`
 }
