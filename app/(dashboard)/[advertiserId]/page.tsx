@@ -150,8 +150,11 @@ export default async function AdvertiserDashboardPage({
           >
             소재
           </Button>
-          <Button variant="outline" disabled>
-            확장소재 (준비 중)
+          <Button
+            variant="outline"
+            render={<Link href={`/${advertiser.id}/extensions`} />}
+          >
+            확장소재
           </Button>
         </CardContent>
       </Card>
