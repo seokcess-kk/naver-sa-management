@@ -1,14 +1,14 @@
 "use server"
 
 /**
- * F-3.1 — 키워드 동기화 (Server Action)
+ * F-3.1 / F-3.2 — 키워드 동기화 + 인라인 편집 (Server Actions)
  *
- * 책임 (SPEC v0.2 F-3.1, line 388):
- *   1. syncKeywords — 광고주의 모든 광고그룹을 순회하며 NAVER SA listKeywords → DB upsert
+ * 책임:
+ *   1. syncKeywords        — 광고주의 모든 광고그룹을 순회하며 NAVER SA listKeywords → DB upsert (F-3.1)
+ *   2. bulkUpdateKeywords  — 인라인 편집 staging 누적분의 일괄 적용 (F-3.2)
  *
  * 본 PR 범위 X (별도 ID로 분리):
- *   - F-3.2 인라인 편집 (staging 누적 → 미리보기 → 확정)
- *   - F-3.3 일괄 액션 (toggle/bid/useGroupBidAmt 등)
+ *   - F-3.3 다중 선택 일괄 액션 (toggle/bid/useGroupBidAmt 등 — Action 단위 단순 형태)
  *   - F-3.4 / F-3.5 CSV 내보내기/가져오기
  *   - F-3.6 키워드 생성
  *   - F-3.7 단건 삭제 (admin + 2차 확인)
@@ -43,11 +43,17 @@
  */
 
 import { revalidatePath } from "next/cache"
+import { z } from "zod"
 
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
-import { listKeywords, type Keyword as SaKeyword } from "@/lib/naver-sa/keywords"
+import {
+  listKeywords,
+  updateKeywordsBulk,
+  type Keyword as SaKeyword,
+  type KeywordBulkUpdateItem,
+} from "@/lib/naver-sa/keywords"
 import { NaverSaError } from "@/lib/naver-sa/errors"
 import type {
   KeywordStatus,
@@ -279,6 +285,370 @@ export async function syncKeywords(
     skipped,
     durationMs: Date.now() - start,
   }
+}
+
+// =============================================================================
+// 2. bulkUpdateKeywords — 인라인 편집 staging 일괄 적용 (F-3.2)
+// =============================================================================
+//
+// UI 흐름 (CLAUDE.md / SPEC F-3.2):
+//   - 사용자가 셀 편집(bidAmt / useGroupBidAmt / userLock) → 클라이언트 staging 누적
+//   - "변경 검토" 모달 → 미리보기 → 확정
+//   - 확정 시 staging 의 patch 배열을 그대로 본 액션에 전달 (단일 action 호출)
+//
+// 다중 선택 일괄 액션(F-3.3) 과의 차이:
+//   - F-3.3 은 action 단위(toggle/bid/...) — 모든 row 동일 필드 변경
+//   - F-3.2 는 row 마다 변경 필드 조합이 다름 (한 행은 bidAmt, 다른 행은 userLock 등)
+//   - SA `?fields=` 쿼리는 단일 호출에 union 으로 명시 (예: "bidAmt,userLock")
+//   - update 시 patch 에 명시되지 않은 필드는 SA 가 변경하지 않음 (fields 누락 효과)
+
+const bulkUpdateKeywordsSchema = z.object({
+  items: z
+    .array(
+      z
+        .object({
+          keywordId: z.string().min(1), // 앱 DB Keyword.id
+          bidAmt: z.number().int().min(0).nullable().optional(),
+          useGroupBidAmt: z.boolean().optional(),
+          userLock: z.boolean().optional(),
+        })
+        // 각 item 에 patch 필드 최소 1개 — 빈 변경 항목 차단
+        .refine(
+          (v) =>
+            v.bidAmt !== undefined ||
+            v.useGroupBidAmt !== undefined ||
+            v.userLock !== undefined,
+          {
+            message:
+              "bidAmt / useGroupBidAmt / userLock 중 최소 하나의 필드 필요",
+          },
+        ),
+    )
+    .min(1)
+    .max(500),
+})
+
+export type BulkUpdateKeywordsInput = z.infer<typeof bulkUpdateKeywordsSchema>
+
+export type BulkUpdateKeywordItemResult = {
+  keywordId: string
+  ok: boolean
+  error?: string
+}
+
+export type BulkUpdateKeywordsResult = {
+  batchId: string
+  total: number
+  success: number
+  failed: number
+  items: BulkUpdateKeywordItemResult[]
+}
+
+type DbKeywordSnapshot = {
+  id: string
+  nccKeywordId: string
+  keyword: string
+  bidAmt: number | null
+  useGroupBidAmt: boolean
+  userLock: boolean
+  status: KeywordStatus
+}
+
+/** 단건 staging patch — schema 와 동일하나 keywordId 제외(맵 값으로 사용). */
+type KeywordPatch = {
+  bidAmt?: number | null
+  useGroupBidAmt?: boolean
+  userLock?: boolean
+}
+
+/**
+ * 인라인 편집 staging 일괄 적용.
+ *
+ *   1. getCurrentAdvertiser — 권한 검증 + 광고주 객체
+ *   2. Zod 검증 (items 배열 / 각 item 에 patch 필드 최소 1개)
+ *   3. keywordId 중복은 마지막 항목으로 dedup (idempotencyKey unique 충족)
+ *   4. 대상 키워드 광고주 한정 조회 (adgroup.campaign.advertiserId join)
+ *   5. ChangeBatch (status='running') 생성 + ChangeItem 일괄 생성
+ *      - before/after 는 patch 에 등장한 필드만 기록 (변경 안 한 컬럼은 비교 대상 X)
+ *      - idempotencyKey = `${batchId}:${nccKeywordId}` (ChangeItem unique 제약 충족)
+ *   6. fields 쿼리 union 산출 (items 전체에서 등장한 필드의 합집합)
+ *   7. updateKeywordsBulk(customerId, items, fields) — 단일 PUT
+ *   8. 응답 매핑: 성공 → DB update + ChangeItem='done'. 누락/예외 → 'failed'
+ *      - patch 에 없는 필드는 DB update 에서도 빼서 기존값 유지
+ *   9. ChangeBatch finalize (success>0 → done, 0 → failed) + finishedAt
+ *  10. AuditLog 1건 (요약, 시크릿 X — raw 응답 통째 첨부 금지)
+ *  11. revalidatePath
+ *
+ * 반환: UI 가 keywordId → row.nccKeywordId 매핑하여 BulkActionResult 형태로 변환.
+ */
+export async function bulkUpdateKeywords(
+  advertiserId: string,
+  input: BulkUpdateKeywordsInput,
+): Promise<BulkUpdateKeywordsResult> {
+  const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    throw new Error("API 키/시크릿 미입력")
+  }
+
+  const parsed = bulkUpdateKeywordsSchema.parse(input)
+
+  // -- 입력 정규화: keywordId 중복은 마지막 항목으로 대체 ---------------------
+  // (idempotencyKey unique 제약 충돌 방지 — F-2.2 광고그룹 패턴과 동일)
+  const patchByKeywordId = new Map<string, KeywordPatch>()
+  for (const it of parsed.items) {
+    const patch: KeywordPatch = {}
+    if (it.bidAmt !== undefined) patch.bidAmt = it.bidAmt
+    if (it.useGroupBidAmt !== undefined) patch.useGroupBidAmt = it.useGroupBidAmt
+    if (it.userLock !== undefined) patch.userLock = it.userLock
+    patchByKeywordId.set(it.keywordId, patch)
+  }
+  const keywordIds = Array.from(patchByKeywordId.keys())
+
+  // -- 대상 키워드 광고주 한정 조회 (adgroup → campaign → advertiserId join) --
+  const dbKeywords = await prisma.keyword.findMany({
+    where: {
+      adgroup: { campaign: { advertiserId } }, // 광고주 횡단 차단
+      id: { in: keywordIds },
+    },
+    select: {
+      id: true,
+      nccKeywordId: true,
+      keyword: true,
+      bidAmt: true,
+      useGroupBidAmt: true,
+      userLock: true,
+      status: true,
+    },
+  })
+
+  if (dbKeywords.length !== keywordIds.length) {
+    throw new Error("일부 키워드가 광고주 소속이 아닙니다")
+  }
+
+  const beforeMap = new Map<string, DbKeywordSnapshot>(
+    dbKeywords.map((k) => [
+      k.id,
+      {
+        id: k.id,
+        nccKeywordId: k.nccKeywordId,
+        keyword: k.keyword,
+        bidAmt: k.bidAmt === null ? null : Number(k.bidAmt),
+        useGroupBidAmt: k.useGroupBidAmt,
+        userLock: k.userLock,
+        status: k.status,
+      },
+    ]),
+  )
+
+  // -- ChangeBatch 생성 -------------------------------------------------------
+  const action = "keyword.inline_update"
+  const total = keywordIds.length
+
+  const batch = await prisma.changeBatch.create({
+    data: {
+      userId: user.id,
+      action,
+      status: "running",
+      total,
+      processed: 0,
+      attempt: 1,
+      summary: { advertiserId, action, total },
+    },
+  })
+
+  // -- SA API 호출용 payload + ChangeItem before/after ------------------------
+  // before/after 는 patch 에 등장한 필드만 기록 (변경 안 한 필드는 의미 없으므로 제외).
+  // 이 약속은 추후 F-6.4 롤백에서도 동일하게 활용된다.
+  const itemsForApi: KeywordBulkUpdateItem[] = []
+  const fieldUnion = new Set<"bidAmt" | "useGroupBidAmt" | "userLock">()
+
+  type ChangeItemSeed = {
+    batchId: string
+    targetType: string
+    targetId: string
+    before: Prisma.InputJsonValue
+    after: Prisma.InputJsonValue
+    idempotencyKey: string
+    status: "pending"
+  }
+  const changeItemData: ChangeItemSeed[] = keywordIds.map((kid) => {
+    const dbK = beforeMap.get(kid)!
+    const patch = patchByKeywordId.get(kid)!
+
+    const beforeObj: Record<string, unknown> = {}
+    const afterObj: Record<string, unknown> = {}
+
+    if (patch.bidAmt !== undefined) {
+      beforeObj.bidAmt = dbK.bidAmt
+      afterObj.bidAmt = patch.bidAmt
+      fieldUnion.add("bidAmt")
+    }
+    if (patch.useGroupBidAmt !== undefined) {
+      beforeObj.useGroupBidAmt = dbK.useGroupBidAmt
+      afterObj.useGroupBidAmt = patch.useGroupBidAmt
+      fieldUnion.add("useGroupBidAmt")
+    }
+    if (patch.userLock !== undefined) {
+      beforeObj.userLock = dbK.userLock
+      afterObj.userLock = patch.userLock
+      fieldUnion.add("userLock")
+    }
+
+    // SA API 호출 payload — patch 에 등장한 필드만 (fields 쿼리와 일치).
+    // 키워드 단위에서 변경 안 하는 필드를 SA item 에 넣지 않는 이유:
+    //   네이버 SA 의 `?fields=` 가 union 이라 이 row 에는 영향 없는 필드여도
+    //   payload 에 같이 들어가 있으면 응답에 반영될 수 있다 (sample 별 차이 존재).
+    //   안전하게 row 마다 자기가 변경하는 필드만 보낸다.
+    const apiItem: KeywordBulkUpdateItem = { nccKeywordId: dbK.nccKeywordId }
+    if (patch.bidAmt !== undefined) apiItem.bidAmt = patch.bidAmt
+    if (patch.useGroupBidAmt !== undefined)
+      apiItem.useGroupBidAmt = patch.useGroupBidAmt
+    if (patch.userLock !== undefined) apiItem.userLock = patch.userLock
+    itemsForApi.push(apiItem)
+
+    return {
+      batchId: batch.id,
+      targetType: "Keyword",
+      targetId: dbK.nccKeywordId,
+      before: beforeObj as Prisma.InputJsonValue,
+      after: afterObj as Prisma.InputJsonValue,
+      idempotencyKey: `${batch.id}:${dbK.nccKeywordId}`,
+      status: "pending",
+    }
+  })
+
+  await prisma.changeItem.createMany({ data: changeItemData })
+
+  // -- fields 쿼리 산출 (items 전체에서 등장한 필드의 union) ------------------
+  // 빈 fields 는 schema refine 단계에서 차단되지만 안전망으로 한 번 더 검사.
+  if (fieldUnion.size === 0) {
+    await prisma.changeItem.updateMany({
+      where: { batchId: batch.id },
+      data: { status: "failed", error: "변경 필드 없음" },
+    })
+    await prisma.changeBatch.update({
+      where: { id: batch.id },
+      data: { status: "failed", processed: total, finishedAt: new Date() },
+    })
+    throw new Error("변경 필드 없음")
+  }
+  const fields = Array.from(fieldUnion).join(",")
+
+  // -- SA API 호출 ------------------------------------------------------------
+  let success = 0
+  let failed = 0
+  const results: BulkUpdateKeywordItemResult[] = []
+
+  try {
+    const updated = await updateKeywordsBulk(
+      advertiser.customerId,
+      itemsForApi,
+      fields,
+    )
+    const updatedMap = new Map(updated.map((k) => [k.nccKeywordId, k]))
+
+    for (const kid of keywordIds) {
+      const dbK = beforeMap.get(kid)!
+      const patch = patchByKeywordId.get(kid)!
+      const u = updatedMap.get(dbK.nccKeywordId)
+
+      if (u) {
+        // DB 반영 — patch 에 등장한 필드만 update (나머지는 기존값 유지).
+        // status 는 userLock 이 patch 에 있으면 응답 기반으로 재계산.
+        const updateData: {
+          bidAmt?: number | null
+          useGroupBidAmt?: boolean
+          userLock?: boolean
+          status?: KeywordStatus
+          raw: Prisma.InputJsonValue
+        } = {
+          raw: u as unknown as Prisma.InputJsonValue,
+        }
+
+        if (patch.bidAmt !== undefined) {
+          updateData.bidAmt =
+            typeof u.bidAmt === "number" ? u.bidAmt : patch.bidAmt
+        }
+        if (patch.useGroupBidAmt !== undefined) {
+          updateData.useGroupBidAmt =
+            typeof u.useGroupBidAmt === "boolean"
+              ? u.useGroupBidAmt
+              : patch.useGroupBidAmt
+        }
+        if (patch.userLock !== undefined) {
+          updateData.userLock =
+            typeof u.userLock === "boolean" ? u.userLock : patch.userLock
+          // userLock 변경 시 status 재계산 (mapKeywordStatus 재사용 — userLock + status 종합)
+          updateData.status = mapKeywordStatus(u)
+        }
+
+        await prisma.keyword.update({
+          where: { id: dbK.id },
+          data: updateData,
+        })
+        await prisma.changeItem.updateMany({
+          where: { batchId: batch.id, targetId: dbK.nccKeywordId },
+          data: { status: "done" },
+        })
+        success++
+        results.push({ keywordId: kid, ok: true })
+      } else {
+        await prisma.changeItem.updateMany({
+          where: { batchId: batch.id, targetId: dbK.nccKeywordId },
+          data: { status: "failed", error: "응답에 누락" },
+        })
+        failed++
+        results.push({ keywordId: kid, ok: false, error: "응답 누락" })
+      }
+    }
+  } catch (e) {
+    // 일괄 실패 — 모든 ChangeItem failed (raw 응답 통째 첨부 X — 메시지만 마스킹된 형태로)
+    const msg = e instanceof Error ? e.message : String(e)
+    const safeMsg = msg.slice(0, 500)
+    await prisma.changeItem.updateMany({
+      where: { batchId: batch.id },
+      data: { status: "failed", error: safeMsg },
+    })
+    failed = total
+    success = 0
+    results.length = 0
+    for (const kid of keywordIds) {
+      results.push({ keywordId: kid, ok: false, error: safeMsg })
+    }
+  }
+
+  // -- ChangeBatch finalize ---------------------------------------------------
+  // success > 0 이면 done (부분 성공도 done — 실패 항목은 ChangeItem 에 기록).
+  const finalStatus: "done" | "failed" = success === 0 ? "failed" : "done"
+
+  await prisma.changeBatch.update({
+    where: { id: batch.id },
+    data: {
+      status: finalStatus,
+      processed: total,
+      finishedAt: new Date(),
+    },
+  })
+
+  // -- AuditLog 1건 (요약, 시크릿 X — raw 응답 첨부 금지) ---------------------
+  await logAudit({
+    userId: user.id,
+    action,
+    targetType: "ChangeBatch",
+    targetId: batch.id,
+    before: null,
+    after: {
+      batchId: batch.id,
+      advertiserId,
+      total,
+      success,
+      failed,
+    },
+  })
+
+  revalidatePath(`/${advertiserId}/keywords`)
+
+  return { batchId: batch.id, total, success, failed, items: results }
 }
 
 // =============================================================================
