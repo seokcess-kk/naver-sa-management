@@ -83,6 +83,9 @@ export default async function AdminLayout({
             <span className="text-xs text-muted-foreground">
               role: {me.role}
             </span>
+            <Button variant="outline" size="sm" render={<Link href="/" />}>
+              광고운영
+            </Button>
             <form action={logout}>
               <Button type="submit" variant="ghost" size="sm">
                 로그아웃

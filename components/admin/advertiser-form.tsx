@@ -17,7 +17,7 @@
  */
 
 import * as React from "react"
-import { useForm, Controller } from "react-hook-form"
+import { useForm, Controller, useWatch } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 import { useRouter } from "next/navigation"
@@ -26,6 +26,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Card,
   CardContent,
@@ -80,6 +81,7 @@ const createSchema = z
     manager: z.string().max(50, "담당자는 최대 50자입니다").optional(),
     // 쉼표 구분 입력 → 배열 변환은 onSubmit 단계에서 처리
     tags: z.string().max(200, "태그는 최대 200자입니다").optional(),
+    memo: z.string().max(500, "메모는 최대 500자입니다").optional(),
   })
   // 키는 둘 다 입력하거나 둘 다 비워야 함 (한쪽만 있으면 SA 호출 시 인증 실패가 명확함)
   .refine(
@@ -110,6 +112,7 @@ const editSchema = z.object({
   category: z.string().max(50, "카테고리는 최대 50자입니다").optional(),
   manager: z.string().max(50, "담당자는 최대 50자입니다").optional(),
   tags: z.string().max(200, "태그는 최대 200자입니다").optional(),
+  memo: z.string().max(500, "메모는 최대 500자입니다").optional(),
   status: z.enum(["active", "paused", "archived"]),
 })
 
@@ -147,6 +150,7 @@ type EditMode = {
     bizNo?: string | null
     category?: string | null
     manager?: string | null
+    memo?: string | null
     tags?: string[]
     status: "active" | "paused" | "archived"
   }
@@ -176,8 +180,12 @@ function CreateForm() {
       category: "",
       manager: "",
       tags: "",
+      memo: "",
     },
   })
+
+  // memo 길이 카운터 — useWatch 사용 (form.watch 는 React Compiler 비호환)
+  const memoValue = useWatch({ control: form.control, name: "memo" }) ?? ""
 
   const [submitting, setSubmitting] = React.useState(false)
 
@@ -193,6 +201,7 @@ function CreateForm() {
         bizNo: values.bizNo || undefined,
         category: values.category || undefined,
         manager: values.manager || undefined,
+        memo: values.memo || undefined,
         ...(tags ? { tags } : {}),
       }
       if (values.apiKey && values.secretKey) {
@@ -316,6 +325,12 @@ function CreateForm() {
           >
             <Input {...form.register("tags")} autoComplete="off" />
           </Field>
+
+          <MemoField
+            registerProps={form.register("memo")}
+            currentValue={memoValue}
+            error={form.formState.errors.memo?.message}
+          />
         </CardContent>
         <CardFooter className="justify-end gap-2">
           <Button
@@ -348,9 +363,13 @@ function EditForm({ id, defaultValues }: EditMode) {
       category: defaultValues.category ?? "",
       manager: defaultValues.manager ?? "",
       tags: (defaultValues.tags ?? []).join(", "),
+      memo: defaultValues.memo ?? "",
       status: defaultValues.status,
     },
   })
+
+  // memo 길이 카운터 — useWatch 사용 (React Compiler 호환)
+  const memoValue = useWatch({ control: form.control, name: "memo" }) ?? ""
 
   const [submitting, setSubmitting] = React.useState(false)
 
@@ -363,6 +382,7 @@ function EditForm({ id, defaultValues }: EditMode) {
         bizNo: values.bizNo || undefined,
         category: values.category || undefined,
         manager: values.manager || undefined,
+        memo: values.memo || undefined,
         status: values.status,
       }
       // 빈 시크릿은 backend 시그니처상 "변경 안 함" — 굳이 보내지 않음
@@ -381,6 +401,7 @@ function EditForm({ id, defaultValues }: EditMode) {
         category: values.category ?? "",
         manager: values.manager ?? "",
         tags: values.tags ?? "",
+        memo: values.memo ?? "",
         status: values.status,
       })
       router.refresh()
@@ -471,6 +492,12 @@ function EditForm({ id, defaultValues }: EditMode) {
             <Input {...form.register("tags")} autoComplete="off" />
           </Field>
 
+          <MemoField
+            registerProps={form.register("memo")}
+            currentValue={memoValue}
+            error={form.formState.errors.memo?.message}
+          />
+
           <Field
             label="상태"
             error={form.formState.errors.status?.message}
@@ -514,6 +541,74 @@ function EditForm({ id, defaultValues }: EditMode) {
         </CardFooter>
       </form>
     </Card>
+  )
+}
+
+// =====================================================================
+// MemoField — create / edit 양쪽에서 사용. 500자 카운터 표시.
+// =====================================================================
+// create / edit 폼이 서로 다른 generic 타입을 갖지만 register("memo") /
+// 값 구독 인터페이스는 동일.
+//
+// React Compiler 호환:
+//   - form.watch 는 컴파일러가 메모이즈 못 함 (incompatible-library 경고)
+//   - useWatch 는 안전. control 만 받아 자체 구독.
+//
+// Control<any> 는 RHF v7 의 ValidateForm 제네릭과 호환 안 됨 → ValueWatcher 패턴:
+//   호출부에서 useWatch 결과를 props 로 내려주는 대신, MemoField 가 ref 대신
+//   "현재 값 컴포넌트" 를 별도로 분리해 Subscribe 만 한다.
+//
+// 더 단순한 방법: MemoField 내부에서 Watcher 컴포넌트를 자식으로 두고,
+// 호출부는 control 만 넘김. 호출부의 generic 충돌 없도록 control 는
+// React.ComponentProps<typeof useWatch>['control'] 의 ANY 호환 타입을 받는 대신,
+// useWatch 호출 자체를 호출부에서 끝내고 string 만 props 로 전달한다.
+//
+// 다시 설계: useWatch 를 호출부 (CreateForm/EditForm) 에서 직접 호출 → string 을 props 로 전달.
+// 호출부에서는 useForm 의 정확한 generic 으로 useWatch 가 정상 추론되므로 충돌 없음.
+type MemoFieldProps = {
+  // RHF register 반환 props (name, onChange, onBlur, ref) — Textarea 에 그대로 spread
+  registerProps: ReturnType<
+    ReturnType<typeof useForm<{ memo?: string }>>["register"]
+  >
+  /** 현재 메모 길이 표시용 — 호출부에서 useWatch 로 구독한 결과 전달 */
+  currentValue: string
+  error?: string
+}
+
+function MemoField({ registerProps, currentValue, error }: MemoFieldProps) {
+  const len = currentValue.length
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label>
+        메모
+        <span className="ml-1 text-xs font-normal text-muted-foreground">
+          (선택)
+        </span>
+      </Label>
+      <Textarea
+        {...registerProps}
+        placeholder="내부 메모 (선택)"
+        maxLength={500}
+        rows={3}
+        spellCheck={false}
+      />
+      <div className="flex items-center justify-between gap-2">
+        {error ? (
+          <p className="text-xs text-destructive">{error}</p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            최대 500자. 운영 메모, 협력사 코멘트 등.
+          </p>
+        )}
+        <span
+          className={`text-xs tabular-nums ${
+            len > 500 ? "text-destructive" : "text-muted-foreground"
+          }`}
+        >
+          {len}/500
+        </span>
+      </div>
+    </div>
   )
 }
 

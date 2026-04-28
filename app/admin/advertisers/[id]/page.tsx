@@ -133,6 +133,22 @@ export default async function AdvertiserDetailPage({
         </Card>
       )}
 
+      {advertiser.memo ? (
+        <Card>
+          <CardHeader className="border-b">
+            <CardTitle>메모</CardTitle>
+            <CardDescription>
+              내부 메모. 수정은 아래 폼의 “메모” 필드에서 진행.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="py-4">
+            <p className="whitespace-pre-wrap text-sm text-foreground">
+              {advertiser.memo}
+            </p>
+          </CardContent>
+        </Card>
+      ) : null}
+
       <AdvertiserForm
         mode="edit"
         id={advertiser.id}
@@ -142,6 +158,7 @@ export default async function AdvertiserDetailPage({
           bizNo: advertiser.bizNo,
           category: advertiser.category,
           manager: advertiser.manager,
+          memo: advertiser.memo,
           tags: advertiser.tags,
           status: advertiser.status,
         }}

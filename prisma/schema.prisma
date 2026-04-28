@@ -165,7 +165,7 @@ model Advertiser {
   bizNo            String?
   category         String?
   manager          String?
-  memo             String?
+  memo             String?          @db.VarChar(500) // 자유 메모 (선택, max 500자)
   tags             String[]         @default([])
   status           AdvertiserStatus @default(active)
   // 모델 2: 광고주별 API 키·시크릿. F-1.2(CSV 일괄 등록)는 메타만 등록하고

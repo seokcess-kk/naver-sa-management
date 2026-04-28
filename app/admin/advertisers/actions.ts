@@ -53,6 +53,7 @@ const nameSchema = z.string().trim().min(1).max(100)
 const bizNoSchema = z.string().trim().max(20).optional()
 const categorySchema = z.string().trim().max(100).optional()
 const managerSchema = z.string().trim().max(100).optional()
+const memoSchema = z.string().trim().max(500).optional()
 const tagsSchema = z.array(z.string().trim().min(1).max(50)).max(50).optional()
 const statusSchema = z.enum(["active", "paused", "archived"])
 
@@ -73,6 +74,7 @@ const registerSchema = z
     bizNo: bizNoSchema,
     category: categorySchema,
     manager: managerSchema,
+    memo: memoSchema,
     tags: tagsSchema,
   })
   .superRefine((val, ctx) => {
@@ -95,6 +97,7 @@ const updateSchema = z
     bizNo: bizNoSchema,
     category: categorySchema,
     manager: managerSchema,
+    memo: memoSchema,
     tags: tagsSchema,
     status: statusSchema.optional(),
   })
@@ -118,6 +121,7 @@ const bulkRowSchema = z.object({
   bizNo: bizNoSchema,
   category: categorySchema,
   manager: managerSchema,
+  memo: memoSchema,
   tags: tagsSchema,
 })
 
@@ -133,6 +137,7 @@ export async function registerAdvertiser(input: {
   bizNo?: string
   category?: string
   manager?: string
+  memo?: string
   tags?: string[]
 }): Promise<{ id: string }> {
   const me = await assertRole("admin")
@@ -162,6 +167,7 @@ export async function registerAdvertiser(input: {
     bizNo: string | null
     category: string | null
     manager: string | null
+    memo: string | null
     tags: string[]
     status: "active"
   } = {
@@ -170,6 +176,7 @@ export async function registerAdvertiser(input: {
     bizNo: parsed.bizNo ?? null,
     category: parsed.category ?? null,
     manager: parsed.manager ?? null,
+    memo: parsed.memo ?? null,
     tags: parsed.tags ?? [],
     status: "active",
   }
@@ -200,6 +207,7 @@ export async function registerAdvertiser(input: {
       bizNo: parsed.bizNo ?? null,
       category: parsed.category ?? null,
       manager: parsed.manager ?? null,
+      memo: parsed.memo ?? null,
       tags: parsed.tags ?? [],
       hasCredentials,
     },
@@ -223,6 +231,7 @@ export async function updateAdvertiser(
     bizNo?: string
     category?: string
     manager?: string
+    memo?: string
     tags?: string[]
     status?: AdvertiserStatus
   },
@@ -239,6 +248,7 @@ export async function updateAdvertiser(
       bizNo: true,
       category: true,
       manager: true,
+      memo: true,
       tags: true,
       status: true,
     },
@@ -253,6 +263,7 @@ export async function updateAdvertiser(
   if (parsed.bizNo !== undefined) data.bizNo = parsed.bizNo || null
   if (parsed.category !== undefined) data.category = parsed.category || null
   if (parsed.manager !== undefined) data.manager = parsed.manager || null
+  if (parsed.memo !== undefined) data.memo = parsed.memo || null
   if (parsed.tags !== undefined) data.tags = parsed.tags
   if (parsed.status !== undefined) data.status = parsed.status
 
@@ -289,6 +300,7 @@ export async function updateAdvertiser(
       bizNo: before.bizNo,
       category: before.category,
       manager: before.manager,
+      memo: before.memo,
       tags: before.tags,
       status: before.status,
     },
@@ -299,6 +311,7 @@ export async function updateAdvertiser(
       category:
         parsed.category !== undefined ? parsed.category || null : before.category,
       manager: parsed.manager !== undefined ? parsed.manager || null : before.manager,
+      memo: parsed.memo !== undefined ? parsed.memo || null : before.memo,
       tags: parsed.tags ?? before.tags,
       status: parsed.status ?? before.status,
       apiKeyChanged,
@@ -420,6 +433,7 @@ export type BulkAdvertiserInput = {
   bizNo?: string
   category?: string
   manager?: string
+  memo?: string
   tags?: string[]
 }
 
@@ -549,6 +563,7 @@ export async function registerAdvertisersBulk(input: {
           bizNo: r.bizNo ?? null,
           category: r.category ?? null,
           manager: r.manager ?? null,
+          memo: r.memo ?? null,
           tags: r.tags ?? [],
           status: "active" as const,
           // apiKeyEnc / secretKeyEnc 는 누락 = null (nullable 컬럼)

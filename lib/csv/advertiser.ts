@@ -31,6 +31,7 @@ export type BulkAdvertiserInput = {
   bizNo?: string
   category?: string
   manager?: string
+  memo?: string
   tags?: string[]
 }
 
@@ -75,6 +76,16 @@ export const advertiserCsvSchema = z.object({
   bizNo: optionalTrimmed(20),
   category: optionalTrimmed(50),
   manager: optionalTrimmed(50),
+  memo: z
+    .string()
+    .max(500, "메모는 최대 500자입니다")
+    .optional()
+    .or(z.literal("").transform(() => undefined))
+    .transform((v) => {
+      if (v === undefined) return undefined
+      const trimmed = v.trim()
+      return trimmed.length === 0 ? undefined : trimmed
+    }),
   // CSV 의 tags 셀: "신규,VIP" 또는 "신규;VIP" → 배열
   tags: z
     .string()
@@ -102,6 +113,7 @@ export const ADVERTISER_CSV_HEADERS = [
   "bizNo",
   "category",
   "manager",
+  "memo",
   "tags",
 ] as const
 
@@ -208,6 +220,7 @@ export async function parseAdvertiserCsv(
       bizNo: raw.bizNo ?? "",
       category: raw.category ?? "",
       manager: raw.manager ?? "",
+      memo: raw.memo ?? "",
       tags: raw.tags ?? "",
     })
 
@@ -232,6 +245,7 @@ export async function parseAdvertiserCsv(
     if (v.bizNo) data.bizNo = v.bizNo
     if (v.category) data.category = v.category
     if (v.manager) data.manager = v.manager
+    if (v.memo) data.memo = v.memo
     if (v.tags && v.tags.length > 0) data.tags = v.tags
 
     out.push({ ok: true, row: rowNumber, data })
