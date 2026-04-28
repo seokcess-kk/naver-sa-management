@@ -37,6 +37,12 @@ async function resolve(customerId: string): Promise<NaverSaCredentials> {
     )
   }
 
+  // 키 미입력 광고주 차단 (F-1.2: CSV 메타 등록 후 시크릿 입력 전 상태).
+  // apiKeyEnc / secretKeyEnc 가 nullable 이므로 narrow 후 Buffer.from 호출.
+  if (advertiser.apiKeyEnc === null || advertiser.secretKeyEnc === null) {
+    throw new Error(`Credentials not set for customerId=${customerId}`)
+  }
+
   // Prisma Bytes 컬럼 → Buffer 로 감싸서 decrypt 호출 (컨벤션 #2)
   const apiKey = decrypt(Buffer.from(advertiser.apiKeyEnc), advertiser.apiKeyVersion)
   const secretKey = decrypt(

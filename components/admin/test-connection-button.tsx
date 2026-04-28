@@ -19,14 +19,21 @@ export function TestConnectionButton({
   id,
   variant = "outline",
   size = "sm",
+  hasKeys = true,
 }: {
   id: string
   variant?: "default" | "outline" | "secondary" | "ghost"
   size?: "default" | "sm" | "lg"
+  /** 키 미설정 광고주는 SA API 호출 자체가 의미 없음 → 클릭 시 토스트만 (disable 대신 안내) */
+  hasKeys?: boolean
 }) {
   const [pending, startTransition] = React.useTransition()
 
   function handleClick() {
+    if (!hasKeys) {
+      toast.error("키 미설정 — API 키 / Secret 키를 먼저 입력하세요")
+      return
+    }
     startTransition(async () => {
       try {
         const res = await testConnection(id)
@@ -49,7 +56,8 @@ export function TestConnectionButton({
       variant={variant}
       size={size}
       onClick={handleClick}
-      disabled={pending}
+      disabled={pending || !hasKeys}
+      title={!hasKeys ? "키 미설정 — 먼저 API 키 / Secret 키 입력" : undefined}
     >
       {pending ? "확인 중..." : "테스트 연결"}
     </Button>

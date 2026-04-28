@@ -168,10 +168,13 @@ model Advertiser {
   memo             String?
   tags             String[]         @default([])
   status           AdvertiserStatus @default(active)
-  // 모델 2: 광고주별 API 키·시크릿 (필수). 키 없으면 SA API 호출 불가.
-  apiKeyEnc        Bytes
+  // 모델 2: 광고주별 API 키·시크릿. F-1.2(CSV 일괄 등록)는 메타만 등록하고
+  // 시크릿은 별도 화면에서 입력 → enc 컬럼은 nullable.
+  // 키가 null이면 SA API 호출 불가 (credentials.ts에서 "Credentials not set" throw).
+  // 버전 컬럼은 default 1 유지 (enc 채워질 때 의미 발생).
+  apiKeyEnc        Bytes?
   apiKeyVersion    Int              @default(1)
-  secretKeyEnc     Bytes
+  secretKeyEnc     Bytes?
   secretKeyVersion Int              @default(1)
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt

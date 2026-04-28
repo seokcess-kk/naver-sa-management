@@ -51,30 +51,44 @@ import {
 // =====================================================================
 
 // backend Zod 와 정확히 일치시킴. UI에서도 즉시 피드백을 위해 동일 규칙 복제.
-const createSchema = z.object({
-  name: z
-    .string()
-    .min(1, "표시명을 입력하세요")
-    .max(100, "표시명은 최대 100자입니다"),
-  customerId: z
-    .string()
-    .regex(/^\d+$/u, "customerId는 숫자만 입력 가능합니다")
-    .min(4, "customerId는 최소 4자입니다")
-    .max(20, "customerId는 최대 20자입니다"),
-  apiKey: z
-    .string()
-    .min(20, "API 키는 최소 20자입니다")
-    .max(512, "API 키는 최대 512자입니다"),
-  secretKey: z
-    .string()
-    .min(20, "Secret 키는 최소 20자입니다")
-    .max(2048, "Secret 키는 최대 2048자입니다"),
-  bizNo: z.string().max(20, "사업자번호는 최대 20자입니다").optional(),
-  category: z.string().max(50, "카테고리는 최대 50자입니다").optional(),
-  manager: z.string().max(50, "담당자는 최대 50자입니다").optional(),
-  // 쉼표 구분 입력 → 배열 변환은 onSubmit 단계에서 처리
-  tags: z.string().max(200, "태그는 최대 200자입니다").optional(),
-})
+//
+// F-1.2 모델 2 변경: 키는 **선택적** (CSV 일괄 등록과 동일한 흐름 — 메타만 등록 후
+// 시크릿은 나중에 별도 입력). 단, 한쪽만 입력 시 거부 (refine).
+const createSchema = z
+  .object({
+    name: z
+      .string()
+      .min(1, "표시명을 입력하세요")
+      .max(100, "표시명은 최대 100자입니다"),
+    customerId: z
+      .string()
+      .regex(/^\d+$/u, "customerId는 숫자만 입력 가능합니다")
+      .min(4, "customerId는 최소 4자입니다")
+      .max(20, "customerId는 최대 20자입니다"),
+    apiKey: z
+      .string()
+      .refine((v) => v === "" || (v.length >= 20 && v.length <= 512), {
+        message: "API 키는 20~512자여야 합니다",
+      }),
+    secretKey: z
+      .string()
+      .refine((v) => v === "" || (v.length >= 20 && v.length <= 2048), {
+        message: "Secret 키는 20~2048자여야 합니다",
+      }),
+    bizNo: z.string().max(20, "사업자번호는 최대 20자입니다").optional(),
+    category: z.string().max(50, "카테고리는 최대 50자입니다").optional(),
+    manager: z.string().max(50, "담당자는 최대 50자입니다").optional(),
+    // 쉼표 구분 입력 → 배열 변환은 onSubmit 단계에서 처리
+    tags: z.string().max(200, "태그는 최대 200자입니다").optional(),
+  })
+  // 키는 둘 다 입력하거나 둘 다 비워야 함 (한쪽만 있으면 SA 호출 시 인증 실패가 명확함)
+  .refine(
+    (v) => (v.apiKey === "" && v.secretKey === "") || (v.apiKey !== "" && v.secretKey !== ""),
+    {
+      message: "API 키와 Secret 키는 함께 입력하거나 함께 비워두세요",
+      path: ["secretKey"],
+    },
+  )
 
 const editSchema = z.object({
   name: z
@@ -171,18 +185,28 @@ function CreateForm() {
     setSubmitting(true)
     try {
       const tags = parseTags(values.tags)
-      const result = await registerAdvertiser({
+      // 키는 선택적 — 둘 다 입력했을 때만 backend 로 전달.
+      // refine 으로 "한쪽만 입력" 케이스는 폼 단계에서 차단됨.
+      const payload: Parameters<typeof registerAdvertiser>[0] = {
         name: values.name,
         customerId: values.customerId,
-        apiKey: values.apiKey,
-        secretKey: values.secretKey,
         bizNo: values.bizNo || undefined,
         category: values.category || undefined,
         manager: values.manager || undefined,
         ...(tags ? { tags } : {}),
-      })
-      toast.success(`광고주 등록 완료 (${result.id})`)
-      router.push("/admin/advertisers")
+      }
+      if (values.apiKey && values.secretKey) {
+        payload.apiKey = values.apiKey
+        payload.secretKey = values.secretKey
+      }
+      const result = await registerAdvertiser(payload)
+      const noKey = !values.apiKey && !values.secretKey
+      toast.success(
+        noKey
+          ? `광고주 등록 완료 (키 미설정 — 상세에서 입력)`
+          : `광고주 등록 완료 (${result.id})`,
+      )
+      router.push(noKey ? `/admin/advertisers/${result.id}` : "/admin/advertisers")
       router.refresh()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -196,7 +220,8 @@ function CreateForm() {
       <CardHeader className="border-b">
         <CardTitle>새 광고주 등록</CardTitle>
         <CardDescription>
-          네이버 검색광고 광고주의 customerId, API 키, Secret 키를 입력하세요.
+          네이버 검색광고 광고주의 customerId 와 메타정보를 입력하세요. API 키 /
+          Secret 키는 선택입니다 — 비워두고 등록 후 상세에서 입력해도 됩니다.
           시크릿은 AES-256-GCM 으로 암호화되어 저장됩니다.
         </CardDescription>
       </CardHeader>
@@ -231,27 +256,28 @@ function CreateForm() {
           <Field
             label="API 키"
             error={form.formState.errors.apiKey?.message}
-            required
+            hint="선택. 비워두면 키 미설정으로 등록 (CSV 일괄 등록과 동일 흐름)"
           >
             <Input
               {...form.register("apiKey")}
               type="password"
               autoComplete="new-password"
               spellCheck={false}
+              placeholder="(선택)"
             />
           </Field>
 
           <Field
             label="Secret 키"
             error={form.formState.errors.secretKey?.message}
-            required
-            hint="저장 후에는 화면에 다시 표시되지 않습니다."
+            hint="선택. API 키와 함께 입력하거나 함께 비워두세요. 저장 후에는 화면에 다시 표시되지 않습니다."
           >
             <Input
               {...form.register("secretKey")}
               type="password"
               autoComplete="new-password"
               spellCheck={false}
+              placeholder="(선택)"
             />
           </Field>
 

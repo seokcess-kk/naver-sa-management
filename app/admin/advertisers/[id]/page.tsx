@@ -2,8 +2,9 @@
  * 광고주 상세·수정·삭제 페이지 (모델 2)
  *
  * - admin 전용
- * - 시크릿(apiKeyEnc/secretKeyEnc)은 절대 화면 / props 로 노출 X (DB 에서 가져오지도 않음).
- *   수정 시에만 새 값 입력. 빈 값은 변경 안 함.
+ * - 시크릿 평문 / Bytes 자체는 절대 화면 / props 로 노출 X.
+ *   "키 설정 여부" 판정용 boolean(hasApiKey/hasSecretKey) 만 RSC 에서 파생.
+ * - 수정 시에만 새 값 입력. 빈 값은 변경 안 함.
  * - 테스트 연결 / 삭제 버튼 포함
  */
 
@@ -22,6 +23,7 @@ import {
 import { AdvertiserForm } from "@/components/admin/advertiser-form"
 import { TestConnectionButton } from "@/components/admin/test-connection-button"
 import { DeleteAdvertiserButton } from "@/components/admin/delete-advertiser-button"
+import { KeyStatusBadge } from "@/components/admin/key-status-badge"
 
 function formatDate(d: Date) {
   return new Intl.DateTimeFormat("ko-KR", {
@@ -41,9 +43,9 @@ export default async function AdvertiserDetailPage({
 }) {
   const { id } = await params
 
-  // 시크릿 컬럼(apiKeyEnc/secretKeyEnc/apiKeyVersion/secretKeyVersion)은
-  // select 에서 명시적으로 제외 — UI 로 가져오지 않음.
-  const advertiser = await prisma.advertiser.findUnique({
+  // 시크릿 자체(apiKeyEnc / secretKeyEnc 의 바이트 값) 는 클라이언트에 노출 X.
+  // 단, 키 설정 여부(null 인지) 는 UI 배지·테스트 연결 비활성화에 필요 → 즉시 boolean 으로 변환.
+  const row = await prisma.advertiser.findUnique({
     where: { id },
     select: {
       id: true,
@@ -57,10 +59,29 @@ export default async function AdvertiserDetailPage({
       status: true,
       createdAt: true,
       updatedAt: true,
+      apiKeyEnc: true,
+      secretKeyEnc: true,
     },
   })
 
-  if (!advertiser) notFound()
+  if (!row) notFound()
+
+  const advertiser = {
+    id: row.id,
+    name: row.name,
+    customerId: row.customerId,
+    bizNo: row.bizNo,
+    category: row.category,
+    manager: row.manager,
+    memo: row.memo,
+    tags: row.tags,
+    status: row.status,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    hasApiKey: row.apiKeyEnc !== null,
+    hasSecretKey: row.secretKeyEnc !== null,
+  }
+  const hasKeys = advertiser.hasApiKey && advertiser.hasSecretKey
 
   return (
     <div className="flex flex-col gap-6 max-w-2xl">
@@ -74,6 +95,12 @@ export default async function AdvertiserDetailPage({
             <span className="font-mono">{advertiser.customerId}</span> · 상태{" "}
             {advertiser.status} · 등록 {formatDate(advertiser.createdAt)}
           </p>
+          <div className="mt-2">
+            <KeyStatusBadge
+              hasApiKey={advertiser.hasApiKey}
+              hasSecretKey={advertiser.hasSecretKey}
+            />
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -86,9 +113,25 @@ export default async function AdvertiserDetailPage({
             id={advertiser.id}
             variant="outline"
             size="default"
+            hasKeys={hasKeys}
           />
         </div>
       </div>
+
+      {!hasKeys && (
+        <Card>
+          <CardHeader className="border-b">
+            <CardTitle className="text-amber-700 dark:text-amber-400">
+              키 미설정
+            </CardTitle>
+            <CardDescription>
+              API 키 / Secret 키를 입력하면 SA API 호출(테스트 연결, 동기화 등)이
+              활성화됩니다. 아래 폼의 “API 키” / “Secret 키” 필드에 입력 후
+              저장하세요.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
 
       <AdvertiserForm
         mode="edit"

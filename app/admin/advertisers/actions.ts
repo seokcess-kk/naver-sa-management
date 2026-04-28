@@ -1,11 +1,14 @@
 "use server"
 
 /**
- * 광고주 등록 / 수정 / 삭제 / 연결 테스트 — Server Actions (모델 2)
+ * 광고주 등록 / 수정 / 삭제 / 연결 테스트 / CSV 일괄 등록 — Server Actions (모델 2)
  *
  * 정책:
  *   - admin 권한 필수 (모든 액션 진입부 assertRole("admin"))
  *   - 시크릿(apiKey / secretKey)은 AES-256-GCM 암호화 후 Bytes 컬럼에 저장
+ *   - F-1.2: 시크릿은 CSV 일괄 등록에 포함 X. 메타만 등록하고 시크릿은 별도 입력.
+ *     → registerAdvertiser 단건도 일관성 위해 키 optional. 단 apiKey ↔ secretKey 페어 검증.
+ *   - 키 미입력 광고주는 SA API 호출 차단 (credentials.ts에서 "Credentials not set" throw)
  *   - AuditLog 기록 (before/after — 시크릿 평문 절대 X, logAudit 가 추가 마스킹도 수행)
  *   - 본 작업은 외부 API 변경 X → ChangeBatch 미사용
  *   - 응답 객체에 평문 시크릿 절대 포함 X
@@ -53,37 +56,80 @@ const managerSchema = z.string().trim().max(100).optional()
 const tagsSchema = z.array(z.string().trim().min(1).max(50)).max(50).optional()
 const statusSchema = z.enum(["active", "paused", "archived"])
 
-const registerSchema = z.object({
+/**
+ * 키 페어 검증 — apiKey ↔ secretKey 는 항상 함께. 한쪽만 있으면 검증 실패.
+ * 빈 문자열은 "미입력" 으로 간주 (UI form 에서 빈 input 으로 들어올 수 있음).
+ */
+function isProvided(v: string | undefined | null): v is string {
+  return typeof v === "string" && v.trim().length > 0
+}
+
+const registerSchema = z
+  .object({
+    name: nameSchema,
+    customerId: customerIdSchema,
+    apiKey: apiKeySchema.optional(),
+    secretKey: secretKeySchema.optional(),
+    bizNo: bizNoSchema,
+    category: categorySchema,
+    manager: managerSchema,
+    tags: tagsSchema,
+  })
+  .superRefine((val, ctx) => {
+    const hasApi = isProvided(val.apiKey)
+    const hasSec = isProvided(val.secretKey)
+    if (hasApi !== hasSec) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["apiKey"],
+        message: "apiKey와 secretKey는 함께 입력해야 합니다",
+      })
+    }
+  })
+
+const updateSchema = z
+  .object({
+    name: nameSchema.optional(),
+    apiKey: z.string().optional(),
+    secretKey: z.string().optional(),
+    bizNo: bizNoSchema,
+    category: categorySchema,
+    manager: managerSchema,
+    tags: tagsSchema,
+    status: statusSchema.optional(),
+  })
+  .superRefine((val, ctx) => {
+    // 시크릿 둘 다 함께 변경. 한쪽만 있으면 거부.
+    const hasApi = isProvided(val.apiKey)
+    const hasSec = isProvided(val.secretKey)
+    if (hasApi !== hasSec) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["apiKey"],
+        message: "apiKey와 secretKey는 함께 입력해야 합니다",
+      })
+    }
+  })
+
+// CSV 일괄 등록은 메타만. 시크릿 컬럼 일체 X.
+const bulkRowSchema = z.object({
   name: nameSchema,
   customerId: customerIdSchema,
-  apiKey: apiKeySchema,
-  secretKey: secretKeySchema,
   bizNo: bizNoSchema,
   category: categorySchema,
   manager: managerSchema,
   tags: tagsSchema,
-})
-
-const updateSchema = z.object({
-  name: nameSchema.optional(),
-  apiKey: z.string().optional(),
-  secretKey: z.string().optional(),
-  bizNo: bizNoSchema,
-  category: categorySchema,
-  manager: managerSchema,
-  tags: tagsSchema,
-  status: statusSchema.optional(),
 })
 
 // =============================================================================
-// 1. registerAdvertiser
+// 1. registerAdvertiser (단건)
 // =============================================================================
 
 export async function registerAdvertiser(input: {
   name: string
   customerId: string
-  apiKey: string
-  secretKey: string
+  apiKey?: string // optional. 둘 다 있거나 둘 다 없거나
+  secretKey?: string
   bizNo?: string
   category?: string
   manager?: string
@@ -100,28 +146,44 @@ export async function registerAdvertiser(input: {
     throw new Error(`이미 등록된 customerId 입니다: ${parsed.customerId}`)
   }
 
-  const apiEnc = encrypt(parsed.apiKey)
-  const secEnc = encrypt(parsed.secretKey)
+  const hasCredentials = isProvided(parsed.apiKey) && isProvided(parsed.secretKey)
+
   // Prisma 7의 Bytes 컬럼 타입은 Uint8Array<ArrayBuffer>.
   // Node Buffer는 Uint8Array<ArrayBufferLike> 이므로 (SharedArrayBuffer 가능)
   // Uint8Array.from() 으로 새 ArrayBuffer 백킹의 Uint8Array 를 만들어 전달.
-  const apiKeyBytes = Uint8Array.from(apiEnc.enc)
-  const secretKeyBytes = Uint8Array.from(secEnc.enc)
+  // 키 미입력(null) 분기와 함께 처리하기 위해 data 객체를 단계적으로 구성.
+  const data: {
+    name: string
+    customerId: string
+    apiKeyEnc?: Uint8Array<ArrayBuffer>
+    apiKeyVersion?: number
+    secretKeyEnc?: Uint8Array<ArrayBuffer>
+    secretKeyVersion?: number
+    bizNo: string | null
+    category: string | null
+    manager: string | null
+    tags: string[]
+    status: "active"
+  } = {
+    name: parsed.name,
+    customerId: parsed.customerId,
+    bizNo: parsed.bizNo ?? null,
+    category: parsed.category ?? null,
+    manager: parsed.manager ?? null,
+    tags: parsed.tags ?? [],
+    status: "active",
+  }
+  if (hasCredentials) {
+    const apiEnc = encrypt(parsed.apiKey as string)
+    const secEnc = encrypt(parsed.secretKey as string)
+    data.apiKeyEnc = Uint8Array.from(apiEnc.enc)
+    data.apiKeyVersion = apiEnc.version
+    data.secretKeyEnc = Uint8Array.from(secEnc.enc)
+    data.secretKeyVersion = secEnc.version
+  }
 
   const created = await prisma.advertiser.create({
-    data: {
-      name: parsed.name,
-      customerId: parsed.customerId,
-      apiKeyEnc: apiKeyBytes,
-      apiKeyVersion: apiEnc.version,
-      secretKeyEnc: secretKeyBytes,
-      secretKeyVersion: secEnc.version,
-      bizNo: parsed.bizNo ?? null,
-      category: parsed.category ?? null,
-      manager: parsed.manager ?? null,
-      tags: parsed.tags ?? [],
-      status: "active",
-    },
+    data,
     select: { id: true },
   })
 
@@ -139,6 +201,7 @@ export async function registerAdvertiser(input: {
       category: parsed.category ?? null,
       manager: parsed.manager ?? null,
       tags: parsed.tags ?? [],
+      hasCredentials,
     },
   })
 
@@ -155,7 +218,7 @@ export async function updateAdvertiser(
   id: string,
   input: {
     name?: string
-    apiKey?: string // 빈 문자열이면 변경 안 함
+    apiKey?: string // 빈 문자열이면 변경 안 함. apiKey ↔ secretKey 페어 검증
     secretKey?: string
     bizNo?: string
     category?: string
@@ -196,19 +259,17 @@ export async function updateAdvertiser(
   let apiKeyChanged = false
   let secretKeyChanged = false
 
-  if (parsed.apiKey && parsed.apiKey.trim().length > 0) {
-    const validated = apiKeySchema.parse(parsed.apiKey)
-    const enc = encrypt(validated)
-    data.apiKeyEnc = Uint8Array.from(enc.enc)
-    data.apiKeyVersion = enc.version
+  // superRefine 으로 페어 검증은 통과한 상태. 둘 다 있는 경우에만 갱신.
+  if (isProvided(parsed.apiKey) && isProvided(parsed.secretKey)) {
+    const validatedApi = apiKeySchema.parse(parsed.apiKey)
+    const validatedSec = secretKeySchema.parse(parsed.secretKey)
+    const apiEnc = encrypt(validatedApi)
+    const secEnc = encrypt(validatedSec)
+    data.apiKeyEnc = Uint8Array.from(apiEnc.enc)
+    data.apiKeyVersion = apiEnc.version
+    data.secretKeyEnc = Uint8Array.from(secEnc.enc)
+    data.secretKeyVersion = secEnc.version
     apiKeyChanged = true
-  }
-
-  if (parsed.secretKey && parsed.secretKey.trim().length > 0) {
-    const validated = secretKeySchema.parse(parsed.secretKey)
-    const enc = encrypt(validated)
-    data.secretKeyEnc = Uint8Array.from(enc.enc)
-    data.secretKeyVersion = enc.version
     secretKeyChanged = true
   }
 
@@ -301,7 +362,13 @@ export async function testConnection(id: string): Promise<TestConnectionResult> 
 
   const advertiser = await prisma.advertiser.findUnique({
     where: { id },
-    select: { id: true, customerId: true, status: true },
+    select: {
+      id: true,
+      customerId: true,
+      status: true,
+      apiKeyEnc: true,
+      secretKeyEnc: true,
+    },
   })
   if (!advertiser) {
     return { ok: false, error: "존재하지 않는 광고주입니다" }
@@ -312,6 +379,10 @@ export async function testConnection(id: string): Promise<TestConnectionResult> 
         ? "일시중지된 광고주입니다"
         : "아카이브된 광고주입니다"
     return { ok: false, error: reason }
+  }
+  // F-1.2: 메타만 등록되고 시크릿 입력 전 상태에서는 SA 호출 불가.
+  if (advertiser.apiKeyEnc === null || advertiser.secretKeyEnc === null) {
+    return { ok: false, error: "API 키/시크릿 미입력" }
   }
 
   try {
@@ -336,5 +407,232 @@ export async function testConnection(id: string): Promise<TestConnectionResult> 
     // 단, 진단을 위해 서버 로그에는 stack 출력 (시크릿 평문은 NaverSAClient 내부에서 처리되어 e에 포함되지 않음).
     console.error("[testConnection] unexpected error:", e)
     return { ok: false, error: "연결 테스트 중 알 수 없는 오류" }
+  }
+}
+
+// =============================================================================
+// 5. registerAdvertisersBulk — F-1.2 CSV 일괄 등록
+// =============================================================================
+
+export type BulkAdvertiserInput = {
+  name: string
+  customerId: string
+  bizNo?: string
+  category?: string
+  manager?: string
+  tags?: string[]
+}
+
+export type BulkRegisterRow =
+  | { ok: true; row: number; id: string; customerId: string; action: "created" | "skipped" }
+  | { ok: false; row: number; customerId?: string; error: string }
+
+export type BulkRegisterResult = {
+  created: number
+  skipped: number // 이미 존재 (customerId 중복)
+  failed: number // 검증 또는 INSERT 실패
+  rows: BulkRegisterRow[]
+}
+
+/**
+ * CSV 행 목록을 받아 광고주를 일괄 등록.
+ *
+ * 동작:
+ *   1. assertRole('admin')
+ *   2. 각 행 Zod 검증 (실패 → failed)
+ *   3. 입력 안 customerId 중복: 마지막 행만 적용 (이전 행은 경고로 skipped 보고)
+ *   4. DB 기존 customerId 충돌:
+ *      - duplicatePolicy='skip'  → skipped
+ *      - duplicatePolicy='error' → failed
+ *   5. 통과 행을 createMany 로 INSERT (시크릿 컬럼 X — 메타만)
+ *   6. AuditLog 1건 기록 (요약만; 행별 세부는 본 액션 반환값으로 UI에 표시)
+ *
+ * 본 액션은 외부 API 변경이 아니므로 ChangeBatch 패턴 미사용 (단일 트랜잭션).
+ * UI 는 PapaParse 로 CSV 파싱 후 정상 행만 인자로 전달한다.
+ */
+export async function registerAdvertisersBulk(input: {
+  rows: BulkAdvertiserInput[]
+  duplicatePolicy?: "skip" | "error" // 기본 skip
+}): Promise<BulkRegisterResult> {
+  const me = await assertRole("admin")
+  const policy = input.duplicatePolicy ?? "skip"
+  const rows = input.rows ?? []
+
+  // 1) Zod 검증 + 입력 내부 customerId 중복 처리 (마지막 행만 적용)
+  type ValidRow = z.infer<typeof bulkRowSchema> & { row: number }
+  const validRows: ValidRow[] = []
+  const reports: BulkRegisterRow[] = []
+  // customerId → validRows 인덱스
+  const seen = new Map<string, number>()
+
+  for (let i = 0; i < rows.length; i++) {
+    const rowNumber = i + 1 // CSV 행 번호(1-based, 헤더 제외 가정)
+    const raw = rows[i]
+    const parsed = bulkRowSchema.safeParse(raw)
+    if (!parsed.success) {
+      const msg = parsed.error.issues
+        .map((iss) => `${iss.path.join(".") || "row"}: ${iss.message}`)
+        .join("; ")
+      reports.push({
+        ok: false,
+        row: rowNumber,
+        customerId: typeof raw?.customerId === "string" ? raw.customerId : undefined,
+        error: msg,
+      })
+      continue
+    }
+
+    const data = parsed.data
+    const prevIdx = seen.get(data.customerId)
+    if (prevIdx !== undefined) {
+      // 입력 내 중복 — 이전 등록을 경고로 skipped 보고하고, 새 행으로 교체
+      const prev = validRows[prevIdx]
+      reports.push({
+        ok: false,
+        row: prev.row,
+        customerId: prev.customerId,
+        error: `입력 내 customerId 중복 — 이후 행으로 대체됨 (row=${rowNumber})`,
+      })
+      validRows[prevIdx] = { ...data, row: rowNumber }
+      seen.set(data.customerId, prevIdx)
+    } else {
+      seen.set(data.customerId, validRows.length)
+      validRows.push({ ...data, row: rowNumber })
+    }
+  }
+
+  // 2) DB 에 기존에 존재하는 customerId 조회 (한 번에)
+  const candidateIds = validRows.map((r) => r.customerId)
+  const existing =
+    candidateIds.length > 0
+      ? await prisma.advertiser.findMany({
+          where: { customerId: { in: candidateIds } },
+          select: { id: true, customerId: true },
+        })
+      : []
+  const existingMap = new Map(existing.map((e) => [e.customerId, e.id]))
+
+  // 3) 정책에 따라 기존 customerId 행 분리
+  const toInsert: ValidRow[] = []
+  for (const r of validRows) {
+    const exId = existingMap.get(r.customerId)
+    if (exId !== undefined) {
+      if (policy === "skip") {
+        reports.push({
+          ok: true,
+          row: r.row,
+          id: exId,
+          customerId: r.customerId,
+          action: "skipped",
+        })
+      } else {
+        reports.push({
+          ok: false,
+          row: r.row,
+          customerId: r.customerId,
+          error: "이미 등록된 customerId 입니다",
+        })
+      }
+    } else {
+      toInsert.push(r)
+    }
+  }
+
+  // 4) 일괄 INSERT (createMany — 시크릿 컬럼 누락 = nullable 이라 NULL).
+  // createMany 는 반환 row 가 없으므로, 삽입 후 customerId 로 재조회해 id 매핑.
+  if (toInsert.length > 0) {
+    try {
+      await prisma.advertiser.createMany({
+        data: toInsert.map((r) => ({
+          name: r.name,
+          customerId: r.customerId,
+          bizNo: r.bizNo ?? null,
+          category: r.category ?? null,
+          manager: r.manager ?? null,
+          tags: r.tags ?? [],
+          status: "active" as const,
+          // apiKeyEnc / secretKeyEnc 는 누락 = null (nullable 컬럼)
+        })),
+        skipDuplicates: false,
+      })
+
+      const insertedIds = await prisma.advertiser.findMany({
+        where: { customerId: { in: toInsert.map((r) => r.customerId) } },
+        select: { id: true, customerId: true },
+      })
+      const idMap = new Map(insertedIds.map((e) => [e.customerId, e.id]))
+
+      for (const r of toInsert) {
+        const id = idMap.get(r.customerId)
+        if (id) {
+          reports.push({
+            ok: true,
+            row: r.row,
+            id,
+            customerId: r.customerId,
+            action: "created",
+          })
+        } else {
+          // 이론상 도달 불가 (방금 INSERT 했음). 방어 코드.
+          reports.push({
+            ok: false,
+            row: r.row,
+            customerId: r.customerId,
+            error: "INSERT 직후 id 조회 실패",
+          })
+        }
+      }
+    } catch (e) {
+      // createMany 실패 시 — 모든 toInsert 행을 failed 로 보고
+      const errMsg = e instanceof Error ? e.message : String(e)
+      for (const r of toInsert) {
+        reports.push({
+          ok: false,
+          row: r.row,
+          customerId: r.customerId,
+          error: `INSERT 실패: ${errMsg}`,
+        })
+      }
+    }
+  }
+
+  // 5) 집계
+  let createdCount = 0
+  let skippedCount = 0
+  let failedCount = 0
+  // 행 번호 오름차순 정렬 (UI 표시 가독성)
+  reports.sort((a, b) => a.row - b.row)
+  for (const r of reports) {
+    if (r.ok) {
+      if (r.action === "created") createdCount++
+      else skippedCount++
+    } else {
+      failedCount++
+    }
+  }
+
+  // 6) AuditLog 1건 — 요약만 (시크릿 평문 X, 행별 세부는 미저장)
+  await logAudit({
+    userId: me.id,
+    action: "advertiser.bulk_register",
+    targetType: "Advertiser",
+    targetId: null,
+    before: null,
+    after: {
+      total: rows.length,
+      created: createdCount,
+      skipped: skippedCount,
+      failed: failedCount,
+      duplicatePolicy: policy,
+    },
+  })
+
+  revalidatePath("/admin/advertisers")
+
+  return {
+    created: createdCount,
+    skipped: skippedCount,
+    failed: failedCount,
+    rows: reports,
   }
 }
