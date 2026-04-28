@@ -1,0 +1,419 @@
+// Prisma schema — 네이버 검색광고 다계정 운영 어드민
+// SPEC v0.2.1 9장(데이터 모델)이 단일 진실 원천.
+// P1 핵심 엔티티 + StatDaily 선언. P2 엔티티는 주석으로 표시만.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+  // Prisma 7부터 driver adapter는 정식 지원(preview feature 불필요).
+  // 런타임은 lib/db/prisma.ts 에서 @prisma/adapter-pg 주입.
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// Enums
+// =============================================================================
+
+enum UserRole {
+  admin
+  operator
+  viewer
+}
+
+enum UserStatus {
+  active
+  disabled
+}
+
+enum AdvertiserStatus {
+  active
+  paused
+  archived
+}
+
+enum CampaignStatus {
+  on
+  off
+  deleted
+}
+
+enum AdGroupStatus {
+  on
+  off
+  deleted
+}
+
+enum KeywordStatus {
+  on
+  off
+  deleted
+}
+
+enum AdStatus {
+  on
+  off
+  deleted
+}
+
+enum AdExtensionStatus {
+  on
+  off
+  deleted
+}
+
+enum InspectStatus {
+  pending
+  approved
+  rejected
+}
+
+enum AdExtensionType {
+  // P1 — 3종
+  headline // 추가제목
+  description // 추가설명
+  image // 이미지
+  // P2+ (모델은 수용 가능, 기능 구현은 추후)
+  pricelink
+  sublink
+  location
+  calculation
+  reservation
+  talktalk
+}
+
+enum ChangeBatchStatus {
+  pending
+  running
+  done
+  failed
+  canceled
+}
+
+enum ChangeItemStatus {
+  pending
+  running
+  done
+  failed
+  skipped
+}
+
+enum StatLevel {
+  campaign
+  adgroup
+  keyword
+}
+
+enum StatDevice {
+  PC
+  MOBILE
+}
+
+enum AlertEventStatus {
+  pending
+  sent
+  failed
+  muted
+}
+
+// =============================================================================
+// 사용자 / 권한
+// =============================================================================
+
+// id = Supabase Auth user.id (UUID 문자열)
+model UserProfile {
+  id          String     @id
+  displayName String
+  role        UserRole   @default(viewer)
+  status      UserStatus @default(active)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  advertiserAccess UserAdvertiserAccess[] @relation("UserProfileAccess")
+  grantedAccess    UserAdvertiserAccess[] @relation("UserProfileGrantor")
+  changeBatches    ChangeBatch[]
+  auditLogs        AuditLog[]
+}
+
+model UserAdvertiserAccess {
+  id           String   @id @default(cuid())
+  userId       String
+  advertiserId String
+  grantedBy    String?
+  grantedAt    DateTime @default(now())
+
+  user       UserProfile  @relation("UserProfileAccess", fields: [userId], references: [id], onDelete: Cascade)
+  grantor    UserProfile? @relation("UserProfileGrantor", fields: [grantedBy], references: [id], onDelete: SetNull)
+  advertiser Advertiser   @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, advertiserId])
+  @@index([advertiserId])
+}
+
+// =============================================================================
+// 광고주 (모델 2: 평면 구조)
+// =============================================================================
+// 모델 2: 광고주별 API 키·시크릿을 직접 발급받아 저장. MCC 마스터 권한 불필요.
+// 시크릿은 평문 컬럼 금지 — AES-256-GCM 암호화 + 키 버전 컬럼 쌍.
+
+model Advertiser {
+  id               String           @id @default(cuid())
+  customerId       String           @unique // 네이버 광고주 customerId
+  name             String
+  bizNo            String?
+  category         String?
+  manager          String?
+  memo             String?
+  tags             String[]         @default([])
+  status           AdvertiserStatus @default(active)
+  // 모델 2: 광고주별 API 키·시크릿 (필수). 키 없으면 SA API 호출 불가.
+  apiKeyEnc        Bytes
+  apiKeyVersion    Int              @default(1)
+  secretKeyEnc     Bytes
+  secretKeyVersion Int              @default(1)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  campaigns Campaign[]
+  access    UserAdvertiserAccess[]
+
+  @@index([customerId])
+  @@index([status])
+}
+
+// =============================================================================
+// 광고 구조 (네이버 SA)
+// =============================================================================
+
+model Campaign {
+  id            String         @id @default(cuid())
+  advertiserId  String
+  nccCampaignId String         @unique
+  name          String
+  campaignType  String?
+  dailyBudget   Decimal?       @db.Decimal(14, 2)
+  status        CampaignStatus @default(on)
+  raw           Json?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  advertiser Advertiser @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
+  adgroups   AdGroup[]
+
+  @@index([advertiserId])
+}
+
+model AdGroup {
+  id           String        @id @default(cuid())
+  campaignId   String
+  nccAdgroupId String        @unique
+  name         String
+  bidAmt       Int?
+  dailyBudget  Decimal?      @db.Decimal(14, 2)
+  pcChannelOn  Boolean       @default(true)
+  mblChannelOn Boolean       @default(true)
+  status       AdGroupStatus @default(on)
+  raw          Json?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  campaign   Campaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  keywords   Keyword[]
+  ads        Ad[]
+  extensions AdExtension[]
+
+  @@index([campaignId])
+}
+
+model Keyword {
+  id             String        @id @default(cuid())
+  adgroupId      String
+  nccKeywordId   String        @unique
+  keyword        String
+  matchType      String? // EXACT / PHRASE / BROAD
+  bidAmt         Int?
+  useGroupBidAmt Boolean       @default(true)
+  userLock       Boolean       @default(false)
+  externalId     String? // 사용자 멱등키 (CSV CREATE)
+  status         KeywordStatus @default(on)
+  inspectStatus  InspectStatus @default(pending)
+  recentAvgRnk   Decimal?      @db.Decimal(5, 2)
+  raw            Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  adgroup AdGroup @relation(fields: [adgroupId], references: [id], onDelete: Cascade)
+
+  @@index([adgroupId, status])
+}
+
+model Ad {
+  id            String        @id @default(cuid())
+  adgroupId     String
+  nccAdId       String        @unique
+  adType        String?
+  fields        Json? // 소재 텍스트/URL 등
+  inspectStatus InspectStatus @default(pending)
+  inspectMemo   String?
+  status        AdStatus      @default(on)
+  raw           Json?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  adgroup AdGroup @relation(fields: [adgroupId], references: [id], onDelete: Cascade)
+
+  @@index([adgroupId])
+}
+
+model AdExtension {
+  id            String            @id @default(cuid())
+  ownerId       String // adgroupId 또는 campaignId 등
+  ownerType     String            @default("adgroup")
+  nccExtId      String            @unique
+  type          AdExtensionType
+  payload       Json
+  periodStart   DateTime?
+  periodEnd     DateTime?
+  inspectStatus InspectStatus     @default(pending)
+  inspectMemo   String?
+  status        AdExtensionStatus @default(on)
+  raw           Json?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  // P1: ownerType=adgroup 가정. 향후 폴리모픽 확장 시 owner relation은 명시적 join으로 처리.
+  adgroup AdGroup? @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, type])
+}
+
+// =============================================================================
+// 변경 이력 / 감사
+// =============================================================================
+
+model ChangeBatch {
+  id             String            @id @default(cuid())
+  userId         String?
+  action         String // 예: "keyword.bulk_off", "ad.bulk_update"
+  status         ChangeBatchStatus @default(pending)
+  total          Int               @default(0)
+  processed      Int               @default(0)
+  summary        Json?
+  // Lease (3.5절 동시 실행 방지)
+  leaseOwner     String?
+  leaseExpiresAt DateTime?
+  attempt        Int               @default(0)
+  cursor         String? // 진단용
+  createdAt      DateTime          @default(now())
+  finishedAt     DateTime?
+
+  user  UserProfile? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  items ChangeItem[]
+
+  @@index([status, leaseExpiresAt])
+  @@index([userId])
+}
+
+model ChangeItem {
+  id             String           @id @default(cuid())
+  batchId        String
+  targetType     String // "Keyword" / "Ad" / "AdExtension" / "Campaign" / "AdGroup"
+  targetId       String? // 네이버 nccId 또는 내부 id (CREATE 전엔 null 가능)
+  before         Json?
+  after          Json?
+  status         ChangeItemStatus @default(pending)
+  error          String?
+  idempotencyKey String // 사용자 externalId 또는 자체 생성
+  attempt        Int              @default(0)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  batch ChangeBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, idempotencyKey])
+  @@index([batchId, status])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  action     String
+  targetType String
+  targetId   String?
+  before     Json?
+  after      Json?
+  ts         DateTime @default(now())
+
+  user UserProfile? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, ts])
+  @@index([targetType, targetId])
+}
+
+// =============================================================================
+// 알림 (P1)
+// =============================================================================
+
+model AlertRule {
+  id          String   @id @default(cuid())
+  type        String // budget_burn / bizmoney_low / api_auth_error / inspect_rejected ...
+  params      Json
+  channelHint String?
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  events AlertEvent[]
+}
+
+model AlertEvent {
+  id        String           @id @default(cuid())
+  ruleId    String
+  payload   Json
+  status    AlertEventStatus @default(pending)
+  sentAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  rule AlertRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([ruleId, createdAt])
+}
+
+// =============================================================================
+// 성과 데이터
+// =============================================================================
+// P1은 Stats API + Redis 캐시로 대체 (자체 적재 X 또는 최소).
+// StatDaily는 P1에서 모델만 선언. 적재 빈도/매출 조인은 P2에서 결정.
+// conversions / revenue는 매출 조인 시점에 채움.
+
+model StatDaily {
+  id          String     @id @default(cuid())
+  date        DateTime   @db.Date
+  level       StatLevel
+  refId       String // campaignId / adgroupId / keywordId (네이버 nccId 또는 내부 id 통일)
+  device      StatDevice
+  impressions Int        @default(0)
+  clicks      Int        @default(0)
+  cost        Decimal    @default(0) @db.Decimal(14, 2)
+  avgRnk      Decimal?   @db.Decimal(5, 2)
+  // 매출/전환 조인은 P2부터 채움
+  conversions Int?
+  revenue     Decimal?   @db.Decimal(14, 2)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@unique([date, level, refId, device])
+  @@index([date, level, refId])
+}
+
+// =============================================================================
+// P2 엔티티 (선언 보류 — 작업 시점에 추가)
+// =============================================================================
+// model BiddingPolicy   { ... } // 키워드별 목표 순위
+// model OptimizationRun { ... } // 자동 비딩 실행 기록
+// model EstimateCache   { ... } // Estimate API 결과 30분 캐시
+// model RankObservation { ... } // 시간별 순위 관측
+// model LlmCallLog      { ... } // LLM 호출 비용
+// model StatHourly      { ... } // 시간별 누적 (네이버 7일 한계 회피)

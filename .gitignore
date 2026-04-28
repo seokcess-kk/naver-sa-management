@@ -39,3 +39,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/lib/generated/prisma
+
+# Harness 워크스페이스 (오케스트레이터 중간 산출물, 감사 추적용 로컬 보관)
+_workspace/
