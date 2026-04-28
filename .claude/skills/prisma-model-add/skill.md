@@ -38,7 +38,8 @@ description: Prisma 모델 추가 또는 기존 모델 변경 시 사용. SPEC v
 시크릿 저장 시 반드시 두 컬럼:
 
 ```prisma
-model MasterAccount {
+// 모델 2 (광고주별 키 모음) — 평면 구조
+model Advertiser {
   id                String  @id @default(cuid())
   customerId        String  @unique
   apiKeyEnc         Bytes   // 암호문
