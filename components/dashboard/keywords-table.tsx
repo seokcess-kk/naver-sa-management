@@ -80,6 +80,7 @@ import {
   ArrowUpIcon,
   ArrowUpDownIcon,
   DownloadIcon,
+  MoreHorizontalIcon,
   RotateCcwIcon,
 } from "lucide-react"
 
@@ -116,6 +117,16 @@ import {
   KeywordsAddModal,
   type AdgroupOption,
 } from "@/components/dashboard/keywords-add-modal"
+import {
+  KeywordsDeleteModal,
+  type DeleteTargetRow,
+} from "@/components/dashboard/keywords-delete-modal"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import {
   BulkActionModal,
   type BulkActionResult,
@@ -234,6 +245,10 @@ type StagingCtx = {
   revertRow: (row: KeywordRow) => void
   /** 편집 가능 여부 (hasKeys=false 면 false) */
   editable: boolean
+  /** F-3.7 — admin 한정 단건 삭제 권한. operator/viewer 는 메뉴 disabled. */
+  isAdmin: boolean
+  /** F-3.7 — 행 삭제 모달 열기 (action 컬럼 케밥 메뉴) */
+  onRequestDelete: (row: KeywordRow) => void
 }
 
 // =============================================================================
@@ -580,7 +595,71 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
         new Date(a.original.updatedAt).getTime() -
         new Date(b.original.updatedAt).getTime(),
     },
+    {
+      // F-3.7 — 행 우측 액션 컬럼 (케밥 메뉴 → 단건 삭제 등). admin 한정.
+      // 본 컬럼은 정렬/필터 비활성. status='deleted' 행도 메뉴는 노출하되 항목별로
+      // disabled 처리 (이미 삭제된 키워드는 다시 삭제 불필요).
+      id: "actions",
+      header: () => <span className="sr-only">행 작업</span>,
+      cell: ({ row }) => <KeywordRowActions row={row.original} ctx={ctx} />,
+      enableSorting: false,
+      enableColumnFilter: false,
+      size: 48,
+    },
   ]
+}
+
+// =============================================================================
+// 행 우측 액션 (케밥 메뉴) — F-3.7
+// =============================================================================
+
+function KeywordRowActions({
+  row,
+  ctx,
+}: {
+  row: KeywordRow
+  ctx: StagingCtx
+}) {
+  // status='deleted' 인 행은 다시 삭제 의미 없음 (idempotent 흐름이지만 UI 상 차단).
+  const alreadyDeleted = row.status === "deleted"
+  const canDelete = ctx.isAdmin && !alreadyDeleted
+
+  const deleteTitle = !ctx.isAdmin
+    ? "관리자 권한 필요"
+    : alreadyDeleted
+      ? "이미 삭제된 키워드"
+      : undefined
+
+  return (
+    <div className="flex justify-end">
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label={`${row.keyword} 행 작업`}
+            >
+              <MoreHorizontalIcon />
+            </Button>
+          }
+        />
+        <DropdownMenuContent align="end" sideOffset={4} className="w-44">
+          <DropdownMenuItem
+            variant="destructive"
+            disabled={!canDelete}
+            title={deleteTitle}
+            onClick={() => {
+              if (!canDelete) return
+              ctx.onRequestDelete(row)
+            }}
+          >
+            삭제 (admin)
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  )
 }
 
 function MatchTypeBadge({ value }: { value: string | null }) {
@@ -831,14 +910,18 @@ export function KeywordsTable({
   hasKeys,
   keywords,
   adgroups,
+  userRole,
 }: {
   advertiserId: string
   hasKeys: boolean
   keywords: KeywordRow[]
   /** F-3.6 키워드 추가 모달용 — page.tsx 가 광고주 한정으로 별도 조회. */
   adgroups: AdgroupOption[]
+  /** F-3.7 — admin 한정 단건 삭제 권한 (RSC 에서 ctx.user.role 전달). */
+  userRole: "admin" | "operator" | "viewer"
 }) {
   const router = useRouter()
+  const isAdmin = userRole === "admin"
 
   // -- staging state (F-3.2 인라인 편집) --------------------------------------
   const [staging, setStaging] = React.useState<StagingMap>(() => new Map())
@@ -847,6 +930,9 @@ export function KeywordsTable({
   const [csvOpen, setCsvOpen] = React.useState(false)
   // -- F-3.6 키워드 추가 모달 -------------------------------------------------
   const [addOpen, setAddOpen] = React.useState(false)
+  // -- F-3.7 단건 삭제 모달 (admin 한정) -------------------------------------
+  // null = 닫힘. 비-null 객체 mount 시점에만 모달 마운트 → 닫힐 때 자동 reset.
+  const [deleteRow, setDeleteRow] = React.useState<KeywordRow | null>(null)
 
   // -- 다중 선택 + 일괄 액션 state (F-3.3) -----------------------------------
   // TanStack Table 의 rowSelection 은 row.id 기반 (getRowId=row.id 설정 → DB Keyword.id).
@@ -882,10 +968,21 @@ export function KeywordsTable({
     setStaging(new Map())
   }
 
+  const onRequestDelete = React.useCallback((row: KeywordRow) => {
+    setDeleteRow(row)
+  }, [])
+
   // ctx 는 셀이 직접 staging 을 읽고 변경할 수 있도록 columns 에 주입
   const ctx = React.useMemo<StagingCtx>(
-    () => ({ staging, applyPatch, revertRow, editable: hasKeys }),
-    [staging, applyPatch, revertRow, hasKeys],
+    () => ({
+      staging,
+      applyPatch,
+      revertRow,
+      editable: hasKeys,
+      isAdmin,
+      onRequestDelete,
+    }),
+    [staging, applyPatch, revertRow, hasKeys, isAdmin, onRequestDelete],
   )
 
   const columns = React.useMemo(() => makeColumns(ctx), [ctx])
@@ -1552,8 +1649,37 @@ export function KeywordsTable({
           }}
         />
       )}
+
+      {/* F-3.7 단건 삭제 모달 (admin 한정) — deleteRow!=null 시만 mount → 자동 reset.
+          본 모달 닫혀도 staging / rowSelection 은 그대로 (다른 흐름과 분리). */}
+      {deleteRow !== null && (
+        <KeywordsDeleteModal
+          advertiserId={advertiserId}
+          row={mapToDeleteTarget(deleteRow)}
+          open
+          onOpenChange={(o) => {
+            if (!o) setDeleteRow(null)
+          }}
+          onClosed={(didApply) => {
+            if (didApply) {
+              router.refresh()
+            }
+          }}
+        />
+      )}
     </div>
   )
+}
+
+// KeywordRow → DeleteTargetRow (모달이 KeywordRow 의존성을 가지지 않도록 좁힌 타입).
+function mapToDeleteTarget(row: KeywordRow): DeleteTargetRow {
+  return {
+    id: row.id,
+    nccKeywordId: row.nccKeywordId,
+    keyword: row.keyword,
+    matchType: row.matchType,
+    adgroupName: row.adgroup.name,
+  }
 }
 
 // =============================================================================

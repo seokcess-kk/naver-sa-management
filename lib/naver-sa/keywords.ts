@@ -1,12 +1,13 @@
 /**
- * 네이버 SA Keywords 모듈 (F-3.1 키워드 목록 / F-3.2 인라인 편집 / F-3.4 CSV / F-3.6 일괄 액션)
+ * 네이버 SA Keywords 모듈 (F-3.1 키워드 목록 / F-3.2 인라인 편집 / F-3.4 CSV / F-3.6 일괄 액션 / F-3.7 단건 삭제)
  *
  * 엔드포인트:
- *   GET  /ncc/keywords?nccAdgroupId={id}                     — 광고그룹 단위 목록 조회 (필수 필터)
- *   GET  /ncc/keywords/{nccKeywordId}                        — 단건 조회
- *   PUT  /ncc/keywords/{nccKeywordId}?fields=...             — 단건 수정 (부분 수정 fields 명시)
- *   PUT  /ncc/keywords?fields=...                            — 일괄 수정 (body: 배열)
- *   POST /ncc/keywords?nccAdgroupId={id}                     — 광고그룹 단위 일괄 생성 (body: 배열)
+ *   GET    /ncc/keywords?nccAdgroupId={id}                   — 광고그룹 단위 목록 조회 (필수 필터)
+ *   GET    /ncc/keywords/{nccKeywordId}                      — 단건 조회
+ *   PUT    /ncc/keywords/{nccKeywordId}?fields=...           — 단건 수정 (부분 수정 fields 명시)
+ *   PUT    /ncc/keywords?fields=...                          — 일괄 수정 (body: 배열)
+ *   POST   /ncc/keywords?nccAdgroupId={id}                   — 광고그룹 단위 일괄 생성 (body: 배열)
+ *   DELETE /ncc/keywords/{nccKeywordId}                      — 단건 삭제 (F-3.7 admin 권한 한정)
  *
  * 캐시:
  *   GET 만 `structure` kind / TTL 600s. PUT / POST 캐시 X.
@@ -295,4 +296,35 @@ export async function createKeywords(
     body: items,
   })
   return parseKeywordArray(res, { method: "POST", path, customerId })
+}
+
+/**
+ * 키워드 단건 삭제.
+ *
+ * 네이버 SA: DELETE /ncc/keywords/{nccKeywordId}
+ *
+ * @param customerId 광고주 customerId (X-Customer 헤더로 부착)
+ * @param nccKeywordId 네이버 키워드 ID
+ *
+ * 호출자 주의:
+ *   - F-3.7 admin 권한 한정 + 2차 확인 흐름 (Server Action에서 강제)
+ *   - 다중 선택 삭제는 P1 비대상 (OFF로 대체) — CLAUDE.md "비대상" 참조
+ *   - 삭제 후 DB 측은 status='deleted' 반영 또는 row 삭제 정책 결정 (호출부 책임)
+ *   - 응답 body가 빈 경우(204 등) 정상 반환 — naverSaClient가 처리
+ *   - 캐시 무관 (DELETE는 캐시 전략 X)
+ *   - HMAC 서명 / 토큰 버킷 / 에러 매핑은 client.ts에서 통일 처리
+ *
+ * 사용 예:
+ *   await deleteKeyword(customerId, "kwd-1")
+ */
+export async function deleteKeyword(
+  customerId: string,
+  nccKeywordId: string,
+): Promise<void> {
+  const path = `/ncc/keywords/${encodeURIComponent(nccKeywordId)}`
+  await naverSaClient.request({
+    customerId,
+    method: "DELETE",
+    path,
+  })
 }

@@ -42,9 +42,11 @@ export default async function KeywordsPage({
   const { advertiserId } = await params
 
   let advertiser
+  let userRole: "admin" | "operator" | "viewer"
   try {
     const ctx = await getCurrentAdvertiser(advertiserId)
     advertiser = ctx.advertiser
+    userRole = ctx.user.role
   } catch (e) {
     if (e instanceof UnauthenticatedError) {
       redirect("/login")
@@ -150,6 +152,7 @@ export default async function KeywordsPage({
       hasKeys={advertiser.hasKeys}
       keywords={keywords}
       adgroups={adgroups}
+      userRole={userRole}
     />
   )
 }

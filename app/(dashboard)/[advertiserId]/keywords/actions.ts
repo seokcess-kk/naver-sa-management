@@ -47,10 +47,11 @@ import Papa from "papaparse"
 import { z } from "zod"
 
 import { prisma } from "@/lib/db/prisma"
-import { getCurrentAdvertiser } from "@/lib/auth/access"
+import { getCurrentAdvertiser, assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
 import {
   createKeywords,
+  deleteKeyword,
   listKeywords,
   updateKeywordsBulk,
   type Keyword as SaKeyword,
@@ -3084,4 +3085,209 @@ export async function createKeywordsBatch(
     conflicts,
     items: resultItems,
   }
+}
+
+// =============================================================================
+// 6. deleteKeywordSingle — 키워드 단건 삭제 (F-3.7, admin + 2차 확인)
+// =============================================================================
+//
+// CLAUDE.md "비대상" 정책:
+//   - 다중 선택 삭제는 P1 비대상 (OFF로 대체)
+//   - 단건 삭제도 admin 권한 + 2차 확인 필수
+//
+// 흐름:
+//   1. assertRole("admin") — operator/viewer 차단 (AuthorizationError throw)
+//   2. getCurrentAdvertiser — 광고주 권한 + hasKeys 검증
+//   3. Zod 검증
+//   4. 광고주 한정 키워드 조회 (campaign.advertiserId join)
+//   5. 2차 확인 검증 — 입력 keyword 텍스트가 DB keyword 와 정확 일치
+//   6. idempotent 처리 — 이미 status='deleted' 면 ChangeBatch 미생성, 정상 반환 + AuditLog
+//   7. ChangeBatch 생성 (action='keyword.delete', total=1)
+//   8. ChangeItem 1건 (idempotencyKey: `${batchId}:delete:${nccKeywordId}`)
+//   9. SA deleteKeyword 호출
+//      - 성공: DB Keyword.status='deleted' 업데이트 (row 삭제 X — 감사 추적 보존)
+//      - 실패: ChangeItem failed + ChangeBatch failed
+//  10. ChangeItem='done' / ChangeBatch finalize
+//  11. AuditLog (targetType='Keyword' — admin 액션은 키워드 자체 추적)
+//  12. revalidatePath
+//
+// 안전장치:
+//   - admin 권한 강제 (진입부 assertRole)
+//   - 광고주 횡단 차단 (campaign.advertiserId join)
+//   - 2차 확인 (오타·잘못된 행 보호)
+//   - DB row 삭제 X — status='deleted' 만 (감사 추적 보존)
+//   - 시크릿 마스킹 (AuditLog/throw 메시지에 키 노출 X)
+//   - SA 실패 → ChangeItem failed + ChangeBatch failed + return ok:false
+
+const deleteKeywordSchema = z.object({
+  keywordId: z.string().min(1), // 앱 DB Keyword.id
+  // 2차 확인: 사용자가 입력한 키워드 텍스트가 실제 keyword 와 일치해야 함
+  confirmKeyword: z.string().min(1),
+})
+
+export type DeleteKeywordInput = z.infer<typeof deleteKeywordSchema>
+
+export type DeleteKeywordResult =
+  | { ok: true; batchId: string; nccKeywordId: string }
+  | { ok: false; error: string }
+
+/**
+ * 키워드 단건 삭제 (F-3.7).
+ *
+ * admin 권한 한정 + 2차 확인 (사용자가 키워드 텍스트 재입력) 흐름.
+ *
+ * @throws AuthorizationError — admin 권한 부족 시 (UI에서 catch)
+ * @throws Error("확인 키워드 텍스트 불일치") — 2차 확인 실패 (UI에서 catch)
+ */
+export async function deleteKeywordSingle(
+  advertiserId: string,
+  input: DeleteKeywordInput,
+): Promise<DeleteKeywordResult> {
+  // -- 1. admin 권한 강제 (진입부) -------------------------------------------
+  // assertRole 은 부족 시 AuthorizationError throw — UI 에서 catch.
+  await assertRole("admin")
+
+  // -- 2. 광고주 권한 + 객체 -------------------------------------------------
+  const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    return { ok: false, error: "API 키/시크릿 미입력" }
+  }
+
+  // -- 3. Zod 검증 -----------------------------------------------------------
+  const parsed = deleteKeywordSchema.parse(input)
+
+  // -- 4. 광고주 한정 키워드 조회 -------------------------------------------
+  // campaign.advertiserId join 으로 광고주 횡단 차단.
+  const dbKeyword = await prisma.keyword.findFirst({
+    where: {
+      id: parsed.keywordId,
+      adgroup: { campaign: { advertiserId } },
+    },
+    select: {
+      id: true,
+      nccKeywordId: true,
+      keyword: true,
+      status: true,
+    },
+  })
+  if (!dbKeyword) {
+    return { ok: false, error: "키워드를 찾을 수 없거나 광고주 소속 아님" }
+  }
+
+  // -- 5. 2차 확인 검증 ------------------------------------------------------
+  // 사용자가 입력한 keyword 텍스트가 DB keyword 와 정확 일치해야 함 (양 끝 trim 비교).
+  if (parsed.confirmKeyword.trim() !== dbKeyword.keyword.trim()) {
+    throw new Error("확인 키워드 텍스트 불일치")
+  }
+
+  // -- 6. idempotent 처리 (이미 deleted) -------------------------------------
+  // 이미 삭제된 키워드 재호출 → ChangeBatch 미생성. AuditLog 1줄만 (중복 호출 추적용).
+  if (dbKeyword.status === "deleted") {
+    await logAudit({
+      userId: user.id,
+      action: "keyword.delete",
+      targetType: "Keyword",
+      targetId: dbKeyword.nccKeywordId,
+      before: { status: dbKeyword.status, keyword: dbKeyword.keyword },
+      after: { status: "deleted", note: "already-deleted (idempotent)" },
+    })
+    return { ok: true, batchId: "", nccKeywordId: dbKeyword.nccKeywordId }
+  }
+
+  // -- 7. ChangeBatch 생성 ---------------------------------------------------
+  const action = "keyword.delete"
+  const batch = await prisma.changeBatch.create({
+    data: {
+      userId: user.id,
+      action,
+      status: "running",
+      total: 1,
+      processed: 0,
+      attempt: 1,
+      summary: {
+        advertiserId,
+        nccKeywordId: dbKeyword.nccKeywordId,
+        keyword: dbKeyword.keyword,
+      } as Prisma.InputJsonValue,
+    },
+  })
+
+  // -- 8. ChangeItem (1건) ---------------------------------------------------
+  const idempotencyKey = `${batch.id}:delete:${dbKeyword.nccKeywordId}`
+  await prisma.changeItem.create({
+    data: {
+      batchId: batch.id,
+      targetType: "Keyword",
+      targetId: dbKeyword.nccKeywordId,
+      before: { status: dbKeyword.status } as Prisma.InputJsonValue,
+      after: { status: "deleted" } as Prisma.InputJsonValue,
+      idempotencyKey,
+      status: "pending",
+    },
+  })
+
+  // -- 9. SA deleteKeyword 호출 ---------------------------------------------
+  let success = false
+  let errorMsg: string | null = null
+  try {
+    await deleteKeyword(advertiser.customerId, dbKeyword.nccKeywordId)
+    success = true
+  } catch (e) {
+    // 메시지만 500자 컷. raw 응답 / 시크릿 노출 X.
+    const msg = e instanceof Error ? e.message : String(e)
+    errorMsg = msg.slice(0, 500)
+  }
+
+  if (success) {
+    // DB 반영: row 삭제 X — status='deleted' 만 (감사 추적 보존).
+    // 사용자 키워드 페이지에서 status 필터로 deleted 분리 노출 가능.
+    await prisma.keyword.update({
+      where: { id: dbKeyword.id },
+      data: { status: "deleted" satisfies KeywordStatus },
+    })
+
+    // -- 10. ChangeItem='done' ----------------------------------------------
+    await prisma.changeItem.updateMany({
+      where: { batchId: batch.id, idempotencyKey },
+      data: { status: "done" },
+    })
+  } else {
+    // SA 실패 → ChangeItem failed
+    await prisma.changeItem.updateMany({
+      where: { batchId: batch.id, idempotencyKey },
+      data: { status: "failed", error: errorMsg ?? "삭제 실패" },
+    })
+  }
+
+  // -- 11. ChangeBatch finalize ---------------------------------------------
+  const finalStatus: "done" | "failed" = success ? "done" : "failed"
+  await prisma.changeBatch.update({
+    where: { id: batch.id },
+    data: {
+      status: finalStatus,
+      processed: 1,
+      finishedAt: new Date(),
+    },
+  })
+
+  // -- 12. AuditLog (targetType='Keyword') ----------------------------------
+  // admin 액션은 감사 중요 — 키워드 자체를 추적 (다른 액션은 ChangeBatch 추적).
+  await logAudit({
+    userId: user.id,
+    action,
+    targetType: "Keyword",
+    targetId: dbKeyword.nccKeywordId,
+    before: { status: dbKeyword.status, keyword: dbKeyword.keyword },
+    after: success
+      ? { status: "deleted", batchId: batch.id }
+      : { status: dbKeyword.status, batchId: batch.id, error: errorMsg },
+  })
+
+  // -- 13. revalidatePath ----------------------------------------------------
+  revalidatePath(`/${advertiserId}/keywords`)
+
+  if (!success) {
+    return { ok: false, error: errorMsg ?? "삭제 실패" }
+  }
+  return { ok: true, batchId: batch.id, nccKeywordId: dbKeyword.nccKeywordId }
 }
