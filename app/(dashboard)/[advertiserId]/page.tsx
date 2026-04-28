@@ -4,7 +4,7 @@
  * - 권한: getCurrentAdvertiser 가 admin 또는 화이트리스트 검증을 처리
  * - 키 미설정 시 안내 카드 (testConnection / 동기화 / SA API 호출 차단됨)
  * - KPI 카드 자리 표시 (F-7.1 에서 채움)
- * - 캠페인 / 키워드 진입 링크 (광고그룹 / 소재 / 확장소재는 후속 단계)
+ * - 캠페인 / 광고그룹 / 키워드 진입 링크 (소재 / 확장소재는 후속 단계)
  *
  * SPEC 6.7 F-7.1 / 11.2 대시보드.
  */
@@ -120,8 +120,11 @@ export default async function AdvertiserDashboardPage({
           >
             캠페인
           </Button>
-          <Button variant="outline" disabled>
-            광고그룹 (준비 중)
+          <Button
+            variant="outline"
+            render={<Link href={`/${advertiser.id}/adgroups`} />}
+          >
+            광고그룹
           </Button>
           <Button
             variant="outline"
