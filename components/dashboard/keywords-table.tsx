@@ -61,6 +61,7 @@
 import * as React from "react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
+import Papa from "papaparse"
 import {
   flexRender,
   getCoreRowModel,
@@ -78,6 +79,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   ArrowUpDownIcon,
+  DownloadIcon,
   RotateCcwIcon,
 } from "lucide-react"
 
@@ -144,6 +146,8 @@ export type KeywordRow = {
   bidAmt: number | null
   useGroupBidAmt: boolean
   userLock: boolean
+  /** F-3.5 CSV 내보내기 — UPDATE 행 재업로드 시 멱등키 보존. CREATE 외엔 optional. */
+  externalId: string | null
   status: KeywordStatus
   inspectStatus: InspectStatus
   /** Decimal(5,2) → number 직렬화. 없으면 null. */
@@ -222,6 +226,73 @@ type StagingCtx = {
   revertRow: (row: KeywordRow) => void
   /** 편집 가능 여부 (hasKeys=false 면 false) */
   editable: boolean
+}
+
+// =============================================================================
+// F-3.5 CSV 내보내기 (현재 필터 / 정렬 적용된 rows → 클라이언트 직렬화)
+// =============================================================================
+//
+// SPEC 6.3 CSV 규격 컬럼 순서:
+//   operation, nccKeywordId, nccAdgroupId, keyword, matchType,
+//   bidAmt, useGroupBidAmt, userLock, externalId
+//
+// - operation 은 "UPDATE" 고정 (재업로드 시 UPDATE 흐름 호환)
+// - bidAmt null → 빈 셀 (그룹 입찰가 사용 행)
+// - matchType null → 빈 셀
+// - externalId null → 빈 셀 (UPDATE 에서는 optional)
+// - boolean 은 "true"/"false" 문자열
+// - 인코딩: UTF-8 + BOM (\uFEFF) → 한글 엑셀 호환
+// - 파일명: keywords_{advertiserId}_{YYYYMMDD}_{HHmmss}.csv
+//
+// 서버 호출 X — 이미 RSC 에서 advertiserId 한정으로 가져온 rows 만 직렬화.
+
+const KEYWORD_CSV_COLUMNS = [
+  "operation",
+  "nccKeywordId",
+  "nccAdgroupId",
+  "keyword",
+  "matchType",
+  "bidAmt",
+  "useGroupBidAmt",
+  "userLock",
+  "externalId",
+] as const
+
+function exportKeywordsCsv(rows: KeywordRow[], advertiserId: string) {
+  const data = rows.map((r) => ({
+    operation: "UPDATE",
+    nccKeywordId: r.nccKeywordId,
+    nccAdgroupId: r.adgroup.nccAdgroupId,
+    keyword: r.keyword,
+    matchType: r.matchType ?? "",
+    bidAmt: r.bidAmt ?? "",
+    useGroupBidAmt: String(r.useGroupBidAmt),
+    userLock: String(r.userLock),
+    externalId: r.externalId ?? "",
+  }))
+  const csv = Papa.unparse(data, {
+    columns: KEYWORD_CSV_COLUMNS as unknown as string[],
+  })
+  const blob = new Blob(["\uFEFF" + csv], {
+    type: "text/csv;charset=utf-8",
+  })
+  const url = URL.createObjectURL(blob)
+
+  // 파일명 타임스탬프 — 로컬 시간 기준 YYYYMMDD_HHmmss
+  const now = new Date()
+  const pad = (n: number) => String(n).padStart(2, "0")
+  const ts =
+    `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+    `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+  const filename = `keywords_${advertiserId}_${ts}.csv`
+
+  const a = document.createElement("a")
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
 }
 
 // =============================================================================
@@ -1016,6 +1087,26 @@ export function KeywordsTable({
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              // F-3.5 — 현재 필터 / 정렬 적용된 rows 만 직렬화 (table.getRowModel())
+              const filtered = rows.map((r) => r.original)
+              if (filtered.length === 0) return
+              exportKeywordsCsv(filtered, advertiserId)
+              toast.success(`키워드 ${filtered.length.toLocaleString()}건 내보내기 완료`)
+            }}
+            disabled={rows.length === 0}
+            title={
+              rows.length === 0
+                ? "내보낼 키워드가 없습니다 (필터 결과 0건)"
+                : "현재 필터 / 정렬된 키워드를 CSV 로 다운로드"
+            }
+          >
+            <DownloadIcon />
+            CSV 내보내기
+          </Button>
           <Button
             variant="outline"
             size="sm"

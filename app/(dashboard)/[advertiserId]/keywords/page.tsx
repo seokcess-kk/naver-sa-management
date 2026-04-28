@@ -68,6 +68,7 @@ export default async function KeywordsPage({
       bidAmt: true,
       useGroupBidAmt: true,
       userLock: true,
+      externalId: true, // F-3.5 CSV 내보내기 — UPDATE 행에 함께 출력 (재업로드 멱등키 보존)
       status: true,
       inspectStatus: true,
       recentAvgRnk: true,
@@ -94,6 +95,7 @@ export default async function KeywordsPage({
     bidAmt: k.bidAmt,
     useGroupBidAmt: k.useGroupBidAmt,
     userLock: k.userLock,
+    externalId: k.externalId,
     status: k.status,
     inspectStatus: k.inspectStatus,
     recentAvgRnk:
