@@ -1,12 +1,18 @@
 /**
- * 광고주 컨텍스트 대시보드 (placeholder — F-7.1 에서 본격 구현)
+ * 광고주 컨텍스트 대시보드 (F-7.1 KPI + F-7.4 TOP)
  *
  * - 권한: getCurrentAdvertiser 가 admin 또는 화이트리스트 검증을 처리
  * - 키 미설정 시 안내 카드 (testConnection / 동기화 / SA API 호출 차단됨)
- * - KPI 카드 자리 표시 (F-7.1 에서 채움)
- * - 캠페인 / 광고그룹 / 키워드 진입 링크 (소재 / 확장소재는 후속 단계)
+ * - F-1.5 연결 상태 카드 (비즈머니 잔액 + 잠금 상태)
+ * - F-7.1 KPI: 오늘 / 어제 / 7일 / 30일 (4 기간 × 4 지표)
+ * - F-7.4 TOP: 캠페인 / 키워드 (지표·기간·정렬·limit 가변)
+ * - 캠페인 / 광고그룹 / 키워드 / 소재 / 확장소재 진입 링크
  *
- * SPEC 6.7 F-7.1 / 11.2 대시보드.
+ * RSC 사전 호출:
+ *   checkConnection / getDashboardKpi / getTopCampaigns 를 Promise.all 로 병렬.
+ *   hasKeys=false 시 모두 null 로 패스 (외부 호출 차단).
+ *
+ * SPEC 6.7 F-7.1 / F-7.4 / 11.2 대시보드.
  */
 
 import Link from "next/link"
@@ -28,7 +34,13 @@ import {
 } from "@/components/ui/card"
 import { KeyStatusBadge } from "@/components/admin/key-status-badge"
 import { ConnectionStatusCard } from "@/components/dashboard/connection-status-card"
+import { KpiCardsSection } from "@/components/dashboard/kpi-cards-section"
+import { TopListSection } from "@/components/dashboard/top-list-section"
 import { checkConnection } from "@/app/(dashboard)/[advertiserId]/actions"
+import {
+  getDashboardKpi,
+  getTopCampaigns,
+} from "@/app/(dashboard)/[advertiserId]/dashboard/actions"
 
 export default async function AdvertiserDashboardPage({
   params,
@@ -54,6 +66,22 @@ export default async function AdvertiserDashboardPage({
     }
     throw e
   }
+
+  // RSC 사전 호출 — 키 있으면 병렬 (waterfall 방지). 없으면 모두 null (외부 호출 차단).
+  // checkConnection / getDashboardKpi / getTopCampaigns 는 모두 advertiserId 권한 재검증 포함.
+  const [connectionInitial, kpiInitial, topCampaignsInitial] =
+    advertiser.hasKeys
+      ? await Promise.all([
+          checkConnection(advertiser.id),
+          getDashboardKpi(advertiser.id),
+          getTopCampaigns(advertiser.id, {
+            metric: "impCnt",
+            period: "recent7d",
+            limit: 5,
+            order: "desc",
+          }),
+        ])
+      : [null, null, null]
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -91,31 +119,26 @@ export default async function AdvertiserDashboardPage({
         </Card>
       )}
 
-      {/* F-1.5 — RSC 단계에서 사전 점검 후 props 전달.
-          hasKeys=false면 SA 호출 차단 → null. 클라이언트는 새로고침만 제공. */}
+      {/* F-1.5 / F-7.1 / F-7.4 — RSC 단계에서 Promise.all 병렬 호출 후 props 전달.
+          hasKeys=false 면 SA 호출 차단 → null. 클라이언트는 새로고침만 제공.
+          Stats 응답은 stats.ts 자체 캐시 (오늘 5분 / 과거 1시간) 적용. */}
       <ConnectionStatusCard
         advertiserId={advertiser.id}
         hasKeys={advertiser.hasKeys}
-        initial={
-          advertiser.hasKeys ? await checkConnection(advertiser.id) : null
-        }
+        initial={connectionInitial}
       />
 
-      <Card>
-        <CardHeader className="border-b">
-          <CardTitle>대시보드</CardTitle>
-          <CardDescription>
-            준비 중 — F-7.1 에서 본격 구현됩니다 (오늘·어제·7일·30일 KPI 카드 +
-            트렌드 차트 + 최근 알림 피드 + TOP 캠페인/키워드).
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-3 py-4 md:grid-cols-4">
-          <KpiPlaceholder label="노출" />
-          <KpiPlaceholder label="클릭" />
-          <KpiPlaceholder label="비용" />
-          <KpiPlaceholder label="CTR" />
-        </CardContent>
-      </Card>
+      <KpiCardsSection
+        advertiserId={advertiser.id}
+        hasKeys={advertiser.hasKeys}
+        initial={kpiInitial}
+      />
+
+      <TopListSection
+        advertiserId={advertiser.id}
+        hasKeys={advertiser.hasKeys}
+        initial={topCampaignsInitial}
+      />
 
       <Card>
         <CardHeader className="border-b">
@@ -166,15 +189,6 @@ export default async function AdvertiserDashboardPage({
         </Link>{" "}
         (admin) 에서.
       </p>
-    </div>
-  )
-}
-
-function KpiPlaceholder({ label }: { label: string }) {
-  return (
-    <div className="rounded-lg border bg-background p-3">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 font-mono text-lg text-muted-foreground">—</div>
     </div>
   )
 }
