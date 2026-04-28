@@ -43,16 +43,19 @@
  */
 
 import { revalidatePath } from "next/cache"
+import Papa from "papaparse"
 import { z } from "zod"
 
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
 import {
+  createKeywords,
   listKeywords,
   updateKeywordsBulk,
   type Keyword as SaKeyword,
   type KeywordBulkUpdateItem,
+  type KeywordCreateItem,
 } from "@/lib/naver-sa/keywords"
 import { NaverSaError } from "@/lib/naver-sa/errors"
 import type {
@@ -1397,4 +1400,1271 @@ export async function bulkActionKeywords(
   revalidatePath(`/${advertiserId}/keywords`)
 
   return { batchId: batch.id, total, success, failed, items: results }
+}
+
+// =============================================================================
+// 4. parseAndValidateCsv / applyCsvChangeBatch — CSV 일괄 가져오기 (F-3.4)
+// =============================================================================
+//
+// 2단계 흐름 (CLAUDE.md "CSV 처리 규격" + SPEC F-3.4):
+//   1) parseAndValidateCsv  — 파싱·검증·충돌 검사. ChangeBatch 미생성. 미리보기용.
+//   2) applyCsvChangeBatch  — 사용자 확정 후. ChangeBatch 생성 + 청크별 SA 호출.
+//
+// 컬럼: operation / nccKeywordId / nccAdgroupId / keyword / matchType / bidAmt /
+//       useGroupBidAmt / userLock / externalId
+// DELETE 비대상 (OFF 로 대체).
+// CREATE 멱등성 이중 방어:
+//   1) externalId — 동일 키 status='done' 이력 → conflict
+//   2) Natural key (nccAdgroupId, keyword, matchType) — 기존 Keyword 존재 → conflict
+//      (사용자 선택: skip / UPDATE 전환 / 전체 중단)
+// UPDATE/OFF 멱등성: nccKeywordId 가 자연 식별자.
+//
+// 본 PR 1차 규모 제약:
+//   - **1000행 상한** — Vercel 함수 시간 가정. 초과 시 throw.
+//   - 5천 행 / 청크 분할은 후속 PR(`batch-executor-job` Job Table) 이관 TODO.
+
+// -- 공용 타입 ---------------------------------------------------------------
+
+export type CsvOperation = "CREATE" | "UPDATE" | "OFF"
+
+export type CsvRow = {
+  /** 1-based. 헤더는 0. */
+  rowIndex: number
+  operation: CsvOperation
+  nccKeywordId?: string
+  nccAdgroupId?: string
+  keyword?: string
+  matchType?: string
+  /** null = 빈 셀 (변경 안 함 의도). */
+  bidAmt?: number | null
+  useGroupBidAmt?: boolean | null
+  userLock?: boolean | null
+  externalId?: string
+}
+
+export type CsvValidationItem =
+  | { kind: "valid"; row: CsvRow }
+  /** 중복 행(첫 행) 등 — 마지막 행만 적용. items 에는 첫 행이 warning 으로 기록됨. */
+  | { kind: "warning"; row: CsvRow; warnings: string[] }
+  | {
+      kind: "error"
+      rowIndex: number
+      raw: Record<string, string>
+      errors: string[]
+    }
+  | {
+      kind: "conflict"
+      row: CsvRow
+      reason: "external_id_exists" | "natural_key_exists"
+      /** natural_key_exists 시 기존 Keyword 의 nccKeywordId — 사용자가 UPDATE 전환 선택 시 사용. */
+      existingNccKeywordId?: string
+    }
+
+export type ParseAndValidateResult = {
+  total: number
+  byKind: { valid: number; warning: number; error: number; conflict: number }
+  items: CsvValidationItem[]
+  /** CREATE 행 중 광고주 DB 에 존재하지 않는 nccAdgroupId 목록 (UI 경고용). */
+  unknownAdgroupIds: string[]
+}
+
+const CSV_MAX_ROWS = 1000
+
+/** 빈 셀 / 미정의 → undefined. 문자열은 trim 후 빈 문자열도 undefined. */
+function normCell(v: unknown): string | undefined {
+  if (v === undefined || v === null) return undefined
+  const s = typeof v === "string" ? v : String(v)
+  const t = s.trim()
+  return t.length === 0 ? undefined : t
+}
+
+/** "true" / "false" / 빈값 → boolean | null. 그 외 문자열은 sentinel "invalid". */
+function parseBoolCell(v: string | undefined): boolean | null | "invalid" {
+  if (v === undefined) return null
+  const lower = v.toLowerCase()
+  if (lower === "true" || lower === "1") return true
+  if (lower === "false" || lower === "0") return false
+  return "invalid"
+}
+
+/** 정수 cell — 빈값 null, 숫자 변환 실패 sentinel "invalid". */
+function parseIntCell(v: string | undefined): number | null | "invalid" {
+  if (v === undefined) return null
+  if (!/^-?\d+$/.test(v)) return "invalid"
+  const n = Number.parseInt(v, 10)
+  if (!Number.isFinite(n)) return "invalid"
+  return n
+}
+
+const MATCH_TYPES = new Set(["EXACT", "PHRASE", "BROAD"])
+const OPERATIONS = new Set<CsvOperation>(["CREATE", "UPDATE", "OFF"])
+
+// =============================================================================
+// 4-1. parseAndValidateCsv
+// =============================================================================
+//
+// 처리 순서:
+//   1. getCurrentAdvertiser — 권한
+//   2. PapaParse parse(header:true, skipEmptyLines:true) — 컬럼 순서 무관
+//   3. 1000행 초과 시 즉시 throw
+//   4. 행별 수동 검증 (operation enum / 필수 컬럼 / 타입 변환)
+//   5. 중복 행 처리 — 첫 행 warning + 마지막 행만 valid
+//   6. 광고주 한정 사전 조회:
+//      - CREATE 의 nccAdgroupId 광고주 소속 검사
+//      - UPDATE/OFF 의 nccKeywordId 광고주 소속 검사
+//   7. CREATE 멱등성 충돌 검사 — externalId 기존 done / Natural key 기존 Keyword
+//   8. items 배열 + summary 반환
+//
+// 안전장치:
+//   - 모든 prisma 조회 광고주 한정 (campaign.advertiserId join)
+//   - SA API 호출 X (검증만)
+//   - AuditLog 미기록 (변경 X)
+//   - 검증 실패 행을 도중에 throw 하지 않음 — 모든 행 검증 후 종합 반환
+
+/**
+ * CSV 텍스트 파싱·검증·충돌 검사. ChangeBatch 생성 X — 미리보기 단계에서만 호출.
+ */
+export async function parseAndValidateCsv(
+  advertiserId: string,
+  csvText: string,
+): Promise<ParseAndValidateResult> {
+  // -- 권한 ---------------------------------------------------------------
+  await getCurrentAdvertiser(advertiserId)
+
+  // -- PapaParse ---------------------------------------------------------
+  // BOM 허용 — PapaParse 가 자동 처리. 컬럼 순서 무관 (header:true).
+  const parseResult = Papa.parse<Record<string, string>>(csvText, {
+    header: true,
+    skipEmptyLines: true,
+    transformHeader: (h) => h.trim(),
+  })
+
+  const rawRows = parseResult.data ?? []
+
+  if (rawRows.length > CSV_MAX_ROWS) {
+    throw new Error(
+      `1000행 초과 (${rawRows.length}행) — 후속 PR Job Table 패턴 도입 후 지원`,
+    )
+  }
+
+  // -- 1차: 행별 검증 ----------------------------------------------------
+  // rowIndex 는 1-based (헤더는 0).
+  type Stage1Item =
+    | { kind: "ok"; row: CsvRow }
+    | {
+        kind: "err"
+        rowIndex: number
+        raw: Record<string, string>
+        errors: string[]
+      }
+  const stage1: Stage1Item[] = rawRows.map((raw, idx) => {
+    const rowIndex = idx + 1
+    const errors: string[] = []
+
+    const operation = normCell(raw.operation)?.toUpperCase()
+    if (!operation) {
+      errors.push("operation 필수")
+    } else if (!OPERATIONS.has(operation as CsvOperation)) {
+      errors.push(`operation 값 무효: ${operation}`)
+    }
+
+    const nccKeywordId = normCell(raw.nccKeywordId)
+    const nccAdgroupId = normCell(raw.nccAdgroupId)
+    const keyword = normCell(raw.keyword)
+    const matchTypeRaw = normCell(raw.matchType)?.toUpperCase()
+    const externalId = normCell(raw.externalId)
+
+    let matchType: string | undefined
+    if (matchTypeRaw !== undefined) {
+      if (!MATCH_TYPES.has(matchTypeRaw)) {
+        errors.push(`matchType 값 무효: ${matchTypeRaw}`)
+      } else {
+        matchType = matchTypeRaw
+      }
+    }
+
+    // 정수 / 불리언 변환 (빈값 = null = 변경 안 함).
+    const bidAmtParsed = parseIntCell(normCell(raw.bidAmt))
+    if (bidAmtParsed === "invalid") errors.push("bidAmt 정수 변환 실패")
+    if (typeof bidAmtParsed === "number" && bidAmtParsed < 0) {
+      errors.push("bidAmt 음수 불가")
+    }
+    const useGroupBidAmtParsed = parseBoolCell(normCell(raw.useGroupBidAmt))
+    if (useGroupBidAmtParsed === "invalid") {
+      errors.push("useGroupBidAmt 불리언 변환 실패")
+    }
+    const userLockParsed = parseBoolCell(normCell(raw.userLock))
+    if (userLockParsed === "invalid") {
+      errors.push("userLock 불리언 변환 실패")
+    }
+
+    // operation 별 필수 컬럼.
+    if (operation === "CREATE") {
+      if (!nccAdgroupId) errors.push("CREATE: nccAdgroupId 필수")
+      if (!keyword) errors.push("CREATE: keyword 필수")
+      if (!matchTypeRaw) errors.push("CREATE: matchType 필수")
+      if (!externalId) errors.push("CREATE: externalId 필수")
+    } else if (operation === "UPDATE" || operation === "OFF") {
+      if (!nccKeywordId) errors.push(`${operation}: nccKeywordId 필수`)
+    }
+
+    if (errors.length > 0 || !operation) {
+      return { kind: "err", rowIndex, raw, errors }
+    }
+
+    const row: CsvRow = {
+      rowIndex,
+      operation: operation as CsvOperation,
+      nccKeywordId,
+      nccAdgroupId,
+      keyword,
+      matchType,
+      bidAmt: bidAmtParsed === "invalid" ? null : (bidAmtParsed as number | null),
+      useGroupBidAmt:
+        useGroupBidAmtParsed === "invalid"
+          ? null
+          : (useGroupBidAmtParsed as boolean | null),
+      userLock:
+        userLockParsed === "invalid" ? null : (userLockParsed as boolean | null),
+      externalId,
+    }
+    return { kind: "ok", row }
+  })
+
+  // -- 2차: 중복 행 처리 -------------------------------------------------
+  // 같은 키의 행이 N개 → 마지막 행만 valid, 그 외는 warning.
+  // 키 정의:
+  //   UPDATE/OFF: `${operation}:${nccKeywordId}`
+  //   CREATE:     `${operation}:${nccAdgroupId}:${keyword}:${matchType}`
+  const dupKeyToLastIdx = new Map<string, number>()
+  stage1.forEach((s, i) => {
+    if (s.kind !== "ok") return
+    const r = s.row
+    let key: string
+    if (r.operation === "CREATE") {
+      key = `CREATE:${r.nccAdgroupId}:${r.keyword}:${r.matchType}`
+    } else {
+      key = `${r.operation}:${r.nccKeywordId}`
+    }
+    dupKeyToLastIdx.set(key, i) // 마지막 발견 인덱스 갱신
+  })
+
+  // CREATE externalId 중복 검사 — 같은 CSV 내에서 동일 externalId 가 자연키 다른
+  // 두 CREATE 행에 사용되면 ChangeItem.idempotencyKey unique([batchId, idem]) 충돌.
+  // 사용자 멱등키이므로 중복 자체가 의도 오류일 가능성 — 모든 충돌 행을 error 처리.
+  const externalIdToRowIdxs = new Map<string, number[]>()
+  stage1.forEach((s, i) => {
+    if (s.kind !== "ok") return
+    const r = s.row
+    if (r.operation !== "CREATE" || !r.externalId) return
+    const list = externalIdToRowIdxs.get(r.externalId) ?? []
+    list.push(i)
+    externalIdToRowIdxs.set(r.externalId, list)
+  })
+  const conflictedExternalIdsInBatch = new Set<string>()
+  for (const [eid, idxs] of externalIdToRowIdxs) {
+    if (idxs.length <= 1) continue
+    // 자연키도 동일하면 일반 dup 처리(마지막 행만 valid)로 충분 — 자연키가 서로 다른 경우만 충돌
+    const natKeys = new Set<string>()
+    for (const i of idxs) {
+      const r = (stage1[i] as { kind: "ok"; row: CsvRow }).row
+      natKeys.add(`${r.nccAdgroupId}:${r.keyword}:${r.matchType}`)
+    }
+    if (natKeys.size > 1) {
+      conflictedExternalIdsInBatch.add(eid)
+    }
+  }
+
+  // -- 3차: 광고주 한정 사전 조회 ---------------------------------------
+  // CREATE 의 nccAdgroupId / UPDATE·OFF 의 nccKeywordId 가 광고주 소속인지 검증.
+  const okRows = stage1.filter(
+    (s): s is { kind: "ok"; row: CsvRow } => s.kind === "ok",
+  )
+
+  const createAdgroupIds = new Set(
+    okRows
+      .filter((s) => s.row.operation === "CREATE" && s.row.nccAdgroupId)
+      .map((s) => s.row.nccAdgroupId!),
+  )
+  const updateOffKeywordIds = new Set(
+    okRows
+      .filter(
+        (s) =>
+          (s.row.operation === "UPDATE" || s.row.operation === "OFF") &&
+          s.row.nccKeywordId,
+      )
+      .map((s) => s.row.nccKeywordId!),
+  )
+
+  const adgroupRows =
+    createAdgroupIds.size > 0
+      ? await prisma.adGroup.findMany({
+          where: {
+            nccAdgroupId: { in: Array.from(createAdgroupIds) },
+            campaign: { advertiserId },
+          },
+          select: { id: true, nccAdgroupId: true },
+        })
+      : []
+  const validAdgroupSet = new Set(adgroupRows.map((g) => g.nccAdgroupId))
+  const unknownAdgroupIds = Array.from(createAdgroupIds).filter(
+    (id) => !validAdgroupSet.has(id),
+  )
+
+  const keywordRows =
+    updateOffKeywordIds.size > 0
+      ? await prisma.keyword.findMany({
+          where: {
+            nccKeywordId: { in: Array.from(updateOffKeywordIds) },
+            adgroup: { campaign: { advertiserId } },
+          },
+          select: { nccKeywordId: true },
+        })
+      : []
+  const validKeywordSet = new Set(keywordRows.map((k) => k.nccKeywordId))
+
+  // -- 4차: CREATE 멱등성 충돌 검사 -------------------------------------
+  // (a) externalId — 과거 ChangeItem(idempotencyKey 또는 endsWith pattern) 의 done 이력
+  //     1차 PR 단순 매칭: idempotencyKey 가 정확히 externalId 와 일치 또는 `:create:${eid}` 로 끝나는 경우
+  //     CSV CREATE 의 idem 형식이 `${batchId}:create:${externalId}` 이므로 endsWith 검사.
+  // (b) Natural key — DB Keyword 에 (nccAdgroupId, keyword, matchType) 일치 행 존재
+  const createOkRows = okRows.filter((s) => s.row.operation === "CREATE")
+
+  // (a) externalId 충돌 — Postgres ILIKE 못 쓰는 prisma 한계 → 단순 일괄 조회 후 endsWith 매칭
+  // 광고주 한정: ChangeBatch.summary 에 advertiserId 가 저장되어 있으므로 (L2050)
+  // Prisma path filter `summary -> advertiserId` 로 본 광고주 batch 의 ChangeItem 만 조회.
+  // 다른 광고주의 done 이력에 false-positive conflict 매칭되는 문제 차단.
+  const createExternalIds = createOkRows
+    .map((s) => s.row.externalId)
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+
+  const existingDoneExternalIds = new Set<string>()
+  if (createExternalIds.length > 0) {
+    // idempotencyKey 후미 매칭 — Prisma `endsWith` 지원
+    const orClauses = createExternalIds.map((eid) => ({
+      idempotencyKey: { endsWith: `:create:${eid}` },
+    }))
+    const dones = await prisma.changeItem.findMany({
+      where: {
+        status: "done",
+        OR: orClauses,
+        // 광고주 한정 — ChangeBatch.summary.advertiserId 와 일치하는 batch 만
+        batch: {
+          summary: { path: ["advertiserId"], equals: advertiserId },
+        },
+      },
+      select: { idempotencyKey: true },
+    })
+    for (const d of dones) {
+      // idempotencyKey 의 마지막 토큰이 externalId
+      const m = d.idempotencyKey.match(/:create:(.+)$/)
+      if (m) existingDoneExternalIds.add(m[1])
+    }
+  }
+
+  // (b) Natural key 충돌 — 광고주 한정
+  const naturalKeyTuples = createOkRows
+    .filter(
+      (s) =>
+        s.row.nccAdgroupId &&
+        s.row.keyword &&
+        s.row.matchType &&
+        validAdgroupSet.has(s.row.nccAdgroupId!),
+    )
+    .map((s) => ({
+      nccAdgroupId: s.row.nccAdgroupId!,
+      keyword: s.row.keyword!,
+      matchType: s.row.matchType!,
+    }))
+
+  const existingByNatKey = new Map<string, string>() // key → existingNccKeywordId
+  if (naturalKeyTuples.length > 0) {
+    const adgroupNccs = Array.from(
+      new Set(naturalKeyTuples.map((t) => t.nccAdgroupId)),
+    )
+    const adgroupNccToInternal = new Map(
+      adgroupRows.map((g) => [g.nccAdgroupId, g.id]),
+    )
+    const internalAdgroupIds = adgroupNccs
+      .map((nid) => adgroupNccToInternal.get(nid))
+      .filter((v): v is string => typeof v === "string")
+
+    const existingKeywords = await prisma.keyword.findMany({
+      where: {
+        adgroupId: { in: internalAdgroupIds },
+        adgroup: { campaign: { advertiserId } },
+        keyword: { in: Array.from(new Set(naturalKeyTuples.map((t) => t.keyword))) },
+      },
+      select: {
+        nccKeywordId: true,
+        keyword: true,
+        matchType: true,
+        adgroup: { select: { nccAdgroupId: true } },
+      },
+    })
+    for (const k of existingKeywords) {
+      if (k.matchType === null) continue
+      const key = `${k.adgroup.nccAdgroupId}:${k.keyword}:${k.matchType.toUpperCase()}`
+      existingByNatKey.set(key, k.nccKeywordId)
+    }
+  }
+
+  // -- 5차: 최종 items 배열 산출 ----------------------------------------
+  const items: CsvValidationItem[] = []
+  for (let i = 0; i < stage1.length; i++) {
+    const s = stage1[i]
+    if (s.kind === "err") {
+      items.push({
+        kind: "error",
+        rowIndex: s.rowIndex,
+        raw: s.raw,
+        errors: s.errors,
+      })
+      continue
+    }
+
+    const r = s.row
+
+    // 광고주 한정 사전 조회 누락 검사 — error 처리
+    if (r.operation === "CREATE" && r.nccAdgroupId) {
+      if (!validAdgroupSet.has(r.nccAdgroupId)) {
+        items.push({
+          kind: "error",
+          rowIndex: r.rowIndex,
+          raw: rawRows[i],
+          errors: [`광고그룹이 광고주 소속 아님 (${r.nccAdgroupId})`],
+        })
+        continue
+      }
+    }
+    if ((r.operation === "UPDATE" || r.operation === "OFF") && r.nccKeywordId) {
+      if (!validKeywordSet.has(r.nccKeywordId)) {
+        items.push({
+          kind: "error",
+          rowIndex: r.rowIndex,
+          raw: rawRows[i],
+          errors: [`키워드가 광고주 소속 아님 (${r.nccKeywordId})`],
+        })
+        continue
+      }
+    }
+
+    // 중복 행 처리 — 마지막 행만 valid, 그 외는 warning
+    let dupKey: string
+    if (r.operation === "CREATE") {
+      dupKey = `CREATE:${r.nccAdgroupId}:${r.keyword}:${r.matchType}`
+    } else {
+      dupKey = `${r.operation}:${r.nccKeywordId}`
+    }
+    const lastIdx = dupKeyToLastIdx.get(dupKey)
+    if (lastIdx !== undefined && lastIdx !== i) {
+      items.push({
+        kind: "warning",
+        row: r,
+        warnings: ["중복 행 — 마지막 행만 적용됨"],
+      })
+      continue
+    }
+
+    // CREATE externalId 중복(자연키 상이) — error 처리
+    // ChangeItem.idempotencyKey unique 충돌 방지 + 사용자 멱등키 의도 오류 의심
+    if (
+      r.operation === "CREATE" &&
+      r.externalId &&
+      conflictedExternalIdsInBatch.has(r.externalId)
+    ) {
+      items.push({
+        kind: "error",
+        rowIndex: r.rowIndex,
+        raw: rawRows[i],
+        errors: [
+          `externalId 중복 — 동일 CSV 내 다른 자연키 CREATE 행에 사용됨 (${r.externalId})`,
+        ],
+      })
+      continue
+    }
+
+    // CREATE 멱등성 충돌 검사
+    if (r.operation === "CREATE") {
+      if (r.externalId && existingDoneExternalIds.has(r.externalId)) {
+        items.push({
+          kind: "conflict",
+          row: r,
+          reason: "external_id_exists",
+        })
+        continue
+      }
+      if (r.nccAdgroupId && r.keyword && r.matchType) {
+        const natKey = `${r.nccAdgroupId}:${r.keyword}:${r.matchType}`
+        const existing = existingByNatKey.get(natKey)
+        if (existing) {
+          items.push({
+            kind: "conflict",
+            row: r,
+            reason: "natural_key_exists",
+            existingNccKeywordId: existing,
+          })
+          continue
+        }
+      }
+    }
+
+    items.push({ kind: "valid", row: r })
+  }
+
+  // -- 카운트 ------------------------------------------------------------
+  const byKind = { valid: 0, warning: 0, error: 0, conflict: 0 }
+  for (const it of items) {
+    byKind[it.kind]++
+  }
+
+  return {
+    total: rawRows.length,
+    byKind,
+    items,
+    unknownAdgroupIds,
+  }
+}
+
+// =============================================================================
+// 4-2. applyCsvChangeBatch
+// =============================================================================
+
+export type CsvApplyDirective =
+  | { kind: "valid"; row: CsvRow }
+  | {
+      kind: "conflict"
+      row: CsvRow
+      /** skip: 적용 안 함. update: operation 을 UPDATE 로 강제. */
+      resolution: "skip" | "update"
+    }
+
+export type ApplyCsvResult = {
+  batchId: string
+  total: number
+  success: number
+  failed: number
+  byOperation: {
+    CREATE: { ok: number; failed: number }
+    UPDATE: { ok: number; failed: number }
+    OFF: { ok: number; failed: number }
+  }
+  items: Array<{
+    rowIndex: number
+    ok: boolean
+    error?: string
+    nccKeywordId?: string
+  }>
+}
+
+/**
+ * 사용자 확정 후 CSV 적용. ChangeBatch 생성 + operation 별 청크 처리 + DB 반영.
+ *
+ *   1. getCurrentAdvertiser — 권한 + advertiser. hasKeys=false throw
+ *   2. directives 1000행 상한 검증
+ *   3. directives → 효과 행 변환:
+ *      - kind:"valid": 그대로
+ *      - kind:"conflict" + skip: 제외
+ *      - kind:"conflict" + update: operation=UPDATE 강제, row.nccKeywordId 사용 (클라이언트 책임)
+ *   4. 광고주 한정 사전 조회 재검증 (시간차 외부 변경 보호)
+ *   5. ChangeBatch (status='running', action='keyword.csv') 생성
+ *   6. ChangeItem createMany — operation 별 targetType/targetId/idempotencyKey 설정
+ *   7. operation 별 그룹화 + 청크 처리:
+ *      - CREATE: nccAdgroupId 별 그룹화 → createKeywords 호출. 응답 nccKeywordId 로 ChangeItem.targetId 갱신 + DB upsert
+ *      - UPDATE: 행별 patch 합집합 → updateKeywordsBulk 1회. 행별 patch 필드만 DB update
+ *      - OFF:    items=[{nccKeywordId, userLock:true}], fields="userLock". DB userLock=true + status 재계산
+ *   8. ChangeItem 결과 매핑 ('done' / 'failed')
+ *   9. ChangeBatch finalize (success>0 → done, 0 → failed)
+ *  10. AuditLog 1건 — keyword.csv, summary={advertiserId, total, success, failed, byOperation}
+ *  11. revalidatePath
+ *
+ * 청크 분할 정책:
+ *   - CREATE 는 광고그룹 단위 자연스러운 청크
+ *   - UPDATE/OFF 는 단일 PUT (1000행 가정 — 1차 PR)
+ *   - 5천 행 분할은 후속 PR `batch-executor-job` Job Table 패턴 이관 TODO
+ */
+export async function applyCsvChangeBatch(
+  advertiserId: string,
+  directives: CsvApplyDirective[],
+): Promise<ApplyCsvResult> {
+  const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    throw new Error("API 키/시크릿 미입력")
+  }
+
+  if (directives.length === 0) {
+    throw new Error("적용 대상 행 없음")
+  }
+  if (directives.length > CSV_MAX_ROWS) {
+    throw new Error(
+      `1000행 초과 (${directives.length}행) — 후속 PR Job Table 패턴 도입 후 지원`,
+    )
+  }
+
+  // -- 1. directives → 효과 행 (effective rows) -------------------------
+  const effRows: CsvRow[] = []
+  for (const d of directives) {
+    if (d.kind === "valid") {
+      effRows.push(d.row)
+    } else if (d.kind === "conflict") {
+      if (d.resolution === "skip") continue
+      // update — operation=UPDATE 강제. row.nccKeywordId 는 클라이언트가
+      // existingNccKeywordId 로 채워서 보냄 (parseAndValidateCsv 결과 활용).
+      if (!d.row.nccKeywordId) {
+        throw new Error(
+          `conflict update 행에 nccKeywordId 누락 (rowIndex=${d.row.rowIndex})`,
+        )
+      }
+      effRows.push({ ...d.row, operation: "UPDATE" })
+    }
+  }
+
+  if (effRows.length === 0) {
+    throw new Error("적용 대상 행 없음 (모두 skip)")
+  }
+  if (effRows.length > CSV_MAX_ROWS) {
+    throw new Error(
+      `1000행 초과 (${effRows.length}행) — 후속 PR Job Table 패턴 도입 후 지원`,
+    )
+  }
+
+  // -- 2. 광고주 한정 재검증 (시간차 외부 변경 보호) -------------------
+  const createRows = effRows.filter((r) => r.operation === "CREATE")
+  const updateRows = effRows.filter((r) => r.operation === "UPDATE")
+  const offRows = effRows.filter((r) => r.operation === "OFF")
+
+  const createAdgroupIdSet = new Set(
+    createRows.map((r) => r.nccAdgroupId).filter((v): v is string => !!v),
+  )
+  const updateOffKeywordIdSet = new Set(
+    [...updateRows, ...offRows]
+      .map((r) => r.nccKeywordId)
+      .filter((v): v is string => !!v),
+  )
+
+  const adgroupRows =
+    createAdgroupIdSet.size > 0
+      ? await prisma.adGroup.findMany({
+          where: {
+            nccAdgroupId: { in: Array.from(createAdgroupIdSet) },
+            campaign: { advertiserId },
+          },
+          select: { id: true, nccAdgroupId: true },
+        })
+      : []
+  const validAdgroupNccToInternal = new Map(
+    adgroupRows.map((g) => [g.nccAdgroupId, g.id]),
+  )
+  for (const r of createRows) {
+    if (!r.nccAdgroupId || !validAdgroupNccToInternal.has(r.nccAdgroupId)) {
+      throw new Error(
+        `광고그룹이 광고주 소속 아님 — rowIndex=${r.rowIndex} nccAdgroupId=${r.nccAdgroupId}`,
+      )
+    }
+  }
+
+  const keywordRows =
+    updateOffKeywordIdSet.size > 0
+      ? await prisma.keyword.findMany({
+          where: {
+            nccKeywordId: { in: Array.from(updateOffKeywordIdSet) },
+            adgroup: { campaign: { advertiserId } },
+          },
+          select: {
+            id: true,
+            nccKeywordId: true,
+            keyword: true,
+            bidAmt: true,
+            useGroupBidAmt: true,
+            userLock: true,
+            matchType: true,
+            adgroupId: true,
+          },
+        })
+      : []
+  const validKeywordByNcc = new Map(
+    keywordRows.map((k) => [k.nccKeywordId, k]),
+  )
+  for (const r of [...updateRows, ...offRows]) {
+    if (!r.nccKeywordId || !validKeywordByNcc.has(r.nccKeywordId)) {
+      throw new Error(
+        `키워드가 광고주 소속 아님 — rowIndex=${r.rowIndex} nccKeywordId=${r.nccKeywordId}`,
+      )
+    }
+  }
+
+  // -- 3. ChangeBatch + ChangeItem 생성 ---------------------------------
+  const total = effRows.length
+  const action = "keyword.csv"
+
+  const batchSummary = {
+    advertiserId,
+    action,
+    total,
+    byOperation: {
+      CREATE: createRows.length,
+      UPDATE: updateRows.length,
+      OFF: offRows.length,
+    },
+  }
+
+  const batch = await prisma.changeBatch.create({
+    data: {
+      userId: user.id,
+      action,
+      status: "running",
+      total,
+      processed: 0,
+      attempt: 1,
+      summary: batchSummary as Prisma.InputJsonValue,
+    },
+  })
+
+  // ChangeItem.idempotencyKey unique([batchId, idempotencyKey]).
+  // CREATE 는 externalId 기반, UPDATE/OFF 는 nccKeywordId 기반.
+  type ItemSeed = {
+    batchId: string
+    targetType: string
+    targetId: string
+    before: Prisma.InputJsonValue
+    after: Prisma.InputJsonValue
+    idempotencyKey: string
+    status: "pending"
+  }
+
+  const seeds: ItemSeed[] = []
+
+  for (const r of createRows) {
+    if (!r.externalId) {
+      // 검증 단계에서 걸러졌어야 함 — 안전망
+      throw new Error(`CREATE: externalId 필수 (rowIndex=${r.rowIndex})`)
+    }
+    seeds.push({
+      batchId: batch.id,
+      targetType: "Keyword",
+      targetId: `pending:${r.externalId}`,
+      before: {} as Prisma.InputJsonValue,
+      after: {
+        operation: "CREATE",
+        nccAdgroupId: r.nccAdgroupId,
+        keyword: r.keyword,
+        matchType: r.matchType,
+        bidAmt: r.bidAmt ?? null,
+        useGroupBidAmt: r.useGroupBidAmt ?? null,
+        userLock: r.userLock ?? null,
+        externalId: r.externalId,
+      } as Prisma.InputJsonValue,
+      idempotencyKey: `${batch.id}:create:${r.externalId}`,
+      status: "pending",
+    })
+  }
+
+  for (const r of updateRows) {
+    const k = validKeywordByNcc.get(r.nccKeywordId!)!
+    const beforeObj: Record<string, unknown> = {}
+    const afterObj: Record<string, unknown> = {}
+    if (r.bidAmt !== undefined && r.bidAmt !== null) {
+      beforeObj.bidAmt = k.bidAmt === null ? null : Number(k.bidAmt)
+      afterObj.bidAmt = r.bidAmt
+    }
+    if (r.useGroupBidAmt !== undefined && r.useGroupBidAmt !== null) {
+      beforeObj.useGroupBidAmt = k.useGroupBidAmt
+      afterObj.useGroupBidAmt = r.useGroupBidAmt
+    }
+    if (r.userLock !== undefined && r.userLock !== null) {
+      beforeObj.userLock = k.userLock
+      afterObj.userLock = r.userLock
+    }
+    seeds.push({
+      batchId: batch.id,
+      targetType: "Keyword",
+      targetId: r.nccKeywordId!,
+      before: beforeObj as Prisma.InputJsonValue,
+      after: afterObj as Prisma.InputJsonValue,
+      idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
+      status: "pending",
+    })
+  }
+
+  for (const r of offRows) {
+    const k = validKeywordByNcc.get(r.nccKeywordId!)!
+    // 자기 멱등성: 이미 userLock=true 인 row 를 다시 OFF 로 적용해도 before=after 로
+    // ChangeItem 기록됨. 사용자 의도 자체는 명확 (OFF 로 만들기) 하므로 error 아님.
+    // F-6.4 롤백 도입 시: before === after 행은 효과 없는 변경으로 무시 처리 필요 (TODO).
+    seeds.push({
+      batchId: batch.id,
+      targetType: "Keyword",
+      targetId: r.nccKeywordId!,
+      before: { userLock: k.userLock } as Prisma.InputJsonValue,
+      after: { userLock: true } as Prisma.InputJsonValue,
+      idempotencyKey: `${batch.id}:off:${r.nccKeywordId}`,
+      status: "pending",
+    })
+  }
+
+  await prisma.changeItem.createMany({ data: seeds })
+
+  // -- 4. operation 별 SA 호출 + DB 반영 -------------------------------
+  const results: ApplyCsvResult["items"] = []
+  let successTotal = 0
+  let failedTotal = 0
+  const byOperation: ApplyCsvResult["byOperation"] = {
+    CREATE: { ok: 0, failed: 0 },
+    UPDATE: { ok: 0, failed: 0 },
+    OFF: { ok: 0, failed: 0 },
+  }
+
+  // 4-1. CREATE — 광고그룹 단위 그룹화 → createKeywords
+  // 광고그룹별 호출 단위로 부분 실패 허용 (다른 광고그룹은 계속).
+  if (createRows.length > 0) {
+    const byAdgroup = new Map<string, CsvRow[]>()
+    for (const r of createRows) {
+      const list = byAdgroup.get(r.nccAdgroupId!) ?? []
+      list.push(r)
+      byAdgroup.set(r.nccAdgroupId!, list)
+    }
+
+    for (const [nccAdgroupId, rows] of byAdgroup) {
+      const dbAdgroupId = validAdgroupNccToInternal.get(nccAdgroupId)!
+      const items: KeywordCreateItem[] = rows.map((r) => ({
+        keyword: r.keyword!,
+        bidAmt: r.bidAmt ?? null,
+        useGroupBidAmt:
+          r.useGroupBidAmt === null
+            ? undefined
+            : r.useGroupBidAmt ?? undefined,
+        userLock: r.userLock === null ? undefined : r.userLock ?? undefined,
+        externalId: r.externalId,
+      }))
+
+      try {
+        const created = await createKeywords(
+          advertiser.customerId,
+          nccAdgroupId,
+          items,
+        )
+
+        // 응답 매핑 — 네이버 SA bulk create 는 입력 순서와 1:1 대응이 일반 패턴.
+        // 1차: 응답 길이 == 입력 길이 → 인덱스 기반 매핑 (가장 정확).
+        // 2차(길이 불일치): (keyword, matchType) 정확 매칭만 시도. matchType 누락 응답에는
+        //   false-positive 매핑 위험으로 fallback 키 사용 안 함 (같은 keyword 다른 matchType
+        //   두 행이 동시에 CREATE 되는 경우 잘못된 행에 매핑되는 것을 차단).
+        const indexMatch = created.length === items.length
+        const respByExactKey = new Map<string, SaKeyword>()
+        if (!indexMatch) {
+          for (const k of created) {
+            const anyK = k as unknown as { matchType?: string }
+            const mt =
+              typeof anyK.matchType === "string" && anyK.matchType.length > 0
+                ? anyK.matchType.toUpperCase()
+                : ""
+            // 정확 (keyword, matchType) 매칭만 — matchType 누락 응답은 매칭 불가로 처리
+            if (mt) respByExactKey.set(`${k.keyword}::${mt}`, k)
+          }
+        }
+
+        for (let idx = 0; idx < rows.length; idx++) {
+          const r = rows[idx]
+          let u: SaKeyword | undefined
+          if (indexMatch) {
+            u = created[idx]
+          } else {
+            const respKey = `${r.keyword}::${r.matchType ?? ""}`
+            u = respByExactKey.get(respKey)
+          }
+
+          if (u) {
+            // ChangeItem.targetId 갱신 (pending → 실제 nccKeywordId)
+            await prisma.changeItem.updateMany({
+              where: {
+                batchId: batch.id,
+                idempotencyKey: `${batch.id}:create:${r.externalId}`,
+              },
+              data: { targetId: u.nccKeywordId, status: "done" },
+            })
+
+            // DB upsert (nccKeywordId unique).
+            // matchType 응답에 없으면 CSV row 의 matchType 사용 (passthrough 가정).
+            const anyU = u as unknown as { matchType?: string }
+            const mtFromResp =
+              typeof anyU.matchType === "string" && anyU.matchType.length > 0
+                ? anyU.matchType.toUpperCase()
+                : r.matchType ?? null
+
+            const userLockResp =
+              typeof u.userLock === "boolean"
+                ? u.userLock
+                : r.userLock ?? false
+            const useGroupBidResp =
+              typeof u.useGroupBidAmt === "boolean"
+                ? u.useGroupBidAmt
+                : r.useGroupBidAmt ?? true
+            const bidAmtResp =
+              typeof u.bidAmt === "number" ? u.bidAmt : r.bidAmt ?? null
+
+            const rawJson = u as unknown as Prisma.InputJsonValue
+
+            await prisma.keyword.upsert({
+              where: { nccKeywordId: u.nccKeywordId },
+              create: {
+                adgroupId: dbAdgroupId,
+                nccKeywordId: u.nccKeywordId,
+                keyword: u.keyword,
+                matchType: mtFromResp,
+                bidAmt: bidAmtResp,
+                useGroupBidAmt: useGroupBidResp,
+                userLock: userLockResp,
+                externalId: r.externalId ?? null,
+                status: mapKeywordStatus(u),
+                inspectStatus: mapInspectStatus(u),
+                raw: rawJson,
+              },
+              update: {
+                adgroupId: dbAdgroupId,
+                keyword: u.keyword,
+                matchType: mtFromResp ?? undefined,
+                bidAmt: bidAmtResp,
+                useGroupBidAmt: useGroupBidResp,
+                userLock: userLockResp,
+                externalId: r.externalId ?? null,
+                status: mapKeywordStatus(u),
+                inspectStatus: mapInspectStatus(u),
+                raw: rawJson,
+              },
+            })
+
+            results.push({
+              rowIndex: r.rowIndex,
+              ok: true,
+              nccKeywordId: u.nccKeywordId,
+            })
+            successTotal++
+            byOperation.CREATE.ok++
+          } else {
+            const errMsg = indexMatch
+              ? "응답에 누락"
+              : `응답 매핑 실패 (응답 길이=${created.length}, 입력=${items.length})`
+            await prisma.changeItem.updateMany({
+              where: {
+                batchId: batch.id,
+                idempotencyKey: `${batch.id}:create:${r.externalId}`,
+              },
+              data: { status: "failed", error: errMsg },
+            })
+            results.push({
+              rowIndex: r.rowIndex,
+              ok: false,
+              error: errMsg,
+            })
+            failedTotal++
+            byOperation.CREATE.failed++
+          }
+        }
+      } catch (e) {
+        // 광고그룹 단위 실패 — 해당 그룹 행만 failed (다른 광고그룹은 계속)
+        const msg = e instanceof Error ? e.message : String(e)
+        const safeMsg = msg.slice(0, 500)
+        for (const r of rows) {
+          await prisma.changeItem.updateMany({
+            where: {
+              batchId: batch.id,
+              idempotencyKey: `${batch.id}:create:${r.externalId}`,
+            },
+            data: { status: "failed", error: safeMsg },
+          })
+          results.push({
+            rowIndex: r.rowIndex,
+            ok: false,
+            error: safeMsg,
+          })
+          failedTotal++
+          byOperation.CREATE.failed++
+        }
+      }
+    }
+  }
+
+  // 4-2. UPDATE — 행별 patch 합집합 → updateKeywordsBulk 1회
+  if (updateRows.length > 0) {
+    const itemsForApi: KeywordBulkUpdateItem[] = []
+    const fieldUnion = new Set<"bidAmt" | "useGroupBidAmt" | "userLock">()
+    const patchByNcc = new Map<
+      string,
+      { bidAmt?: number | null; useGroupBidAmt?: boolean; userLock?: boolean }
+    >()
+
+    for (const r of updateRows) {
+      const item: KeywordBulkUpdateItem = { nccKeywordId: r.nccKeywordId! }
+      const patch: {
+        bidAmt?: number | null
+        useGroupBidAmt?: boolean
+        userLock?: boolean
+      } = {}
+      if (r.bidAmt !== undefined && r.bidAmt !== null) {
+        item.bidAmt = r.bidAmt
+        patch.bidAmt = r.bidAmt
+        fieldUnion.add("bidAmt")
+      }
+      if (r.useGroupBidAmt !== undefined && r.useGroupBidAmt !== null) {
+        item.useGroupBidAmt = r.useGroupBidAmt
+        patch.useGroupBidAmt = r.useGroupBidAmt
+        fieldUnion.add("useGroupBidAmt")
+      }
+      if (r.userLock !== undefined && r.userLock !== null) {
+        item.userLock = r.userLock
+        patch.userLock = r.userLock
+        fieldUnion.add("userLock")
+      }
+      // 모든 patch 가 빈 행 — UPDATE 인데 변경 필드 없음 → failed 처리
+      if (Object.keys(patch).length === 0) {
+        await prisma.changeItem.updateMany({
+          where: {
+            batchId: batch.id,
+            idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
+          },
+          data: { status: "failed", error: "변경 필드 없음" },
+        })
+        results.push({
+          rowIndex: r.rowIndex,
+          ok: false,
+          error: "변경 필드 없음",
+          nccKeywordId: r.nccKeywordId,
+        })
+        failedTotal++
+        byOperation.UPDATE.failed++
+        continue
+      }
+      itemsForApi.push(item)
+      patchByNcc.set(r.nccKeywordId!, patch)
+    }
+
+    if (itemsForApi.length > 0) {
+      const fields = Array.from(fieldUnion).join(",")
+      try {
+        const updated = await updateKeywordsBulk(
+          advertiser.customerId,
+          itemsForApi,
+          fields,
+        )
+        const updatedMap = new Map(updated.map((k) => [k.nccKeywordId, k]))
+
+        for (const r of updateRows) {
+          if (!patchByNcc.has(r.nccKeywordId!)) continue // 위에서 failed 처리됨
+          const u = updatedMap.get(r.nccKeywordId!)
+          const k = validKeywordByNcc.get(r.nccKeywordId!)!
+          const patch = patchByNcc.get(r.nccKeywordId!)!
+
+          if (u) {
+            const updateData: {
+              bidAmt?: number | null
+              useGroupBidAmt?: boolean
+              userLock?: boolean
+              status?: KeywordStatus
+              raw: Prisma.InputJsonValue
+            } = {
+              raw: u as unknown as Prisma.InputJsonValue,
+            }
+            if (patch.bidAmt !== undefined) {
+              updateData.bidAmt =
+                typeof u.bidAmt === "number" ? u.bidAmt : patch.bidAmt
+            }
+            if (patch.useGroupBidAmt !== undefined) {
+              updateData.useGroupBidAmt =
+                typeof u.useGroupBidAmt === "boolean"
+                  ? u.useGroupBidAmt
+                  : patch.useGroupBidAmt
+            }
+            if (patch.userLock !== undefined) {
+              updateData.userLock =
+                typeof u.userLock === "boolean" ? u.userLock : patch.userLock
+              updateData.status = mapKeywordStatus(u)
+            }
+
+            await prisma.keyword.update({
+              where: { id: k.id },
+              data: updateData,
+            })
+            await prisma.changeItem.updateMany({
+              where: {
+                batchId: batch.id,
+                idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
+              },
+              data: { status: "done" },
+            })
+            results.push({
+              rowIndex: r.rowIndex,
+              ok: true,
+              nccKeywordId: r.nccKeywordId,
+            })
+            successTotal++
+            byOperation.UPDATE.ok++
+          } else {
+            await prisma.changeItem.updateMany({
+              where: {
+                batchId: batch.id,
+                idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
+              },
+              data: { status: "failed", error: "응답에 누락" },
+            })
+            results.push({
+              rowIndex: r.rowIndex,
+              ok: false,
+              error: "응답에 누락",
+              nccKeywordId: r.nccKeywordId,
+            })
+            failedTotal++
+            byOperation.UPDATE.failed++
+          }
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        const safeMsg = msg.slice(0, 500)
+        // 일괄 실패 — itemsForApi 대상 모두 failed
+        for (const r of updateRows) {
+          if (!patchByNcc.has(r.nccKeywordId!)) continue
+          await prisma.changeItem.updateMany({
+            where: {
+              batchId: batch.id,
+              idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
+            },
+            data: { status: "failed", error: safeMsg },
+          })
+          results.push({
+            rowIndex: r.rowIndex,
+            ok: false,
+            error: safeMsg,
+            nccKeywordId: r.nccKeywordId,
+          })
+          failedTotal++
+          byOperation.UPDATE.failed++
+        }
+      }
+    }
+  }
+
+  // 4-3. OFF — userLock=true 일괄 적용
+  if (offRows.length > 0) {
+    const itemsForApi: KeywordBulkUpdateItem[] = offRows.map((r) => ({
+      nccKeywordId: r.nccKeywordId!,
+      userLock: true,
+    }))
+
+    try {
+      const updated = await updateKeywordsBulk(
+        advertiser.customerId,
+        itemsForApi,
+        "userLock",
+      )
+      const updatedMap = new Map(updated.map((k) => [k.nccKeywordId, k]))
+
+      for (const r of offRows) {
+        const u = updatedMap.get(r.nccKeywordId!)
+        const k = validKeywordByNcc.get(r.nccKeywordId!)!
+
+        if (u) {
+          const newLock = typeof u.userLock === "boolean" ? u.userLock : true
+          await prisma.keyword.update({
+            where: { id: k.id },
+            data: {
+              userLock: newLock,
+              status: mapKeywordStatus(u),
+              raw: u as unknown as Prisma.InputJsonValue,
+            },
+          })
+          await prisma.changeItem.updateMany({
+            where: {
+              batchId: batch.id,
+              idempotencyKey: `${batch.id}:off:${r.nccKeywordId}`,
+            },
+            data: { status: "done" },
+          })
+          results.push({
+            rowIndex: r.rowIndex,
+            ok: true,
+            nccKeywordId: r.nccKeywordId,
+          })
+          successTotal++
+          byOperation.OFF.ok++
+        } else {
+          await prisma.changeItem.updateMany({
+            where: {
+              batchId: batch.id,
+              idempotencyKey: `${batch.id}:off:${r.nccKeywordId}`,
+            },
+            data: { status: "failed", error: "응답에 누락" },
+          })
+          results.push({
+            rowIndex: r.rowIndex,
+            ok: false,
+            error: "응답에 누락",
+            nccKeywordId: r.nccKeywordId,
+          })
+          failedTotal++
+          byOperation.OFF.failed++
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      const safeMsg = msg.slice(0, 500)
+      for (const r of offRows) {
+        await prisma.changeItem.updateMany({
+          where: {
+            batchId: batch.id,
+            idempotencyKey: `${batch.id}:off:${r.nccKeywordId}`,
+          },
+          data: { status: "failed", error: safeMsg },
+        })
+        results.push({
+          rowIndex: r.rowIndex,
+          ok: false,
+          error: safeMsg,
+          nccKeywordId: r.nccKeywordId,
+        })
+        failedTotal++
+        byOperation.OFF.failed++
+      }
+    }
+  }
+
+  // -- 5. ChangeBatch finalize -----------------------------------------
+  const finalStatus: "done" | "failed" = successTotal === 0 ? "failed" : "done"
+  await prisma.changeBatch.update({
+    where: { id: batch.id },
+    data: {
+      status: finalStatus,
+      processed: total,
+      finishedAt: new Date(),
+    },
+  })
+
+  // -- 6. AuditLog 1건 (시크릿 X) --------------------------------------
+  await logAudit({
+    userId: user.id,
+    action,
+    targetType: "ChangeBatch",
+    targetId: batch.id,
+    before: null,
+    after: {
+      batchId: batch.id,
+      advertiserId,
+      total,
+      success: successTotal,
+      failed: failedTotal,
+      byOperation,
+    },
+  })
+
+  revalidatePath(`/${advertiserId}/keywords`)
+
+  // rowIndex 오름차순 정렬 (UI 결과 표시 친화)
+  results.sort((a, b) => a.rowIndex - b.rowIndex)
+
+  return {
+    batchId: batch.id,
+    total,
+    success: successTotal,
+    failed: failedTotal,
+    byOperation,
+    items: results,
+  }
 }

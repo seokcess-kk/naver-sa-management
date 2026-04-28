@@ -109,6 +109,7 @@ import {
 import { KeywordStatusBadge } from "@/components/dashboard/keyword-status-badge"
 import { InspectStatusBadge } from "@/components/dashboard/inspect-status-badge"
 import { SyncKeywordsButton } from "@/components/dashboard/sync-keywords-button"
+import { KeywordsCsvImportModal } from "@/components/dashboard/keywords-csv-import-modal"
 import {
   BulkActionModal,
   type BulkActionResult,
@@ -760,6 +761,8 @@ export function KeywordsTable({
   // -- staging state (F-3.2 인라인 편집) --------------------------------------
   const [staging, setStaging] = React.useState<StagingMap>(() => new Map())
   const [modalOpen, setModalOpen] = React.useState(false)
+  // -- F-3.4 CSV 가져오기 모달 -----------------------------------------------
+  const [csvOpen, setCsvOpen] = React.useState(false)
 
   // -- 다중 선택 + 일괄 액션 state (F-3.3) -----------------------------------
   // TanStack Table 의 rowSelection 은 row.id 기반 (getRowId=row.id 설정 → DB Keyword.id).
@@ -1009,10 +1012,31 @@ export function KeywordsTable({
           </h1>
           <p className="text-sm text-muted-foreground">
             셀을 클릭해 인라인 편집하거나, 체크박스로 다중 선택 후 ON/OFF ·
-            입찰가 일괄 변경. CSV 는 후속 단계에서 활성화됩니다.
+            입찰가 일괄 변경. CSV 가져오기로 일괄 생성·수정·OFF 가능.
           </p>
         </div>
-        <SyncKeywordsButton advertiserId={advertiserId} hasKeys={hasKeys} />
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              if (!hasKeys) {
+                toast.error("키 미설정 — CSV 가져오기 비활성")
+                return
+              }
+              setCsvOpen(true)
+            }}
+            disabled={!hasKeys}
+            title={
+              !hasKeys
+                ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
+                : undefined
+            }
+          >
+            CSV 가져오기
+          </Button>
+          <SyncKeywordsButton advertiserId={advertiserId} hasKeys={hasKeys} />
+        </div>
       </header>
 
       {!hasKeys && (
@@ -1362,6 +1386,22 @@ export function KeywordsTable({
             if (!o) setBulkAction(null)
           }}
           onClosed={handleBulkActionClosed}
+        />
+      )}
+
+      {/* CSV 가져오기 모달 (F-3.4) — 적용 결과로 닫히면 router.refresh */}
+      {csvOpen && (
+        <KeywordsCsvImportModal
+          advertiserId={advertiserId}
+          open
+          onOpenChange={(o) => {
+            if (!o) setCsvOpen(false)
+          }}
+          onClosed={(didApply) => {
+            if (didApply) {
+              router.refresh()
+            }
+          }}
         />
       )}
     </div>
