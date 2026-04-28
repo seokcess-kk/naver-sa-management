@@ -29,7 +29,10 @@ import {
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
 import { KeywordsTable } from "@/components/dashboard/keywords-table"
-import type { KeywordRow } from "@/components/dashboard/keywords-table"
+import type {
+  KeywordRow,
+  AdgroupOption,
+} from "@/components/dashboard/keywords-table"
 
 export default async function KeywordsPage({
   params,
@@ -86,6 +89,35 @@ export default async function KeywordsPage({
     take: 5000, // F-3.1 가상 스크롤 5천 행 안전 상한
   })
 
+  // F-3.6 키워드 추가 모달 — 광고그룹 옵션 (status='deleted' 제외, 광고주 한정).
+  //
+  // KeywordsTable 의 필터바 광고그룹 select 는 "현재 키워드 데이터 안의 광고그룹"
+  // 만 노출 (= keywords 배열에서 unique 추출) — 필터링 대상 한정 유지.
+  // 본 adgroupRows 는 그와 분리된 "추가 가능한 모든 광고그룹 목록" 으로,
+  // 키워드가 0건인 광고주에서도 키워드 추가 모달이 정상 동작하도록 별도 조회한다.
+  //
+  // 광고주 횡단 차단: where: { campaign: { advertiserId } }
+  const adgroupRows = await prisma.adGroup.findMany({
+    where: {
+      campaign: { advertiserId },
+      status: { not: "deleted" },
+    },
+    select: {
+      id: true,
+      nccAdgroupId: true,
+      name: true,
+      campaign: { select: { id: true, name: true } },
+    },
+    orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+  })
+
+  const adgroups: AdgroupOption[] = adgroupRows.map((a) => ({
+    id: a.id,
+    nccAdgroupId: a.nccAdgroupId,
+    name: a.name,
+    campaign: { id: a.campaign.id, name: a.campaign.name },
+  }))
+
   // Decimal / Date → JSON-friendly 직렬화. KeywordRow shape 으로 매핑.
   const keywords: KeywordRow[] = rows.map((k) => ({
     id: k.id,
@@ -117,6 +149,7 @@ export default async function KeywordsPage({
       advertiserId={advertiserId}
       hasKeys={advertiser.hasKeys}
       keywords={keywords}
+      adgroups={adgroups}
     />
   )
 }

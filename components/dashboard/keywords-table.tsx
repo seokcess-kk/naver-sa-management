@@ -113,6 +113,10 @@ import { InspectStatusBadge } from "@/components/dashboard/inspect-status-badge"
 import { SyncKeywordsButton } from "@/components/dashboard/sync-keywords-button"
 import { KeywordsCsvImportModal } from "@/components/dashboard/keywords-csv-import-modal"
 import {
+  KeywordsAddModal,
+  type AdgroupOption,
+} from "@/components/dashboard/keywords-add-modal"
+import {
   BulkActionModal,
   type BulkActionResult,
 } from "@/components/forms/bulk-action-modal"
@@ -134,6 +138,10 @@ const BULK_ACTION_MAX = 500
 // =============================================================================
 // 타입
 // =============================================================================
+
+// F-3.6 키워드 추가 모달용 광고그룹 옵션 — 정의는 keywords-add-modal.tsx,
+// page.tsx 가 본 모듈만 import 하도록 re-export.
+export type { AdgroupOption }
 
 /** RSC → 클라이언트 전달용 키워드 행. raw 컬럼 / 시크릿 X. */
 export type KeywordRow = {
@@ -822,10 +830,13 @@ export function KeywordsTable({
   advertiserId,
   hasKeys,
   keywords,
+  adgroups,
 }: {
   advertiserId: string
   hasKeys: boolean
   keywords: KeywordRow[]
+  /** F-3.6 키워드 추가 모달용 — page.tsx 가 광고주 한정으로 별도 조회. */
+  adgroups: AdgroupOption[]
 }) {
   const router = useRouter()
 
@@ -834,6 +845,8 @@ export function KeywordsTable({
   const [modalOpen, setModalOpen] = React.useState(false)
   // -- F-3.4 CSV 가져오기 모달 -----------------------------------------------
   const [csvOpen, setCsvOpen] = React.useState(false)
+  // -- F-3.6 키워드 추가 모달 -------------------------------------------------
+  const [addOpen, setAddOpen] = React.useState(false)
 
   // -- 다중 선택 + 일괄 액션 state (F-3.3) -----------------------------------
   // TanStack Table 의 rowSelection 은 row.id 기반 (getRowId=row.id 설정 → DB Keyword.id).
@@ -1125,6 +1138,33 @@ export function KeywordsTable({
             }
           >
             CSV 가져오기
+          </Button>
+          {/* F-3.6 키워드 추가 — hasKeys=false / 광고그룹 0개 일 때 disabled */}
+          <Button
+            size="sm"
+            onClick={() => {
+              if (!hasKeys) {
+                toast.error("키 미설정 — 키워드 추가 비활성")
+                return
+              }
+              if (adgroups.length === 0) {
+                toast.error(
+                  "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
+                )
+                return
+              }
+              setAddOpen(true)
+            }}
+            disabled={!hasKeys || adgroups.length === 0}
+            title={
+              !hasKeys
+                ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
+                : adgroups.length === 0
+                  ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
+                  : "단건·다건 키워드 추가"
+            }
+          >
+            키워드 추가
           </Button>
           <SyncKeywordsButton advertiserId={advertiserId} hasKeys={hasKeys} />
         </div>
@@ -1487,6 +1527,23 @@ export function KeywordsTable({
           open
           onOpenChange={(o) => {
             if (!o) setCsvOpen(false)
+          }}
+          onClosed={(didApply) => {
+            if (didApply) {
+              router.refresh()
+            }
+          }}
+        />
+      )}
+
+      {/* 키워드 추가 모달 (F-3.6) — result 단계 도달 시 router.refresh */}
+      {addOpen && (
+        <KeywordsAddModal
+          advertiserId={advertiserId}
+          adgroups={adgroups}
+          open
+          onOpenChange={(o) => {
+            if (!o) setAddOpen(false)
           }}
           onClosed={(didApply) => {
             if (didApply) {

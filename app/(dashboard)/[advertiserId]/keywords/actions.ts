@@ -2668,3 +2668,420 @@ export async function applyCsvChangeBatch(
     items: results,
   }
 }
+
+// =============================================================================
+// 5. createKeywordsBatch — 키워드 추가 (단건·다건) (F-3.6)
+// =============================================================================
+//
+// UI 흐름 (SPEC F-3.6):
+//   - 사용자 폼 입력: 광고그룹 + 매치타입 + 입찰가(or useGroupBidAmt) + 키워드 목록
+//   - "추가하기" → 단일 Server Action 호출
+//   - 폼 화면이 곧 미리보기 (별도 미리보기 단계 X)
+//   - 결과 화면에서 성공/실패/충돌(skip) 분리 노출
+//
+// 자연키 충돌 정책:
+//   - (nccAdgroupId + keyword + matchType) 조합이 DB 에 이미 존재하면 자동 skip
+//   - skip 행은 result.conflicts 에 노출 (사용자 인지)
+//   - 모든 키워드가 충돌이면 ChangeBatch 미생성 → batchId="" 반환
+//
+// 멱등성 (CSV CREATE 와 동일 이중 방어):
+//   - externalId: 자동 생성 — `add-${crypto.randomUUID()}` (사용자 부담 X)
+//     별도 cuid 의존성 추가 안 함. 충돌 거의 0
+//   - natural key 사전 검사 + idempotencyKey unique 로 ChangeItem 레벨 멱등 확보
+
+const createKeywordsSchema = z
+  .object({
+    nccAdgroupId: z.string().min(1),
+    matchType: z.enum(["EXACT", "PHRASE", "BROAD"]),
+    // useGroupBidAmt=true: bidAmt 무시, 광고그룹 기본가 사용
+    // useGroupBidAmt=false: bidAmt 정수(원 단위) 필수
+    useGroupBidAmt: z.boolean(),
+    bidAmt: z.number().int().min(0).optional(),
+    userLock: z.boolean().default(false),
+    // 키워드 목록 — 1~100건 (단건도 1건)
+    keywords: z.array(z.string().min(1).max(50)).min(1).max(100),
+  })
+  .refine(
+    (v) => v.useGroupBidAmt === true || typeof v.bidAmt === "number",
+    { message: "bidAmt 또는 useGroupBidAmt 중 하나 필수" },
+  )
+
+export type CreateKeywordsBatchInput = z.infer<typeof createKeywordsSchema>
+
+export type CreateKeywordsBatchItem = {
+  keyword: string
+  ok: boolean
+  nccKeywordId?: string // 성공 시
+  error?: string // 실패 시
+}
+
+export type CreateKeywordsConflict = {
+  keyword: string
+  matchType: string
+  existingNccKeywordId: string // 이미 존재하는 키워드의 ID
+}
+
+export type CreateKeywordsBatchResult = {
+  batchId: string
+  total: number // 충돌 제외 후 실제 시도 건수
+  success: number
+  failed: number
+  conflicts: CreateKeywordsConflict[] // skip된 자연키 충돌 행
+  items: CreateKeywordsBatchItem[]
+}
+
+/**
+ * 키워드 추가 (단건·다건) Server Action.
+ *
+ *   1. getCurrentAdvertiser — 권한 검증 + 광고주 객체 (hasKeys 체크)
+ *   2. Zod 검증
+ *   3. 광고그룹 광고주 한정 검증 (campaign.advertiserId join)
+ *   4. keywords 배열 dedup (UI 검증의 안전망)
+ *   5. natural key 충돌 사전 검사 — 충돌은 conflicts 로 분리 + 시도 대상에서 제외
+ *      모든 키워드가 충돌이면 ChangeBatch 미생성 후 즉시 반환
+ *   6. ChangeBatch 생성 (status='running')
+ *   7. ChangeItem createMany (충돌 제외 행만)
+ *      - externalId 자동 생성: `add-${crypto.randomUUID()}` (사용자 부담 X)
+ *      - idempotencyKey: `${batch.id}:create:${externalId}`
+ *   8. SA createKeywords 호출 (광고그룹 단위 1회 — 단일 nccAdgroupId 가정)
+ *   9. 응답 매핑 — applyCsvChangeBatch CREATE 패턴 그대로
+ *      - 길이 일치 → 인덱스 매핑
+ *      - 길이 불일치 → (keyword, matchType) 정확 매칭만 (matchType 누락 응답 fallback X)
+ *  10. DB upsert + ChangeItem 'done'/'failed' 갱신 (targetId pending → nccKeywordId)
+ *  11. ChangeBatch finalize (success>0 → done, 0 → failed) + finishedAt
+ *  12. AuditLog 1건 (요약, 시크릿 X)
+ *  13. revalidatePath
+ *
+ * 안전장치:
+ *   - 광고주 횡단 차단: 광고그룹·기존 keyword 조회 모두 campaign.advertiserId join
+ *   - 시크릿 마스킹: AuditLog after / 콘솔 / throw 메시지에 키 노출 X (메시지만 500자 컷)
+ *   - SA 호출 실패 → 모든 ChangeItem failed + batch failed
+ */
+export async function createKeywordsBatch(
+  advertiserId: string,
+  input: CreateKeywordsBatchInput,
+): Promise<CreateKeywordsBatchResult> {
+  const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    throw new Error("API 키/시크릿 미입력")
+  }
+
+  const parsed = createKeywordsSchema.parse(input)
+  const matchTypeUpper = parsed.matchType.toUpperCase()
+
+  // -- 광고그룹 광고주 한정 검증 (campaign.advertiserId join) -----------------
+  const dbAdgroup = await prisma.adGroup.findFirst({
+    where: {
+      nccAdgroupId: parsed.nccAdgroupId,
+      campaign: { advertiserId },
+    },
+    select: { id: true },
+  })
+  if (!dbAdgroup) {
+    throw new Error("광고그룹이 광고주 소속 아님")
+  }
+
+  // -- keywords 배열 dedup (동일 keyword 중복 → 첫 항목만 유지) ----------------
+  // matchType 은 입력에서 단일 값. 같은 keyword 중복은 첫 항목만 유지.
+  const seenKw = new Set<string>()
+  const dedupedKeywords: string[] = []
+  for (const kw of parsed.keywords) {
+    if (!seenKw.has(kw)) {
+      seenKw.add(kw)
+      dedupedKeywords.push(kw)
+    }
+  }
+
+  // -- natural key 충돌 사전 검사 ---------------------------------------------
+  // (adgroupId + keyword + matchType) 조합이 DB 에 이미 존재하면 skip → conflicts.
+  const existingRows = await prisma.keyword.findMany({
+    where: {
+      adgroupId: dbAdgroup.id,
+      keyword: { in: dedupedKeywords },
+      matchType: matchTypeUpper,
+    },
+    select: {
+      keyword: true,
+      nccKeywordId: true,
+      matchType: true,
+    },
+  })
+
+  const conflictByKeyword = new Map<string, { ncc: string; mt: string }>()
+  for (const row of existingRows) {
+    conflictByKeyword.set(row.keyword, {
+      ncc: row.nccKeywordId,
+      mt: row.matchType ?? matchTypeUpper,
+    })
+  }
+
+  const conflicts: CreateKeywordsConflict[] = []
+  const targetKeywords: string[] = []
+  for (const kw of dedupedKeywords) {
+    const hit = conflictByKeyword.get(kw)
+    if (hit) {
+      conflicts.push({
+        keyword: kw,
+        matchType: hit.mt,
+        existingNccKeywordId: hit.ncc,
+      })
+    } else {
+      targetKeywords.push(kw)
+    }
+  }
+
+  // 모든 키워드가 충돌 → ChangeBatch 미생성, 즉시 반환
+  if (targetKeywords.length === 0) {
+    return {
+      batchId: "",
+      total: 0,
+      success: 0,
+      failed: 0,
+      conflicts,
+      items: [],
+    }
+  }
+
+  // -- externalId 자동 생성 ---------------------------------------------------
+  // crypto.randomUUID() 로 충분 (cuid 의존성 추가 안 함). `add-${uuid}` prefix 로 가독성 확보.
+  const externalIds = targetKeywords.map(() => `add-${crypto.randomUUID()}`)
+
+  // -- ChangeBatch 생성 -------------------------------------------------------
+  const action = "keyword.create"
+  const total = targetKeywords.length
+
+  const batch = await prisma.changeBatch.create({
+    data: {
+      userId: user.id,
+      action,
+      status: "running",
+      total,
+      processed: 0,
+      attempt: 1,
+      summary: {
+        advertiserId,
+        nccAdgroupId: parsed.nccAdgroupId,
+        matchType: matchTypeUpper,
+        count: total,
+      } as Prisma.InputJsonValue,
+    },
+  })
+
+  // -- ChangeItem createMany (충돌 제외 행만) --------------------------------
+  type CreateItemSeed = {
+    batchId: string
+    targetType: string
+    targetId: string
+    before: Prisma.InputJsonValue
+    after: Prisma.InputJsonValue
+    idempotencyKey: string
+    status: "pending"
+  }
+
+  const seeds: CreateItemSeed[] = targetKeywords.map((kw, i) => ({
+    batchId: batch.id,
+    targetType: "Keyword",
+    targetId: `pending:${externalIds[i]}`,
+    before: {} as Prisma.InputJsonValue,
+    after: {
+      keyword: kw,
+      matchType: matchTypeUpper,
+      bidAmt: parsed.useGroupBidAmt ? null : (parsed.bidAmt ?? null),
+      useGroupBidAmt: parsed.useGroupBidAmt,
+      userLock: parsed.userLock ?? false,
+    } as Prisma.InputJsonValue,
+    idempotencyKey: `${batch.id}:create:${externalIds[i]}`,
+    status: "pending" as const,
+  }))
+
+  await prisma.changeItem.createMany({ data: seeds })
+
+  // -- SA createKeywords 호출 -------------------------------------------------
+  const items: KeywordCreateItem[] = targetKeywords.map((kw, i) => ({
+    keyword: kw,
+    bidAmt: parsed.useGroupBidAmt ? undefined : parsed.bidAmt,
+    useGroupBidAmt: parsed.useGroupBidAmt,
+    userLock: parsed.userLock ?? false,
+    externalId: externalIds[i],
+  }))
+
+  let successTotal = 0
+  let failedTotal = 0
+  const resultItems: CreateKeywordsBatchItem[] = []
+
+  try {
+    const created = await createKeywords(
+      advertiser.customerId,
+      parsed.nccAdgroupId,
+      items,
+    )
+
+    // 응답 매핑 — applyCsvChangeBatch CREATE 패턴 그대로
+    //   1차: 응답 길이 == 입력 길이 → 인덱스 기반 매핑
+    //   2차(불일치): (keyword, matchType) 정확 매칭만. matchType 누락 응답은 매칭 불가
+    const indexMatch = created.length === items.length
+    const respByExactKey = new Map<string, SaKeyword>()
+    if (!indexMatch) {
+      for (const k of created) {
+        const anyK = k as unknown as { matchType?: string }
+        const mt =
+          typeof anyK.matchType === "string" && anyK.matchType.length > 0
+            ? anyK.matchType.toUpperCase()
+            : ""
+        if (mt) respByExactKey.set(`${k.keyword}::${mt}`, k)
+      }
+    }
+
+    for (let idx = 0; idx < targetKeywords.length; idx++) {
+      const kw = targetKeywords[idx]
+      const externalId = externalIds[idx]
+      let u: SaKeyword | undefined
+      if (indexMatch) {
+        u = created[idx]
+      } else {
+        u = respByExactKey.get(`${kw}::${matchTypeUpper}`)
+      }
+
+      if (u) {
+        // ChangeItem.targetId 갱신 (pending → 실제 nccKeywordId) + status='done'
+        await prisma.changeItem.updateMany({
+          where: {
+            batchId: batch.id,
+            idempotencyKey: `${batch.id}:create:${externalId}`,
+          },
+          data: { targetId: u.nccKeywordId, status: "done" },
+        })
+
+        // DB upsert (nccKeywordId unique) — 응답 매핑 패턴은 CSV CREATE 와 동일.
+        // matchType 응답 누락 시 입력 matchType 사용 (passthrough 가정).
+        const anyU = u as unknown as { matchType?: string }
+        const mtFromResp =
+          typeof anyU.matchType === "string" && anyU.matchType.length > 0
+            ? anyU.matchType.toUpperCase()
+            : matchTypeUpper
+
+        const userLockResp =
+          typeof u.userLock === "boolean" ? u.userLock : (parsed.userLock ?? false)
+        const useGroupBidResp =
+          typeof u.useGroupBidAmt === "boolean"
+            ? u.useGroupBidAmt
+            : parsed.useGroupBidAmt
+        const bidAmtResp =
+          typeof u.bidAmt === "number"
+            ? u.bidAmt
+            : parsed.useGroupBidAmt
+              ? null
+              : (parsed.bidAmt ?? null)
+
+        const rawJson = u as unknown as Prisma.InputJsonValue
+
+        await prisma.keyword.upsert({
+          where: { nccKeywordId: u.nccKeywordId },
+          create: {
+            adgroupId: dbAdgroup.id,
+            nccKeywordId: u.nccKeywordId,
+            keyword: u.keyword,
+            matchType: mtFromResp,
+            bidAmt: bidAmtResp,
+            useGroupBidAmt: useGroupBidResp,
+            userLock: userLockResp,
+            externalId,
+            status: mapKeywordStatus(u),
+            inspectStatus: mapInspectStatus(u),
+            raw: rawJson,
+          },
+          update: {
+            adgroupId: dbAdgroup.id,
+            keyword: u.keyword,
+            matchType: mtFromResp,
+            bidAmt: bidAmtResp,
+            useGroupBidAmt: useGroupBidResp,
+            userLock: userLockResp,
+            externalId,
+            status: mapKeywordStatus(u),
+            inspectStatus: mapInspectStatus(u),
+            raw: rawJson,
+          },
+        })
+
+        resultItems.push({
+          keyword: kw,
+          ok: true,
+          nccKeywordId: u.nccKeywordId,
+        })
+        successTotal++
+      } else {
+        const errMsg = indexMatch
+          ? "응답에 누락"
+          : `응답 매핑 실패 (응답 길이=${created.length}, 입력=${items.length})`
+        await prisma.changeItem.updateMany({
+          where: {
+            batchId: batch.id,
+            idempotencyKey: `${batch.id}:create:${externalId}`,
+          },
+          data: { status: "failed", error: errMsg },
+        })
+        resultItems.push({
+          keyword: kw,
+          ok: false,
+          error: errMsg,
+        })
+        failedTotal++
+      }
+    }
+  } catch (e) {
+    // SA 호출 자체 실패 — 모든 ChangeItem failed (메시지만 500자 컷)
+    const msg = e instanceof Error ? e.message : String(e)
+    const safeMsg = msg.slice(0, 500)
+    await prisma.changeItem.updateMany({
+      where: { batchId: batch.id },
+      data: { status: "failed", error: safeMsg },
+    })
+    successTotal = 0
+    failedTotal = total
+    resultItems.length = 0
+    for (const kw of targetKeywords) {
+      resultItems.push({ keyword: kw, ok: false, error: safeMsg })
+    }
+  }
+
+  // -- ChangeBatch finalize ---------------------------------------------------
+  const finalStatus: "done" | "failed" = successTotal === 0 ? "failed" : "done"
+  await prisma.changeBatch.update({
+    where: { id: batch.id },
+    data: {
+      status: finalStatus,
+      processed: total,
+      finishedAt: new Date(),
+    },
+  })
+
+  // -- AuditLog 1건 (시크릿 X — raw 응답 첨부 X) -----------------------------
+  await logAudit({
+    userId: user.id,
+    action,
+    targetType: "ChangeBatch",
+    targetId: batch.id,
+    before: null,
+    after: {
+      advertiserId,
+      nccAdgroupId: parsed.nccAdgroupId,
+      matchType: matchTypeUpper,
+      total,
+      success: successTotal,
+      failed: failedTotal,
+      conflicts: conflicts.length,
+    },
+  })
+
+  revalidatePath(`/${advertiserId}/keywords`)
+
+  return {
+    batchId: batch.id,
+    total,
+    success: successTotal,
+    failed: failedTotal,
+    conflicts,
+    items: resultItems,
+  }
+}
