@@ -27,6 +27,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { KeyStatusBadge } from "@/components/admin/key-status-badge"
+import { ConnectionStatusCard } from "@/components/dashboard/connection-status-card"
 
 export default async function AdvertiserDashboardPage({
   params,
@@ -88,6 +89,11 @@ export default async function AdvertiserDashboardPage({
           </CardHeader>
         </Card>
       )}
+
+      <ConnectionStatusCard
+        advertiserId={advertiser.id}
+        hasKeys={advertiser.hasKeys}
+      />
 
       <Card>
         <CardHeader className="border-b">
