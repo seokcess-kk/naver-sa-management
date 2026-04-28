@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button"
 const adminNav = [
   { href: "/admin/advertisers", label: "광고주" },
   { href: "/admin/users", label: "사용자" },
+  { href: "/admin/change-batches", label: "변경 이력" },
   { href: "/admin/audit-logs", label: "감사 로그" },
 ]
 
