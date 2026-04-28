@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/card"
 import { KeyStatusBadge } from "@/components/admin/key-status-badge"
 import { ConnectionStatusCard } from "@/components/dashboard/connection-status-card"
+import { checkConnection } from "@/app/(dashboard)/[advertiserId]/actions"
 
 export default async function AdvertiserDashboardPage({
   params,
@@ -90,9 +91,14 @@ export default async function AdvertiserDashboardPage({
         </Card>
       )}
 
+      {/* F-1.5 — RSC 단계에서 사전 점검 후 props 전달.
+          hasKeys=false면 SA 호출 차단 → null. 클라이언트는 새로고침만 제공. */}
       <ConnectionStatusCard
         advertiserId={advertiser.id}
         hasKeys={advertiser.hasKeys}
+        initial={
+          advertiser.hasKeys ? await checkConnection(advertiser.id) : null
+        }
       />
 
       <Card>

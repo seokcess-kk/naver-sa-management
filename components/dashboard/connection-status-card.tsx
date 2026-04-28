@@ -9,6 +9,10 @@
  * - 새로고침 버튼 (수동 재조회)
  * - budgetLock / refundLock 표시
  *
+ * 초기 상태:
+ *   RSC가 페이지 진입 시 checkConnection을 호출해 props.initial 로 전달.
+ *   클라이언트는 새로고침 버튼만 제공. effect 내 setState 회피 (React Compiler 정책).
+ *
  * SPEC 6.1 F-1.5.
  */
 
@@ -24,11 +28,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
-import { checkConnection } from "@/app/(dashboard)/[advertiserId]/actions"
+import {
+  checkConnection,
+  type CheckConnectionResult,
+} from "@/app/(dashboard)/[advertiserId]/actions"
 
 type ConnState =
   | { kind: "idle" }
-  | { kind: "loading" }
   | {
       kind: "ok"
       bizmoney: number
@@ -38,40 +44,47 @@ type ConnState =
     }
   | { kind: "error"; error: string; checkedAt: string }
 
+function fromResult(res: CheckConnectionResult): ConnState {
+  if (res.ok) {
+    return {
+      kind: "ok",
+      bizmoney: res.bizmoney,
+      budgetLock: res.budgetLock,
+      refundLock: res.refundLock,
+      checkedAt: res.checkedAt,
+    }
+  }
+  return {
+    kind: "error",
+    error: res.error,
+    checkedAt: new Date().toISOString(),
+  }
+}
+
 export function ConnectionStatusCard({
   advertiserId,
   hasKeys,
+  initial,
 }: {
   advertiserId: string
   hasKeys: boolean
+  /** RSC 사전 점검 결과. hasKeys=false 또는 RSC 단계에서 점검 안 했으면 null */
+  initial: CheckConnectionResult | null
 }) {
-  const [state, setState] = React.useState<ConnState>({ kind: "idle" })
+  const [state, setState] = React.useState<ConnState>(
+    initial ? fromResult(initial) : { kind: "idle" },
+  )
   const [pending, startTransition] = React.useTransition()
 
-  const handleCheck = React.useCallback(() => {
+  function handleCheck() {
     if (!hasKeys) {
       toast.error("키 미설정 — API 키 / Secret 키를 먼저 입력하세요")
       return
     }
-    setState({ kind: "loading" })
     startTransition(async () => {
       try {
         const res = await checkConnection(advertiserId)
-        if (res.ok) {
-          setState({
-            kind: "ok",
-            bizmoney: res.bizmoney,
-            budgetLock: res.budgetLock,
-            refundLock: res.refundLock,
-            checkedAt: res.checkedAt,
-          })
-        } else {
-          setState({
-            kind: "error",
-            error: res.error,
-            checkedAt: new Date().toISOString(),
-          })
-        }
+        setState(fromResult(res))
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         setState({
@@ -81,12 +94,7 @@ export function ConnectionStatusCard({
         })
       }
     })
-  }, [advertiserId, hasKeys])
-
-  // 마운트 시 자동 1회 점검 (hasKeys=true일 때)
-  React.useEffect(() => {
-    if (hasKeys) handleCheck()
-  }, [hasKeys, handleCheck])
+  }
 
   return (
     <Card>
