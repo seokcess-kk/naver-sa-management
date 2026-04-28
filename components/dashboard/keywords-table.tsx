@@ -1,7 +1,7 @@
 "use client"
 
 /**
- * 키워드 목록 + 인라인 편집 (F-3.1 / F-3.2) — TanStack Table v8 + TanStack Virtual
+ * 키워드 목록 + 인라인 편집 + 다중 선택 일괄 액션 (F-3.1 / F-3.2 / F-3.3)
  *
  * F-3.1 (이전 PR):
  *   - 5천 행 가상 스크롤 (TanStack Virtual: estimateSize 56 / overscan 10)
@@ -11,7 +11,7 @@
  *   - 클라이언트 필터: 키워드 검색(debounce 200ms) / 매치타입 / 상태 / 검수 / 광고그룹
  *   - 동기화 버튼 (광고주 단위)
  *
- * F-3.2 (본 작업):
+ * F-3.2 (이전 PR):
  *   - 인라인 편집 3개 컬럼: userLock(ON/OFF) / bidAmt + useGroupBidAmt / userLock
  *     - 셀 편집은 즉시 API 반영 X. 클라이언트 staging Map<keywordId, KeywordPatch>
  *       에 누적된 후 "변경 검토" 모달로 일괄 미리보기 → 확정 → bulkUpdateKeywords
@@ -21,9 +21,22 @@
  *   - BulkActionModal 재사용 (input 단계 mount 즉시 onReady — preview 직행)
  *   - 행별 "되돌리기" 버튼 (staging 에 들어간 행에만 노출)
  *
+ * F-3.3 (본 PR):
+ *   - 체크박스 다중 선택 활성화 (header / row 모두). enableRowSelection=true.
+ *   - 다중 선택 액션 바 (F-3.2 staging 카운터 바와 별도 영역) — 3개 액션:
+ *     · ON으로 변경 (toggle userLock=false 일괄)
+ *     · OFF로 변경 (toggle userLock=true 일괄)
+ *     · 입찰가 변경 (bid 절대값 / 비율 — input 단계에서 모드 + 값 선택)
+ *   - 즉시 적용 X — BulkActionModal 4단계 (input → preview → submit → result)
+ *     · preview 단계는 previewBulkAction(advertiserId, input) 호출하여 baseline
+ *       정확도(서버 시점 DB + 광고그룹 bidAmt 폴백) 보장
+ *     · 확정 시 bulkActionKeywords(advertiserId, input) 호출
+ *   - F-3.2 인라인 편집 staging 과 분리 — staging 이 있는 row 도 정상 선택 가능,
+ *     bulk action 결과는 staging 을 건드리지 않는다 (다른 흐름이므로 사용자가
+ *     의도하지 않은 staging 손실을 막기 위함).
+ *   - 선택 1~500건 (zod 스키마 일치). 0건이거나 키 미설정이면 액션 disabled.
+ *
  * 본 PR 범위 X (후속):
- *   - F-3.3 다중 선택 일괄 — 체크박스 + 액션 버튼은 disabled 자리 그대로 유지
- *     (인라인 편집과 다중 선택은 같은 테이블에 공존하지만 흐름은 별개)
  *   - F-3.4 / F-3.5 CSV
  *   - F-3.6 / F-3.7 키워드 추가 / 단건 삭제
  *
@@ -47,6 +60,7 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
+import { toast } from "sonner"
 import {
   flexRender,
   getCoreRowModel,
@@ -76,6 +90,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
@@ -98,12 +113,20 @@ import {
   BulkActionModal,
   type BulkActionResult,
 } from "@/components/forms/bulk-action-modal"
-import { bulkUpdateKeywords } from "@/app/(dashboard)/[advertiserId]/keywords/actions"
+import {
+  bulkActionKeywords,
+  bulkUpdateKeywords,
+  previewBulkAction,
+  type BulkActionKeywordsInput,
+} from "@/app/(dashboard)/[advertiserId]/keywords/actions"
 import { cn } from "@/lib/utils"
 import type {
   KeywordStatus,
   InspectStatus,
 } from "@/lib/generated/prisma/client"
+
+// 상한 — bulkActionKeywordsSchema 의 .max(500) 와 일치.
+const BULK_ACTION_MAX = 500
 
 // =============================================================================
 // 타입
@@ -156,6 +179,38 @@ type KeywordPatch = {
 }
 
 type StagingMap = Map<string, KeywordPatch>
+
+/**
+ * F-3.3 다중 선택 액션 종류.
+ *
+ * - toggleOn  : userLock=false 일괄 적용 (사용자 ON)
+ * - toggleOff : userLock=true 일괄 적용 (사용자 OFF)
+ * - bid       : 입찰가 변경 (input 단계에서 absolute/ratio 모드 + 값 선택)
+ */
+type BulkAction = "toggleOn" | "toggleOff" | "bid"
+
+/** BulkActionModal<KeywordRow, BulkInputForKeywords> 의 TInput 타입 (액션별 union) */
+type BulkInputForKeywords =
+  | { action: "toggleOn" }
+  | { action: "toggleOff" }
+  | { action: "bid"; mode: "absolute"; bidAmt: number }
+  | {
+      action: "bid"
+      mode: "ratio"
+      percent: number
+      roundTo: 10 | 50 | 100
+    }
+
+/** previewBulkAction 반환 항목 — actions.ts 의 PreviewItem 과 동일 shape */
+type BulkPreviewItem = {
+  keywordId: string
+  keyword: string
+  nccKeywordId: string
+  adgroupName: string
+  before: { bidAmt: number | null; useGroupBidAmt: boolean; userLock: boolean }
+  after: { bidAmt: number | null; useGroupBidAmt: boolean; userLock: boolean } | null
+  skipReason?: string
+}
 
 // 셀에서 staging 을 직접 읽고 변경할 수 있는 컨텍스트. row.id 기반.
 type StagingCtx = {
@@ -269,23 +324,24 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
   return [
     {
       id: "select",
-      header: () => (
-        <Checkbox
-          checked={false}
-          onCheckedChange={() => {}}
-          aria-label="전체 선택"
-          // F-3.3 활성 전까지 disabled — 다중 선택 일괄 액션 비대상.
-          disabled
-          title="다중 선택은 F-3.3 일괄 액션 도입 시 활성화"
-        />
-      ),
+      header: ({ table }) => {
+        // 가시(필터·정렬 후) 행 기준 전체 선택 토글.
+        // 5천 행 중 필터 적용 후 row 수가 적은 경우 그 가시 셋만 토글하도록.
+        const allSelected =
+          table.getIsAllPageRowsSelected() || table.getIsAllRowsSelected()
+        return (
+          <Checkbox
+            checked={allSelected}
+            onCheckedChange={(v) => table.toggleAllRowsSelected(!!v)}
+            aria-label="전체 선택"
+          />
+        )
+      },
       cell: ({ row }) => (
         <Checkbox
           checked={row.getIsSelected()}
           onCheckedChange={(v) => row.toggleSelected(!!v)}
           aria-label={`${row.original.keyword} 선택`}
-          disabled
-          title="다중 선택은 F-3.3 일괄 액션 도입 시 활성화"
         />
       ),
       enableSorting: false,
@@ -701,9 +757,17 @@ export function KeywordsTable({
 }) {
   const router = useRouter()
 
-  // -- staging state ----------------------------------------------------------
+  // -- staging state (F-3.2 인라인 편집) --------------------------------------
   const [staging, setStaging] = React.useState<StagingMap>(() => new Map())
   const [modalOpen, setModalOpen] = React.useState(false)
+
+  // -- 다중 선택 + 일괄 액션 state (F-3.3) -----------------------------------
+  // TanStack Table 의 rowSelection 은 row.id 기반 (getRowId=row.id 설정 → DB Keyword.id).
+  const [rowSelection, setRowSelection] = React.useState<
+    Record<string, boolean>
+  >({})
+  // 다중 선택 액션 모달 상태 — null = 닫힘, 그 외 = 해당 액션 모달 진행 중
+  const [bulkAction, setBulkAction] = React.useState<BulkAction | null>(null)
 
   const applyPatch = React.useCallback(
     (row: KeywordRow, patch: KeywordPatch) => {
@@ -797,13 +861,15 @@ export function KeywordsTable({
   const table = useReactTable<KeywordRow>({
     data: keywords,
     columns,
-    state: { sorting, columnFilters },
+    state: { sorting, columnFilters, rowSelection },
     onSortingChange: setSorting,
+    onRowSelectionChange: setRowSelection,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getRowId: (row) => row.id,
-    enableRowSelection: false, // F-3.3 도입 시 true 로 변경
+    // F-3.3 — 다중 선택 활성. F-3.2 staging 행도 선택 가능 (별개 흐름).
+    enableRowSelection: true,
   })
 
   const rows = table.getRowModel().rows
@@ -845,6 +911,53 @@ export function KeywordsTable({
     }
     return result
   }, [keywords, staging])
+
+  // -- F-3.3 다중 선택 + 일괄 액션 ------------------------------------------
+  // 선택된 row (필터 후 가시여부 무관, rowSelection 키 기준 — 사용자가 명시 선택).
+  const selectedRows = React.useMemo(() => {
+    if (Object.keys(rowSelection).length === 0) return []
+    const byId = new Map(keywords.map((k) => [k.id, k]))
+    const out: KeywordRow[] = []
+    for (const id of Object.keys(rowSelection)) {
+      if (rowSelection[id] !== true) continue
+      const r = byId.get(id)
+      if (r) out.push(r)
+    }
+    return out
+  }, [keywords, rowSelection])
+
+  const selectedCount = selectedRows.length
+  const overSelectionLimit = selectedCount > BULK_ACTION_MAX
+
+  function clearSelection() {
+    setRowSelection({})
+  }
+
+  function openBulkAction(action: BulkAction) {
+    if (selectedCount === 0) {
+      toast.error("키워드를 1개 이상 선택하세요")
+      return
+    }
+    if (overSelectionLimit) {
+      toast.error(`한 번에 최대 ${BULK_ACTION_MAX}건까지 일괄 변경 가능합니다`)
+      return
+    }
+    if (!hasKeys) {
+      toast.error("키 미설정 — 일괄 변경 불가")
+      return
+    }
+    setBulkAction(action)
+  }
+
+  function handleBulkActionClosed(didApply: boolean) {
+    setBulkAction(null)
+    if (didApply) {
+      // staging 은 그대로 둔다 (F-3.2 인라인 편집 흐름과 분리 — 사용자가 의도한
+      // 인라인 편집을 bulk action 결과로 손실시키지 않기 위함).
+      setRowSelection({})
+      router.refresh()
+    }
+  }
 
   // BulkActionModal 의 onSubmit — bulkUpdateKeywords 호출 + 결과 매핑
   const handleSubmit = React.useCallback(async (): Promise<BulkActionResult> => {
@@ -895,8 +1008,8 @@ export function KeywordsTable({
             키워드
           </h1>
           <p className="text-sm text-muted-foreground">
-            셀을 클릭해 인라인 편집 후 일괄 적용. 다중 선택 일괄 액션 / CSV 는
-            후속 단계에서 활성화됩니다.
+            셀을 클릭해 인라인 편집하거나, 체크박스로 다중 선택 후 ON/OFF ·
+            입찰가 일괄 변경. CSV 는 후속 단계에서 활성화됩니다.
           </p>
         </div>
         <SyncKeywordsButton advertiserId={advertiserId} hasKeys={hasKeys} />
@@ -1044,33 +1157,67 @@ export function KeywordsTable({
         </div>
       </div>
 
-      {/* 다중 선택 일괄 액션 바 (F-3.3 도입 전까지 비활성 — 인라인 편집과 별개 흐름) */}
-      <div className="flex items-center gap-2 rounded-lg border bg-muted/10 px-3 py-2">
-        <span className="text-xs text-muted-foreground">
-          다중 선택 일괄 액션은 F-3.3 도입 시 활성화됩니다.
-        </span>
+      {/* 다중 선택 일괄 액션 바 (F-3.3) — F-3.2 인라인 편집 staging 카운터 바와 별도 영역 */}
+      <div
+        className={cn(
+          "flex items-center gap-2 rounded-lg border px-3 py-2",
+          selectedCount > 0
+            ? "border-sky-300 bg-sky-50 dark:border-sky-900/40 dark:bg-sky-900/10"
+            : "bg-muted/10",
+        )}
+      >
+        {selectedCount === 0 ? (
+          <span className="text-xs text-muted-foreground">
+            {hasKeys
+              ? "체크박스로 키워드를 선택해 일괄 액션을 적용하세요."
+              : "키 미설정 — 일괄 액션 비활성. admin 권한자가 키를 입력해야 합니다."}
+          </span>
+        ) : (
+          <>
+            <span className="text-sm font-medium text-sky-900 dark:text-sky-200">
+              {selectedCount.toLocaleString()}개 선택됨
+            </span>
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={clearSelection}
+              title="선택 해제"
+            >
+              선택 해제
+            </Button>
+            {overSelectionLimit && (
+              <span
+                role="alert"
+                className="text-xs font-medium text-destructive"
+              >
+                최대 {BULK_ACTION_MAX}건까지 일괄 변경 가능 (현재{" "}
+                {selectedCount.toLocaleString()}건 — 선택 줄여주세요)
+              </span>
+            )}
+          </>
+        )}
         <div className="ml-auto flex items-center gap-2">
           <Button
             size="sm"
             variant="outline"
-            disabled
-            title="F-3.3 일괄 액션에서 활성화"
+            onClick={() => openBulkAction("toggleOn")}
+            disabled={selectedCount === 0 || overSelectionLimit || !hasKeys}
           >
             ON으로 변경
           </Button>
           <Button
             size="sm"
             variant="outline"
-            disabled
-            title="F-3.3 일괄 액션에서 활성화"
+            onClick={() => openBulkAction("toggleOff")}
+            disabled={selectedCount === 0 || overSelectionLimit || !hasKeys}
           >
             OFF로 변경
           </Button>
           <Button
             size="sm"
             variant="outline"
-            disabled
-            title="F-3.3 일괄 액션에서 활성화"
+            onClick={() => openBulkAction("bid")}
+            disabled={selectedCount === 0 || overSelectionLimit || !hasKeys}
           >
             입찰가 변경
           </Button>
@@ -1204,6 +1351,19 @@ export function KeywordsTable({
           onClosed={handleClosed}
         />
       )}
+
+      {/* 다중 선택 일괄 액션 모달 (F-3.3) — toggleOn / toggleOff / bid 분기 */}
+      {bulkAction !== null && (
+        <KeywordsBulkActionModal
+          advertiserId={advertiserId}
+          action={bulkAction}
+          selectedRows={selectedRows}
+          onOpenChange={(o) => {
+            if (!o) setBulkAction(null)
+          }}
+          onClosed={handleBulkActionClosed}
+        />
+      )}
     </div>
   )
 }
@@ -1334,4 +1494,492 @@ function KeywordChangePreview({
       </Table>
     </div>
   )
+}
+
+// =============================================================================
+// F-3.3 다중 선택 일괄 액션 모달 (BulkActionModal 래퍼)
+// =============================================================================
+//
+// keywords-table.tsx 의 메인 컴포넌트가 비대해지지 않도록 별도 컴포넌트로 분리.
+//
+// 역할:
+//   - action 별로 BulkActionModal 의 title / renderInput / renderPreview / onSubmit 구성
+//   - input 단계:
+//       toggleOn / toggleOff → 입력 없음 (mount 즉시 onReady)
+//       bid                  → BidInputForm (absolute / ratio 모드 + 값)
+//   - preview 단계:
+//       previewBulkAction(advertiserId, input) 호출 → BulkActionPreviewView 렌더
+//   - onSubmit:
+//       bulkActionKeywords(advertiserId, input) 호출 → BulkActionResult 변환
+//
+// 액션별 input → BulkActionKeywordsInput 매핑:
+//   - toggleOn  → { action: "toggle", items: rows.map(r => ({ keywordId: r.id, userLock: false })) }
+//   - toggleOff → { action: "toggle", items: rows.map(r => ({ keywordId: r.id, userLock: true })) }
+//   - bid abs   → { action: "bid", mode: "absolute", bidAmt, keywordIds: rows.map(r => r.id) }
+//   - bid ratio → { action: "bid", mode: "ratio", percent, roundTo, keywordIds: rows.map(r => r.id) }
+
+function KeywordsBulkActionModal({
+  advertiserId,
+  action,
+  selectedRows,
+  onOpenChange,
+  onClosed,
+}: {
+  advertiserId: string
+  action: BulkAction
+  selectedRows: KeywordRow[]
+  onOpenChange: (open: boolean) => void
+  onClosed: (didApply: boolean) => void
+}) {
+  const title =
+    action === "toggleOn"
+      ? "ON으로 변경 (일괄)"
+      : action === "toggleOff"
+        ? "OFF로 변경 (일괄)"
+        : "입찰가 변경 (일괄)"
+
+  // input → bulkActionKeywords 페이로드 매핑
+  const mapToServerInput = React.useCallback(
+    (input: BulkInputForKeywords): BulkActionKeywordsInput => {
+      if (input.action === "toggleOn") {
+        return {
+          action: "toggle",
+          items: selectedRows.map((r) => ({
+            keywordId: r.id,
+            userLock: false,
+          })),
+        }
+      }
+      if (input.action === "toggleOff") {
+        return {
+          action: "toggle",
+          items: selectedRows.map((r) => ({
+            keywordId: r.id,
+            userLock: true,
+          })),
+        }
+      }
+      if (input.mode === "absolute") {
+        return {
+          action: "bid",
+          mode: "absolute",
+          bidAmt: input.bidAmt,
+          keywordIds: selectedRows.map((r) => r.id),
+        }
+      }
+      return {
+        action: "bid",
+        mode: "ratio",
+        percent: input.percent,
+        roundTo: input.roundTo,
+        keywordIds: selectedRows.map((r) => r.id),
+      }
+    },
+    [selectedRows],
+  )
+
+  const handleSubmit = React.useCallback(
+    async (input: BulkInputForKeywords): Promise<BulkActionResult> => {
+      const payload = mapToServerInput(input)
+      const res = await bulkActionKeywords(advertiserId, payload)
+      // 결과 화면 표시명 매칭은 nccKeywordId 기반 (BulkActionModal getItemId 와 일치).
+      return {
+        batchId: res.batchId,
+        total: res.total,
+        success: res.success,
+        failed: res.failed,
+        items: res.items.map((it) => {
+          const row = selectedRows.find((r) => r.id === it.keywordId)
+          return {
+            id: row?.nccKeywordId ?? it.keywordId,
+            ok: it.ok,
+            error: it.error,
+          }
+        }),
+      }
+    },
+    [advertiserId, selectedRows, mapToServerInput],
+  )
+
+  return (
+    <BulkActionModal<KeywordRow, BulkInputForKeywords>
+      open
+      onOpenChange={onOpenChange}
+      title={title}
+      itemLabel="키워드"
+      selectedItems={selectedRows}
+      renderInput={(_, onReady) => (
+        <BulkActionInputForm action={action} onReady={onReady} />
+      )}
+      renderPreview={(_, input) => (
+        // BulkActionModal 의 input 은 preview 단계 동안 안정 (handleReady 한 번 set).
+        // mapToServerInput 결과를 매 렌더 새로 생성해도 동일한 (advertiserId,
+        // serializedInput) 조합이라 BulkActionPreviewView 가 내부에서
+        // serialize-key 로 effect 재실행을 차단한다.
+        <BulkActionPreviewView
+          advertiserId={advertiserId}
+          input={mapToServerInput(input)}
+        />
+      )}
+      onSubmit={handleSubmit}
+      getItemDisplayName={(r) => r.keyword}
+      getItemId={(r) => r.nccKeywordId}
+      onClosed={onClosed}
+    />
+  )
+}
+
+// =============================================================================
+// F-3.3 input 단계 — toggleOn/Off 즉시 통과 / bid 는 모드 + 값 입력
+// =============================================================================
+
+function BulkActionInputForm({
+  action,
+  onReady,
+}: {
+  action: BulkAction
+  onReady: (input: BulkInputForKeywords) => void
+}) {
+  // toggle 은 별도 입력 없음 — mount 즉시 onReady (preview 직행).
+  React.useEffect(() => {
+    if (action === "toggleOn") onReady({ action: "toggleOn" })
+    else if (action === "toggleOff") onReady({ action: "toggleOff" })
+    // bid 는 사용자 입력 대기
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action])
+
+  // bid 입력 폼 state (action='bid' 일 때만 사용)
+  const [mode, setMode] = React.useState<"absolute" | "ratio">("absolute")
+  const [bidAmtInput, setBidAmtInput] = React.useState("")
+  const [percentInput, setPercentInput] = React.useState("")
+  const [roundTo, setRoundTo] = React.useState<10 | 50 | 100>(10)
+
+  if (action !== "bid") {
+    // toggle 은 mount 즉시 preview 진입 — 짧은 안내만
+    return (
+      <p className="text-sm text-muted-foreground">
+        선택한 키워드의 ON/OFF 를 변경합니다. 미리보기로 이동 중...
+      </p>
+    )
+  }
+
+  // 검증
+  const trimmedBid = bidAmtInput.trim()
+  const bidAmt =
+    trimmedBid === "" ? null : Number(trimmedBid)
+  const absoluteValid =
+    bidAmt !== null &&
+    Number.isFinite(bidAmt) &&
+    Number.isInteger(bidAmt) &&
+    bidAmt >= 0
+
+  const trimmedPct = percentInput.trim()
+  const pct = trimmedPct === "" ? null : Number(trimmedPct)
+  // -90 ~ 900, 정수 또는 소수 1자리. zod 단계에서도 한 번 더 검증되지만 UI 친절 검사.
+  const ratioValid =
+    pct !== null &&
+    Number.isFinite(pct) &&
+    pct >= -90 &&
+    pct <= 900 &&
+    Math.round(pct * 10) / 10 === pct
+
+  const valid = mode === "absolute" ? absoluteValid : ratioValid
+
+  function handleSubmitForm() {
+    if (!valid) return
+    if (mode === "absolute") {
+      onReady({ action: "bid", mode: "absolute", bidAmt: bidAmt! })
+    } else {
+      onReady({ action: "bid", mode: "ratio", percent: pct!, roundTo })
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      {/* 모드 선택 (radio) */}
+      <div className="flex items-center gap-4">
+        <Label className="flex cursor-pointer items-center gap-2 text-sm font-normal">
+          <input
+            type="radio"
+            name="bid-mode"
+            checked={mode === "absolute"}
+            onChange={() => setMode("absolute")}
+          />
+          절대값
+        </Label>
+        <Label className="flex cursor-pointer items-center gap-2 text-sm font-normal">
+          <input
+            type="radio"
+            name="bid-mode"
+            checked={mode === "ratio"}
+            onChange={() => setMode("ratio")}
+          />
+          비율
+        </Label>
+      </div>
+
+      {mode === "absolute" ? (
+        <div>
+          <Label htmlFor="bulk-bidAmt">입찰가 (원)</Label>
+          <Input
+            id="bulk-bidAmt"
+            type="number"
+            inputMode="numeric"
+            min={0}
+            step={10}
+            value={bidAmtInput}
+            onChange={(e) => setBidAmtInput(e.target.value)}
+            placeholder="예: 500"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && valid) handleSubmitForm()
+            }}
+          />
+          <p className="mt-1 text-xs text-muted-foreground">
+            선택한 모든 키워드에 동일 입찰가가 적용됩니다 (그룹입찰가 사용은
+            해제). 0 이상의 정수.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div>
+            <Label htmlFor="bulk-percent">증감 (%)</Label>
+            <Input
+              id="bulk-percent"
+              type="number"
+              inputMode="decimal"
+              step={0.1}
+              min={-90}
+              max={900}
+              value={percentInput}
+              onChange={(e) => setPercentInput(e.target.value)}
+              placeholder="예: 10 또는 -5"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && valid) handleSubmitForm()
+              }}
+            />
+            <p className="mt-1 text-xs text-muted-foreground">
+              -90% ~ +900% (정수 또는 소수 1자리). 음수는 입찰가 감소.
+            </p>
+          </div>
+          <div>
+            <Label className="mb-1.5 block">반올림 단위 (원)</Label>
+            <div className="flex gap-2">
+              {([10, 50, 100] as const).map((v) => (
+                <Button
+                  key={v}
+                  type="button"
+                  size="sm"
+                  variant={roundTo === v ? "default" : "outline"}
+                  onClick={() => setRoundTo(v)}
+                >
+                  {v}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-300">
+        ⓘ 그룹입찰가 사용중인 행은 광고그룹 기본 입찰가를 baseline 으로 계산.
+        광고그룹 기본 입찰가도 없는 행은 미리보기에서 skip 표시되며, 적용
+        시점에도 적용되지 않습니다.
+      </p>
+
+      <div className="flex justify-end">
+        <Button onClick={handleSubmitForm} disabled={!valid}>
+          미리보기
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+// =============================================================================
+// F-3.3 preview 단계 — previewBulkAction 호출 후 결과 테이블
+// =============================================================================
+
+type PreviewState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "ready"; items: BulkPreviewItem[] }
+
+function BulkActionPreviewView({
+  advertiserId,
+  input,
+}: {
+  advertiserId: string
+  input: BulkActionKeywordsInput
+}) {
+  // 단일 union state — 초기값이 "loading" 이라 effect 가 진입 시 별도 setState 불필요
+  // (react-hooks/set-state-in-effect 회피).
+  //
+  // 호출자(KeywordsBulkActionModal) 가 매 렌더마다 mapToServerInput 으로 새
+  // 객체를 만들어 전달하므로 그대로 [input] 의존성으로 쓰면 effect 가 매 렌더
+  // 재실행된다. 의미적으로 같은 입력에 대해서는 한 번만 호출되도록
+  // JSON.stringify 결과를 effect deps 로 삼는다 (input 은 단순 직렬화 가능 객체).
+  const inputKey = React.useMemo(() => JSON.stringify(input), [input])
+  const [state, setState] = React.useState<PreviewState>({ kind: "loading" })
+
+  React.useEffect(() => {
+    let cancelled = false
+    previewBulkAction(advertiserId, input)
+      .then((res) => {
+        if (cancelled) return
+        setState({
+          kind: "ready",
+          items: res.items as BulkPreviewItem[],
+        })
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setState({
+          kind: "error",
+          message: e instanceof Error ? e.message : String(e),
+        })
+      })
+    return () => {
+      cancelled = true
+    }
+    // input 자체 대신 inputKey 사용 — 동일 의미의 입력은 한 번만 호출.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [advertiserId, inputKey])
+
+  if (state.kind === "loading") {
+    return (
+      <div className="py-8 text-center text-sm text-muted-foreground">
+        미리보기 계산 중...
+      </div>
+    )
+  }
+  if (state.kind === "error") {
+    return (
+      <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+        미리보기 실패: {state.message}
+      </div>
+    )
+  }
+  const items = state.items
+  if (items.length === 0) {
+    return (
+      <p className="py-4 text-center text-sm text-muted-foreground">
+        미리보기 항목이 없습니다.
+      </p>
+    )
+  }
+
+  // toggle / bid 분기: 어떤 컬럼을 보여줄지 결정.
+  const showUserLockCol = input.action === "toggle"
+  const showBidCol = input.action === "bid"
+
+  const skipCount = items.filter((it) => it.skipReason).length
+  const applyCount = items.length - skipCount
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-3 text-xs">
+        <span className="font-medium text-foreground">
+          변경 {applyCount.toLocaleString()}건
+        </span>
+        {skipCount > 0 && (
+          <span className="font-medium text-destructive">
+            skip {skipCount.toLocaleString()}건 (광고그룹 기본가도 없음)
+          </span>
+        )}
+      </div>
+      <div className="max-h-72 overflow-y-auto rounded-md border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>키워드</TableHead>
+              <TableHead>광고그룹</TableHead>
+              {showBidCol && (
+                <>
+                  <TableHead className="text-right">입찰가 (현재)</TableHead>
+                  <TableHead className="text-right">→ (적용 후)</TableHead>
+                </>
+              )}
+              {showUserLockCol && (
+                <>
+                  <TableHead>ON/OFF (현재)</TableHead>
+                  <TableHead>→ (적용 후)</TableHead>
+                </>
+              )}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {items.map((it) => {
+              const skip = !!it.skipReason
+              return (
+                <TableRow
+                  key={it.keywordId}
+                  className={cn(
+                    skip &&
+                      "bg-destructive/5 hover:bg-destructive/10 dark:bg-destructive/10",
+                  )}
+                >
+                  <TableCell className="max-w-[200px] truncate font-medium">
+                    {it.keyword}
+                    <div className="font-mono text-[10px] text-muted-foreground">
+                      {it.nccKeywordId}
+                    </div>
+                  </TableCell>
+                  <TableCell className="max-w-[160px] truncate text-xs text-muted-foreground">
+                    {it.adgroupName}
+                  </TableCell>
+                  {showBidCol && (
+                    <>
+                      <TableCell className="text-right font-mono text-xs text-muted-foreground">
+                        {formatBid(
+                          it.before.bidAmt,
+                          it.before.useGroupBidAmt,
+                        )}
+                      </TableCell>
+                      <TableCell
+                        className={cn(
+                          "text-right font-mono",
+                          skip && "text-destructive",
+                        )}
+                      >
+                        {skip
+                          ? "광고그룹 기본가도 없음 — 적용 안 됨"
+                          : it.after !== null
+                            ? formatBid(
+                                it.after.bidAmt,
+                                it.after.useGroupBidAmt,
+                              )
+                            : "—"}
+                      </TableCell>
+                    </>
+                  )}
+                  {showUserLockCol && (
+                    <>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {it.before.userLock ? "OFF" : "ON"}
+                      </TableCell>
+                      <TableCell className="font-medium">
+                        {it.after !== null
+                          ? it.after.userLock
+                            ? "OFF"
+                            : "ON"
+                          : "—"}
+                      </TableCell>
+                    </>
+                  )}
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  )
+}
+
+function formatBid(bidAmt: number | null, useGroupBidAmt: boolean): string {
+  if (useGroupBidAmt) return "그룹입찰가"
+  if (bidAmt === null) return "—"
+  return `${bidAmt.toLocaleString()}원`
 }

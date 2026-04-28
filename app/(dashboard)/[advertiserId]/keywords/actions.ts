@@ -720,3 +720,681 @@ function mapInspectStatus(k: SaKeyword): InspectStatus {
   }
   return "pending"
 }
+
+// =============================================================================
+// 3. bulkActionKeywords — 다중 선택 일괄 액션 (F-3.3)
+// =============================================================================
+//
+// UI 흐름 (CLAUDE.md / SPEC F-3.3):
+//   - 사용자가 키워드 row 다중 선택 → 액션 모달(toggle ON/OFF, bid 변경) 선택
+//   - 미리보기(previewBulkAction)로 baseline + 산출값 확인 → 확정 시 본 액션 호출
+//   - F-3.2 (인라인 편집 staging) 과 분리된 즉시 흐름. row 마다 patch 가 다른 게 아니라
+//     "선택된 모든 row 에 동일 액션 적용" 형태라 action 단위 discriminated union 사용.
+//
+// 액션 3종:
+//   - toggle:        userLock 일괄 적용 (true=OFF, false=ON)
+//   - bid absolute:  bidAmt 동일 절대값 + useGroupBidAmt=false 강제
+//   - bid ratio:     각 row baseline 재조회 + (1+percent/100) 계산 (옵션 B — 서버에서 계산)
+//                    baseline 우선순위:
+//                      1) keyword.bidAmt 가 number
+//                      2) useGroupBidAmt=true 면 광고그룹 bidAmt
+//                      3) 둘 다 null → 해당 row 사전 'failed' (다른 row 는 정상 진행)
+//                    산출값 = round(baseline * (1+percent/100) / roundTo) * roundTo, 0 클램프
+//
+// TODO(5천 건 한계): 본 PR 은 단일 PUT 시도. updateKeywordsBulk 의 SA 응답 한계가 부딪히면
+//   batch-executor-job 패턴 (Job Table + Cron + Chunk Executor) 으로 이관.
+
+const bulkActionKeywordsSchema = z.discriminatedUnion("action", [
+  // ON/OFF 토글 (userLock)
+  z.object({
+    action: z.literal("toggle"),
+    items: z
+      .array(
+        z.object({
+          keywordId: z.string().min(1), // 앱 DB Keyword.id
+          // userLock=true → OFF, false → ON
+          userLock: z.boolean(),
+        }),
+      )
+      .min(1)
+      .max(500),
+  }),
+  // 입찰가 절대값
+  z.object({
+    action: z.literal("bid"),
+    mode: z.literal("absolute"),
+    bidAmt: z.number().int().min(0),
+    keywordIds: z.array(z.string().min(1)).min(1).max(500),
+  }),
+  // 입찰가 비율 (-90% ~ +900%)
+  z.object({
+    action: z.literal("bid"),
+    mode: z.literal("ratio"),
+    percent: z.number().min(-90).max(900),
+    roundTo: z.number().int().min(1).default(10),
+    keywordIds: z.array(z.string().min(1)).min(1).max(500),
+  }),
+])
+
+export type BulkActionKeywordsInput = z.infer<typeof bulkActionKeywordsSchema>
+
+export type BulkActionKeywordItemResult = {
+  keywordId: string
+  ok: boolean
+  error?: string
+}
+
+export type BulkActionKeywordsResult = {
+  batchId: string
+  total: number
+  success: number
+  failed: number
+  items: BulkActionKeywordItemResult[]
+}
+
+/**
+ * 미리보기 / 확정 흐름에서 공통으로 쓰이는 row baseline 스냅샷.
+ * adgroup.bidAmt 는 ratio 모드에서 keyword.bidAmt null + useGroupBidAmt=true 시 폴백.
+ */
+type DbKeywordWithAdgroupSnapshot = {
+  id: string
+  nccKeywordId: string
+  keyword: string
+  bidAmt: number | null
+  useGroupBidAmt: boolean
+  userLock: boolean
+  status: KeywordStatus
+  adgroupName: string
+  adgroupBidAmt: number | null
+}
+
+/**
+ * 광고주 한정 + id IN(...) 으로 키워드 + 광고그룹(name, bidAmt) 조회.
+ * keywordIds 는 호출 측에서 dedup 후 전달.
+ * 길이 mismatch (광고주 횡단 / 미존재) 면 throw.
+ */
+async function loadKeywordsWithAdgroup(
+  advertiserId: string,
+  keywordIds: string[],
+): Promise<DbKeywordWithAdgroupSnapshot[]> {
+  const dbKeywords = await prisma.keyword.findMany({
+    where: {
+      adgroup: { campaign: { advertiserId } }, // 광고주 횡단 차단
+      id: { in: keywordIds },
+    },
+    select: {
+      id: true,
+      nccKeywordId: true,
+      keyword: true,
+      bidAmt: true,
+      useGroupBidAmt: true,
+      userLock: true,
+      status: true,
+      adgroup: {
+        select: {
+          name: true,
+          bidAmt: true,
+        },
+      },
+    },
+  })
+
+  if (dbKeywords.length !== keywordIds.length) {
+    throw new Error("일부 키워드가 광고주 소속이 아닙니다")
+  }
+
+  return dbKeywords.map((k) => ({
+    id: k.id,
+    nccKeywordId: k.nccKeywordId,
+    keyword: k.keyword,
+    bidAmt: k.bidAmt === null ? null : Number(k.bidAmt),
+    useGroupBidAmt: k.useGroupBidAmt,
+    userLock: k.userLock,
+    status: k.status,
+    adgroupName: k.adgroup.name,
+    adgroupBidAmt: k.adgroup.bidAmt === null ? null : Number(k.adgroup.bidAmt),
+  }))
+}
+
+/**
+ * ratio 모드 baseline 산출:
+ *   1) keyword.bidAmt 가 number → 그 값 사용
+ *   2) useGroupBidAmt=true 이고 adgroupBidAmt 가 number → 광고그룹 bidAmt 사용
+ *   3) 둘 다 null → null 반환 (호출부가 skip 처리)
+ */
+function resolveRatioBaseline(
+  row: Pick<
+    DbKeywordWithAdgroupSnapshot,
+    "bidAmt" | "useGroupBidAmt" | "adgroupBidAmt"
+  >,
+): number | null {
+  if (typeof row.bidAmt === "number") return row.bidAmt
+  if (row.useGroupBidAmt && typeof row.adgroupBidAmt === "number") {
+    return row.adgroupBidAmt
+  }
+  return null
+}
+
+/**
+ * ratio 산출값 계산: round(baseline * (1+percent/100) / roundTo) * roundTo, 0 클램프.
+ */
+function computeRatioBid(
+  baseline: number,
+  percent: number,
+  roundTo: number,
+): number {
+  const next = baseline * (1 + percent / 100)
+  const rounded = Math.round(next / roundTo) * roundTo
+  return rounded < 0 ? 0 : rounded
+}
+
+/**
+ * 일괄 액션 미리보기.
+ *
+ * UI 모달이 baseline 정확도 (서버 시점 DB 값 + 광고그룹 bidAmt 폴백) 를 보장받기 위해
+ * RSC props 가 아닌 본 헬퍼를 호출. ChangeBatch / SA 호출 X — 순수 계산.
+ *
+ * 반환 shape: items 배열 (keywordId / keyword / nccKeywordId / adgroupName / before / after).
+ *   - after=null + skipReason 필드는 ratio baseline 없는 row 표시용.
+ */
+export async function previewBulkAction(
+  advertiserId: string,
+  input: BulkActionKeywordsInput,
+): Promise<{
+  items: Array<{
+    keywordId: string
+    keyword: string
+    nccKeywordId: string
+    adgroupName: string
+    before: { bidAmt: number | null; useGroupBidAmt: boolean; userLock: boolean }
+    after: {
+      bidAmt: number | null
+      useGroupBidAmt: boolean
+      userLock: boolean
+    } | null
+    skipReason?: string
+  }>
+}> {
+  // 권한 체크 — admin / 화이트리스트 검증 (advertiser 객체 자체는 본 헬퍼에서 미사용).
+  await getCurrentAdvertiser(advertiserId)
+
+  const parsed = bulkActionKeywordsSchema.parse(input)
+
+  // 액션별 keywordIds 집합 산출 (dedup).
+  const keywordIds: string[] =
+    parsed.action === "toggle"
+      ? Array.from(new Set(parsed.items.map((it) => it.keywordId)))
+      : Array.from(new Set(parsed.keywordIds))
+
+  const rows = await loadKeywordsWithAdgroup(advertiserId, keywordIds)
+  const rowById = new Map(rows.map((r) => [r.id, r]))
+
+  // toggle 의 경우 keywordId → userLock 매핑 (마지막 항목으로 dedup)
+  const toggleByKeywordId =
+    parsed.action === "toggle"
+      ? (() => {
+          const m = new Map<string, boolean>()
+          for (const it of parsed.items) m.set(it.keywordId, it.userLock)
+          return m
+        })()
+      : null
+
+  const items = keywordIds.map((kid) => {
+    const r = rowById.get(kid)!
+    const before = {
+      bidAmt: r.bidAmt,
+      useGroupBidAmt: r.useGroupBidAmt,
+      userLock: r.userLock,
+    }
+    const baseEntry = {
+      keywordId: r.id,
+      keyword: r.keyword,
+      nccKeywordId: r.nccKeywordId,
+      adgroupName: r.adgroupName,
+      before,
+    }
+
+    if (parsed.action === "toggle") {
+      const newLock = toggleByKeywordId!.get(kid)!
+      return {
+        ...baseEntry,
+        after: {
+          bidAmt: r.bidAmt,
+          useGroupBidAmt: r.useGroupBidAmt,
+          userLock: newLock,
+        },
+      }
+    }
+
+    // bid 변경 — absolute / ratio
+    if (parsed.mode === "absolute") {
+      return {
+        ...baseEntry,
+        after: {
+          bidAmt: parsed.bidAmt,
+          useGroupBidAmt: false,
+          userLock: r.userLock,
+        },
+      }
+    }
+
+    // ratio
+    const baseline = resolveRatioBaseline(r)
+    if (baseline === null) {
+      return {
+        ...baseEntry,
+        after: null,
+        skipReason: "입찰가 baseline 없음",
+      }
+    }
+    const newBid = computeRatioBid(baseline, parsed.percent, parsed.roundTo)
+    return {
+      ...baseEntry,
+      after: {
+        bidAmt: newBid,
+        useGroupBidAmt: false,
+        userLock: r.userLock,
+      },
+    }
+  })
+
+  return { items }
+}
+
+/**
+ * 다중 선택 일괄 액션 확정.
+ *
+ *   1. getCurrentAdvertiser — 권한 검증 + advertiser
+ *   2. Zod 검증 + keywordIds dedup
+ *   3. 광고주 한정 조회 (adgroup.campaign.advertiserId join) + 광고그룹 bidAmt 함께 로드
+ *   4. ChangeBatch (status='running', action=`keyword.${parsed.action}`) 생성
+ *   5. 액션별 SA payload + ChangeItem before/after 산출:
+ *      - toggle:       items=[{nccKeywordId, userLock}], fields="userLock"
+ *      - bid absolute: items=[{... bidAmt, useGroupBidAmt:false}], fields="bidAmt,useGroupBidAmt"
+ *      - bid ratio:    각 row baseline 산출 → 산출값 또는 사전 'failed'
+ *                      유효 row 만 itemsForApi 에 push
+ *   6. ChangeItem createMany — ratio 사전 skip 행은 status='failed' + error 즉시 기록
+ *   7. updateKeywordsBulk(customerId, validItems, fields) — 단일 PUT
+ *      ※ TODO: 5천 건 한계 측정 후 batch-executor-job 패턴 이관
+ *   8. 응답 매핑 — 성공 row → DB update + ChangeItem='done', 누락 → 'failed' + "응답 누락"
+ *      userLock 변경 시 mapKeywordStatus 로 status 재계산
+ *   9. ChangeBatch finalize (success>0 → done, 0 → failed)
+ *  10. AuditLog 1건 — keyword.${parsed.action}, after={advertiserId, total, success, failed, mode?, percent?}
+ *  11. revalidatePath
+ */
+export async function bulkActionKeywords(
+  advertiserId: string,
+  input: BulkActionKeywordsInput,
+): Promise<BulkActionKeywordsResult> {
+  const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    throw new Error("API 키/시크릿 미입력")
+  }
+
+  const parsed = bulkActionKeywordsSchema.parse(input)
+
+  // -- 입력 정규화 + dedup -----------------------------------------------------
+  // toggle: keywordId 중복은 마지막 항목으로 대체 (idempotencyKey unique 충족)
+  // bid:    keywordIds 단순 Set dedup
+  const toggleByKeywordId =
+    parsed.action === "toggle"
+      ? (() => {
+          const m = new Map<string, boolean>()
+          for (const it of parsed.items) m.set(it.keywordId, it.userLock)
+          return m
+        })()
+      : null
+  const keywordIds: string[] =
+    parsed.action === "toggle"
+      ? Array.from(toggleByKeywordId!.keys())
+      : Array.from(new Set(parsed.keywordIds))
+
+  // -- 광고주 한정 조회 (adgroup → campaign → advertiserId join) -------------
+  const rows = await loadKeywordsWithAdgroup(advertiserId, keywordIds)
+  const rowById = new Map(rows.map((r) => [r.id, r]))
+
+  // -- ChangeBatch 생성 -------------------------------------------------------
+  const action = `keyword.${parsed.action}` as const
+  const total = keywordIds.length
+
+  const batchSummary: Record<string, unknown> = {
+    advertiserId,
+    action: parsed.action,
+    total,
+  }
+  if (parsed.action === "bid") {
+    batchSummary.mode = parsed.mode
+    if (parsed.mode === "absolute") {
+      batchSummary.bidAmt = parsed.bidAmt
+    } else {
+      batchSummary.percent = parsed.percent
+      batchSummary.roundTo = parsed.roundTo
+    }
+  }
+
+  const batch = await prisma.changeBatch.create({
+    data: {
+      userId: user.id,
+      action,
+      status: "running",
+      total,
+      processed: 0,
+      attempt: 1,
+      summary: batchSummary as Prisma.InputJsonValue,
+    },
+  })
+
+  // -- SA payload + ChangeItem before/after 산출 ------------------------------
+  // ratio 모드에서 baseline 없는 row 는 사전 'failed' (payload 미포함, 다른 row 는 정상 진행).
+  type ChangeItemSeed = {
+    batchId: string
+    targetType: string
+    targetId: string
+    before: Prisma.InputJsonValue
+    after: Prisma.InputJsonValue
+    idempotencyKey: string
+    status: "pending" | "failed"
+    error?: string
+  }
+
+  const itemsForApi: KeywordBulkUpdateItem[] = []
+  const changeItemSeeds: ChangeItemSeed[] = []
+  // ratio 사전 실패 keywordId — 호출 후 결과 매핑에 즉시 반영하기 위해 보존.
+  const preFailed = new Map<string, string>() // keywordId → error
+  // ratio 모드의 산출 bid 보존 (DB update 시 응답 누락 대비 fallback).
+  const ratioComputed = new Map<string, number>() // keywordId → newBid
+
+  let fields: string
+
+  switch (parsed.action) {
+    case "toggle": {
+      fields = "userLock"
+      for (const kid of keywordIds) {
+        const r = rowById.get(kid)!
+        const newLock = toggleByKeywordId!.get(kid)!
+        const before = { userLock: r.userLock } as Prisma.InputJsonValue
+        const after = { userLock: newLock } as Prisma.InputJsonValue
+
+        itemsForApi.push({
+          nccKeywordId: r.nccKeywordId,
+          userLock: newLock,
+        })
+        changeItemSeeds.push({
+          batchId: batch.id,
+          targetType: "Keyword",
+          targetId: r.nccKeywordId,
+          before,
+          after,
+          idempotencyKey: `${batch.id}:${r.nccKeywordId}`,
+          status: "pending",
+        })
+      }
+      break
+    }
+    case "bid": {
+      fields = "bidAmt,useGroupBidAmt"
+      for (const kid of keywordIds) {
+        const r = rowById.get(kid)!
+
+        // before: 액션이 영향 주는 필드만 (bidAmt + useGroupBidAmt)
+        const before = {
+          bidAmt: r.bidAmt,
+          useGroupBidAmt: r.useGroupBidAmt,
+        } as Prisma.InputJsonValue
+
+        if (parsed.mode === "absolute") {
+          const newBid = parsed.bidAmt
+          const after = {
+            bidAmt: newBid,
+            useGroupBidAmt: false,
+          } as Prisma.InputJsonValue
+
+          itemsForApi.push({
+            nccKeywordId: r.nccKeywordId,
+            bidAmt: newBid,
+            useGroupBidAmt: false,
+          })
+          changeItemSeeds.push({
+            batchId: batch.id,
+            targetType: "Keyword",
+            targetId: r.nccKeywordId,
+            before,
+            after,
+            idempotencyKey: `${batch.id}:${r.nccKeywordId}`,
+            status: "pending",
+          })
+        } else {
+          // ratio
+          const baseline = resolveRatioBaseline(r)
+          if (baseline === null) {
+            const errMsg = "입찰가 baseline 없음"
+            preFailed.set(r.id, errMsg)
+            changeItemSeeds.push({
+              batchId: batch.id,
+              targetType: "Keyword",
+              targetId: r.nccKeywordId,
+              before,
+              after: {} as Prisma.InputJsonValue,
+              idempotencyKey: `${batch.id}:${r.nccKeywordId}`,
+              status: "failed",
+              error: errMsg,
+            })
+            continue
+          }
+          const newBid = computeRatioBid(
+            baseline,
+            parsed.percent,
+            parsed.roundTo,
+          )
+          ratioComputed.set(r.id, newBid)
+
+          const after = {
+            bidAmt: newBid,
+            useGroupBidAmt: false,
+          } as Prisma.InputJsonValue
+
+          itemsForApi.push({
+            nccKeywordId: r.nccKeywordId,
+            bidAmt: newBid,
+            useGroupBidAmt: false,
+          })
+          changeItemSeeds.push({
+            batchId: batch.id,
+            targetType: "Keyword",
+            targetId: r.nccKeywordId,
+            before,
+            after,
+            idempotencyKey: `${batch.id}:${r.nccKeywordId}`,
+            status: "pending",
+          })
+        }
+      }
+      break
+    }
+  }
+
+  await prisma.changeItem.createMany({
+    data: changeItemSeeds.map((s) => ({
+      batchId: s.batchId,
+      targetType: s.targetType,
+      targetId: s.targetId,
+      before: s.before,
+      after: s.after,
+      idempotencyKey: s.idempotencyKey,
+      status: s.status,
+      error: s.error,
+    })),
+  })
+
+  // -- SA API 호출 ------------------------------------------------------------
+  // TODO(5천 건 한계): 본 PR 은 단일 PUT. 운영 측정 후 batch-executor-job 패턴 이관.
+  let success = 0
+  let failed = preFailed.size
+  const results: BulkActionKeywordItemResult[] = []
+
+  // ratio 사전 실패 row 결과 즉시 추가 (UI 결과 표시용)
+  for (const [kid, err] of preFailed) {
+    results.push({ keywordId: kid, ok: false, error: err })
+  }
+
+  if (itemsForApi.length === 0) {
+    // 모든 row 가 사전 실패 (ratio baseline 전부 없음)
+    await prisma.changeBatch.update({
+      where: { id: batch.id },
+      data: {
+        status: "failed",
+        processed: total,
+        finishedAt: new Date(),
+      },
+    })
+
+    await logAudit({
+      userId: user.id,
+      action,
+      targetType: "ChangeBatch",
+      targetId: batch.id,
+      before: null,
+      after: {
+        batchId: batch.id,
+        advertiserId,
+        total,
+        success: 0,
+        failed: total,
+        ...(parsed.action === "bid" ? { mode: parsed.mode } : {}),
+        ...(parsed.action === "bid" && parsed.mode === "ratio"
+          ? { percent: parsed.percent }
+          : {}),
+        note: "all-rows-pre-failed",
+      },
+    })
+
+    revalidatePath(`/${advertiserId}/keywords`)
+    return { batchId: batch.id, total, success: 0, failed, items: results }
+  }
+
+  try {
+    const updated = await updateKeywordsBulk(
+      advertiser.customerId,
+      itemsForApi,
+      fields,
+    )
+    const updatedMap = new Map(updated.map((k) => [k.nccKeywordId, k]))
+
+    // SA 호출 대상 row 만 매핑 (preFailed 제외)
+    for (const kid of keywordIds) {
+      if (preFailed.has(kid)) continue
+      const r = rowById.get(kid)!
+      const u = updatedMap.get(r.nccKeywordId)
+
+      if (u) {
+        // DB 반영 — 액션별로 다르게 update
+        const rawJson = u as unknown as Prisma.InputJsonValue
+        if (parsed.action === "toggle") {
+          // userLock 변경 → status 재계산 (mapKeywordStatus)
+          const newLock =
+            typeof u.userLock === "boolean"
+              ? u.userLock
+              : toggleByKeywordId!.get(kid)!
+          await prisma.keyword.update({
+            where: { id: r.id },
+            data: {
+              userLock: newLock,
+              status: mapKeywordStatus(u),
+              raw: rawJson,
+            },
+          })
+        } else {
+          // bid (absolute / ratio) — bidAmt + useGroupBidAmt
+          const fallbackBid =
+            parsed.mode === "absolute"
+              ? parsed.bidAmt
+              : (ratioComputed.get(kid) ?? null)
+          const newBid =
+            typeof u.bidAmt === "number" ? u.bidAmt : fallbackBid
+          const newUseGroup =
+            typeof u.useGroupBidAmt === "boolean" ? u.useGroupBidAmt : false
+          await prisma.keyword.update({
+            where: { id: r.id },
+            data: {
+              bidAmt: newBid,
+              useGroupBidAmt: newUseGroup,
+              raw: rawJson,
+            },
+          })
+        }
+
+        await prisma.changeItem.updateMany({
+          where: { batchId: batch.id, targetId: r.nccKeywordId },
+          data: { status: "done" },
+        })
+        success++
+        results.push({ keywordId: kid, ok: true })
+      } else {
+        await prisma.changeItem.updateMany({
+          where: { batchId: batch.id, targetId: r.nccKeywordId },
+          data: { status: "failed", error: "응답에 누락" },
+        })
+        failed++
+        results.push({ keywordId: kid, ok: false, error: "응답 누락" })
+      }
+    }
+  } catch (e) {
+    // 일괄 실패 — preFailed 외 모든 ChangeItem failed (raw 응답 첨부 X — 메시지만, 마스킹된 상한)
+    const msg = e instanceof Error ? e.message : String(e)
+    const safeMsg = msg.slice(0, 500)
+    await prisma.changeItem.updateMany({
+      where: { batchId: batch.id, status: "pending" },
+      data: { status: "failed", error: safeMsg },
+    })
+    // results 재구성: preFailed 유지 + 나머지 모두 실패
+    success = 0
+    failed = total
+    results.length = 0
+    for (const [kid, err] of preFailed) {
+      results.push({ keywordId: kid, ok: false, error: err })
+    }
+    for (const kid of keywordIds) {
+      if (preFailed.has(kid)) continue
+      results.push({ keywordId: kid, ok: false, error: safeMsg })
+    }
+  }
+
+  // -- ChangeBatch finalize ---------------------------------------------------
+  const finalStatus: "done" | "failed" = success === 0 ? "failed" : "done"
+
+  await prisma.changeBatch.update({
+    where: { id: batch.id },
+    data: {
+      status: finalStatus,
+      processed: total,
+      finishedAt: new Date(),
+    },
+  })
+
+  // -- AuditLog 1건 (요약, 시크릿 X — raw 응답 첨부 X) ------------------------
+  await logAudit({
+    userId: user.id,
+    action,
+    targetType: "ChangeBatch",
+    targetId: batch.id,
+    before: null,
+    after: {
+      batchId: batch.id,
+      advertiserId,
+      total,
+      success,
+      failed,
+      ...(parsed.action === "bid" ? { mode: parsed.mode } : {}),
+      ...(parsed.action === "bid" && parsed.mode === "ratio"
+        ? { percent: parsed.percent, roundTo: parsed.roundTo }
+        : {}),
+      ...(parsed.action === "bid" && parsed.mode === "absolute"
+        ? { bidAmt: parsed.bidAmt }
+        : {}),
+    },
+  })
+
+  revalidatePath(`/${advertiserId}/keywords`)
+
+  return { batchId: batch.id, total, success, failed, items: results }
+}
