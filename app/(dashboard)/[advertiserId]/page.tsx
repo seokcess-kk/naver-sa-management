@@ -144,8 +144,11 @@ export default async function AdvertiserDashboardPage({
           >
             키워드
           </Button>
-          <Button variant="outline" disabled>
-            소재 (준비 중)
+          <Button
+            variant="outline"
+            render={<Link href={`/${advertiser.id}/ads`} />}
+          >
+            소재
           </Button>
           <Button variant="outline" disabled>
             확장소재 (준비 중)
