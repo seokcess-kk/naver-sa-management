@@ -11,6 +11,13 @@
  *   - 클라이언트 필터: 키워드 검색(debounce 200ms) / 매치타입 / 상태 / 검수 / 광고그룹
  *   - 동기화 버튼 (광고주 단위)
  *
+ * F-3.8 검색·필터 SPEC 충족 상태:
+ *   - 키워드명 검색 ✓ (F-3.1 keywordTextFilter)
+ *   - 매치타입 ✓ (F-3.1)
+ *   - 상태 ✓ (F-3.1)
+ *   - 성과 범위(노출/클릭/비용/CTR/CPC) — F-7.1 Stats API + Redis 캐시 의존.
+ *     KeywordRow 에는 성과 데이터 없음. F-7.1 도입 후 컬럼·필터 보강 (TODO).
+ *
  * F-3.2 (이전 PR):
  *   - 인라인 편집 3개 컬럼: userLock(ON/OFF) / bidAmt + useGroupBidAmt / userLock
  *     - 셀 편집은 즉시 API 반영 X. 클라이언트 staging Map<keywordId, KeywordPatch>
