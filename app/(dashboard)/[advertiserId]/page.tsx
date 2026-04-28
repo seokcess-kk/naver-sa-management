@@ -114,8 +114,11 @@ export default async function AdvertiserDashboardPage({
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2 py-4">
-          <Button variant="outline" disabled>
-            캠페인 (준비 중)
+          <Button
+            variant="outline"
+            render={<Link href={`/${advertiser.id}/campaigns`} />}
+          >
+            캠페인
           </Button>
           <Button variant="outline" disabled>
             광고그룹 (준비 중)
