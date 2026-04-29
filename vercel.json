@@ -12,6 +12,10 @@
     {
       "path": "/api/cron/stat-daily",
       "schedule": "0 18 * * *"
+    },
+    {
+      "path": "/api/cron/stat-hourly",
+      "schedule": "5 * * * *"
     }
   ]
 }

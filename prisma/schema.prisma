@@ -109,6 +109,11 @@ enum StatLevel {
 enum StatDevice {
   PC
   MOBILE
+  // F-9.2: StatHourly 적재는 Stats API hh24 breakdown 만 사용 (시간 분해).
+  // Stats API 의 hh24 와 pcMblTp 동시 breakdown 은 미지원으로 관찰됨 → 시간×디바이스
+  // 분해는 P2 후속에서 결정. StatHourly 는 device='ALL' 단일 행으로 적재한다.
+  // StatDaily 는 PC/MOBILE 만 사용 (코드 정책). DB 레벨 enum 분리 강제는 하지 않음.
+  ALL
 }
 
 enum AlertEventStatus {
@@ -179,9 +184,10 @@ model Advertiser {
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
-  campaigns Campaign[]
-  access    UserAdvertiserAccess[]
-  stats     StatDaily[]
+  campaigns   Campaign[]
+  access      UserAdvertiserAccess[]
+  stats       StatDaily[]
+  statsHourly StatHourly[]
 
   @@index([customerId])
   @@index([status])
@@ -423,6 +429,50 @@ model StatDaily {
   @@index([date, level, refId])
 }
 
+// F-9.2 — 시간별 적재 (P2 두 번째 적재 모델)
+// 네이버 Stats API 의 시간별 데이터는 7일 보존 한계 → 자체 누적 필요.
+// hh24 breakdown 으로 매시간 폴링 + upsert. KST 기준 (date Date + hour Int 0..23)
+// 으로 시간대 정합성 단순화 (단일 timestamp 컬럼은 timezone 처리 모호함 회피).
+//
+// device 정책:
+//   - 본 모델은 ALL 단일 디바이스로만 적재 (hh24 + pcMblTp 동시 breakdown 미지원).
+//   - 시간×디바이스 분해가 필요해지면 device 컬럼은 그대로 두고 PC/MOBILE 적재 추가.
+//   - device 컬럼을 unique 키에 포함해 두어 향후 확장 안전.
+//
+// retention 권고:
+//   - 광고주 N × 24시간 × ~5,000 ref × 1 device(ALL) → 1년 후 ≈ 수억~수십억 rows.
+//   - 90일 보관 cleanup cron 후속 PR 권고 (비딩 정책 / 알림 lookback 30일 가정).
+//   - 본 PR 은 모델만 — retention 작업은 운영 부하 측정 후 결정.
+model StatHourly {
+  id           String     @id @default(cuid())
+  // F-9.1 StatDaily 와 동일 비정규화 패턴 — 광고주 단일 필터 / Cascade / RLS 단순화.
+  advertiserId String
+  date         DateTime   @db.Date // KST 기준 일자
+  hour         Int // 0..23 (KST 시각)
+  level        StatLevel
+  refId        String // campaignId / adgroupId / keywordId (네이버 nccId 또는 내부 id)
+  device       StatDevice // 본 PR: 'ALL' 만 사용 (hh24 단일 breakdown). 향후 PC/MOBILE 분리 적재 시 enum 그대로 사용.
+  impressions  Int        @default(0)
+  clicks       Int        @default(0)
+  cost         Decimal    @default(0) @db.Decimal(14, 2)
+  // F-9.4 1시간 주기 갱신 입력 (Keyword.recentAvgRnk 갱신 원천 — keyword level 행 한정)
+  recentAvgRnk Decimal?   @db.Decimal(5, 2)
+  // 매출/전환 / raw 는 본 PR 비포함 — 시간별 매출 조인은 P2 후속 결정
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  advertiser Advertiser @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
+
+  // 시간×레벨×ref×device 한 행 보장 (upsert 키)
+  @@unique([date, hour, level, refId, device])
+  // 광고주 + 시간 윈도 read (F-9.2 ingest cursor / F-7 시간별 차트)
+  @@index([advertiserId, date, hour])
+  // 광고주 + 레벨별 시간 차트 (예: 광고주 N의 keyword level 24h 추이)
+  @@index([advertiserId, level, date, hour])
+  // 적재 / 디버깅용 — 특정 ref 의 시간 추이
+  @@index([date, hour, level, refId])
+}
+
 // =============================================================================
 // P2 엔티티 (선언 보류 — 작업 시점에 추가)
 // =============================================================================
@@ -431,4 +481,3 @@ model StatDaily {
 // model EstimateCache   { ... } // Estimate API 결과 30분 캐시
 // model RankObservation { ... } // 시간별 순위 관측
 // model LlmCallLog      { ... } // LLM 호출 비용
-// model StatHourly      { ... } // 시간별 누적 (네이버 7일 한계 회피)

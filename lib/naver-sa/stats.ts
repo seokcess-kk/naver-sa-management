@@ -48,17 +48,32 @@ import { NaverSaValidationError } from "@/lib/naver-sa/errors"
 /**
  * Stats 응답 필드 (네이버 SA 공식 fields 파라미터 값).
  *
- * - impCnt:   노출 수
- * - clkCnt:   클릭 수
- * - salesAmt: 비용 (원). 명칭이 "sales"이지만 실제 의미는 광고주가 지불한 비용.
- * - crtoCnt:  전환 수 (P2 영역 — P1 KPI에서는 사용 안 함)
- * - ctr:      클릭률 (%)
- * - cpc:      평균 클릭당 비용 (원)
- * - ccnt:     추가 클릭 (옵션 — 일부 광고 유형 한정)
+ * - impCnt:        노출 수
+ * - clkCnt:        클릭 수
+ * - salesAmt:      비용 (원). 명칭이 "sales"이지만 실제 의미는 광고주가 지불한 비용.
+ * - crtoCnt:       전환 수 (P2 영역 — P1 KPI에서는 사용 안 함)
+ * - ctr:           클릭률 (%)
+ * - cpc:           평균 클릭당 비용 (원)
+ * - ccnt:          추가 클릭 (옵션 — 일부 광고 유형 한정)
+ * - recentAvgRnk:  최근 평균 노출 순위 (관찰 기반 — 데이터 부족 시 null 도래)
  *
- * 응답 row 에 정의 외 필드(예: hh24, pcMblTp, recentAvgRnk)도 올 수 있어 passthrough.
+ * 응답 row 에 정의 외 필드(예: hh24, pcMblTp)도 올 수 있어 passthrough.
+ *
+ * recentAvgRnk 처리 정책 (F-9.2 / F-9.4 — backend 책임):
+ *   - StatHourly 적재: nullable Decimal 컬럼에 그대로 적재 (null 통과)
+ *   - Keyword.recentAvgRnk 갱신: last non-null 우선 (이번 시간 null 이면 갱신 안 함)
+ *   - 재시도 큐 X — 다음 시간 cron 이 자연 재시도
+ *   - "15~30분 지연" SLA 가정 (CLAUDE.md "데이터 소스 정책")
  */
-export type StatsField = "impCnt" | "clkCnt" | "salesAmt" | "crtoCnt" | "ctr" | "cpc" | "ccnt"
+export type StatsField =
+  | "impCnt"
+  | "clkCnt"
+  | "salesAmt"
+  | "crtoCnt"
+  | "ctr"
+  | "cpc"
+  | "ccnt"
+  | "recentAvgRnk"
 
 /**
  * 네이버 SA datePreset 화이트리스트.
@@ -90,6 +105,11 @@ export type StatsRequest = {
  * - 모든 지표 필드는 optional — 요청 fields 에 포함된 항목만 채워짐.
  * - breakdown 응답은 hh24 / pcMblTp 같은 추가 키가 붙어옴 (passthrough 로 통과).
  *
+ * breakdown 응답 추가 키 (호출자가 직접 row 에서 추출):
+ *   - breakdown="hh24"    → row.hh24    (string "00".."23" 또는 number 0..23)
+ *   - breakdown="pcMblTp" → row.pcMblTp ("PC" / "MOBILE")
+ *   - 본 모듈은 추출 헬퍼 제공 X — backend 가 Number(row.hh24) 등으로 변환.
+ *
  * Record<string, unknown> 합쳐 응답 변경/추가 필드도 그대로 노출.
  */
 export type StatsRow = {
@@ -101,6 +121,7 @@ export type StatsRow = {
   ctr?: number
   cpc?: number
   ccnt?: number
+  recentAvgRnk?: number | null
 } & Record<string, unknown>
 
 /**
@@ -122,6 +143,8 @@ export const StatsRowSchema = z
     ctr: z.number().nullable().optional(),
     cpc: z.number().nullable().optional(),
     ccnt: z.number().nullable().optional(),
+    // recentAvgRnk: 관찰 기반 — 데이터 부족 시 null 도래. F-9.2 / F-9.4 호출부가 last non-null 우선 정책 적용.
+    recentAvgRnk: z.number().nullable().optional(),
   })
   .passthrough()
 
@@ -303,4 +326,78 @@ export async function getStats(
     })
     return parseStatsResponse(res, { path, customerId })
   })
+}
+
+/**
+ * 다수 ids 를 chunk 분할하여 getStats 반복 호출 + 결과 병합.
+ *
+ * 배경 (F-9.2 시간별 cron / F-9.4 노출 순위 적재):
+ *   네이버 SA Stats API 의 ids 인자에는 공식 한도가 비공개지만,
+ *   관찰상 100~500 개 초과 시 400/414/실패 발생. 광고주당 키워드 5천 개를
+ *   한 번에 호출 불가 → chunk 분할 직렬 호출 + 결과 row 평면 합치기.
+ *
+ * 동작:
+ *   - ids.length === 0 → 즉시 [] (네트워크 호출 X)
+ *   - chunkSize 기본 100 (보수적). NAVER_SA_STATS_CHUNK env 로 오버라이드 가능.
+ *   - chunk 단위 직렬 호출 (광고주별 동시성 제어는 client.ts 토큰 버킷 책임)
+ *   - 각 chunk 호출은 getStats 의 기존 캐시(`stats:{customerId}:{kind}:{hash}`) 활용 →
+ *     chunk 별 ids 해시가 다르므로 캐시 키 분리 → today TTL 5분 동안 부분 hit/miss 가능
+ *   - 각 chunk 의 Zod 검증 실패 시 NaverSaValidationError throw (호출자가 catch / batch 보고)
+ *
+ * 운영 권고:
+ *   - chunk size 환경변수: NAVER_SA_STATS_CHUNK (예: "200" / "500")
+ *   - 운영 초기에는 100 유지 → 안정 확인 후 상향
+ *   - 시간별 cron 호출 빈도가 캐시 TTL 보다 짧으면 일부 chunk 재호출 (비용 추적 권장)
+ *
+ * @param customerId   광고주 customerId
+ * @param baseRequest  ids 포함한 StatsRequest. ids 가 chunk 단위로 분리됨
+ * @param opts.chunkSize  호출별 ids 최대 개수 (env 보다 우선)
+ * @returns            모든 chunk 의 row 평면 합친 결과
+ *
+ * 사용 예 (시간별 키워드 적재):
+ *   const rows = await getStatsChunked(customerId, {
+ *     ids: keywordIds,            // 5,000 개
+ *     fields: ["impCnt", "clkCnt", "salesAmt", "ctr", "cpc", "recentAvgRnk"],
+ *     datePreset: "today",
+ *     breakdown: "hh24",
+ *   })
+ *   // rows.length ≈ 5,000 × 24 (현재 시각까지 누적된 시간대만 채워짐)
+ */
+export async function getStatsChunked(
+  customerId: string,
+  baseRequest: Omit<StatsRequest, "ids"> & { ids: string[] },
+  opts?: { chunkSize?: number },
+): Promise<StatsRow[]> {
+  if (!customerId) {
+    throw new NaverSaValidationError("customerId is required for getStatsChunked")
+  }
+  if (!baseRequest.fields || baseRequest.fields.length === 0) {
+    throw new NaverSaValidationError("getStatsChunked: fields must contain at least 1 entry")
+  }
+  if (!baseRequest.datePreset && !baseRequest.timeRange) {
+    throw new NaverSaValidationError(
+      "getStatsChunked: datePreset or timeRange is required",
+    )
+  }
+
+  const ids = baseRequest.ids
+  if (ids.length === 0) return []
+
+  const explicit = opts?.chunkSize
+  const envValue = Number(process.env.NAVER_SA_STATS_CHUNK ?? "100")
+  const chunkSize =
+    explicit && explicit > 0
+      ? explicit
+      : Number.isFinite(envValue) && envValue > 0
+        ? envValue
+        : 100
+
+  const out: StatsRow[] = []
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    const slice = ids.slice(i, i + chunkSize)
+    const rows = await getStats(customerId, { ...baseRequest, ids: slice })
+    // 평면 합치기 — 각 chunk 응답의 row 순서를 유지.
+    for (const r of rows) out.push(r)
+  }
+  return out
 }
