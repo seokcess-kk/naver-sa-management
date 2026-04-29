@@ -24,6 +24,8 @@ const adminNav = [
   { href: "/admin/users", label: "사용자" },
   { href: "/admin/change-batches", label: "변경 이력" },
   { href: "/admin/audit-logs", label: "감사 로그" },
+  { href: "/admin/alert-rules", label: "알림 룰" },
+  { href: "/admin/alerts", label: "알림 이벤트" },
 ]
 
 export default async function AdminLayout({

@@ -20,6 +20,7 @@ import { redirect, notFound } from "next/navigation"
 
 import {
   getCurrentAdvertiser,
+  getCurrentUser,
   AdvertiserNotFoundError,
   AuthorizationError,
   UnauthenticatedError,
@@ -36,11 +37,13 @@ import { KeyStatusBadge } from "@/components/admin/key-status-badge"
 import { ConnectionStatusCard } from "@/components/dashboard/connection-status-card"
 import { KpiCardsSection } from "@/components/dashboard/kpi-cards-section"
 import { TopListSection } from "@/components/dashboard/top-list-section"
+import { AlertEventsFeed } from "@/components/dashboard/alert-events-feed"
 import { checkConnection } from "@/app/(dashboard)/[advertiserId]/actions"
 import {
   getDashboardKpi,
   getTopCampaigns,
 } from "@/app/(dashboard)/[advertiserId]/dashboard/actions"
+import { listAlertEvents } from "@/app/admin/alerts/actions"
 
 export default async function AdvertiserDashboardPage({
   params,
@@ -50,9 +53,14 @@ export default async function AdvertiserDashboardPage({
   const { advertiserId } = await params
 
   let advertiser
+  let isAdmin = false
   try {
     const ctx = await getCurrentAdvertiser(advertiserId)
     advertiser = ctx.advertiser
+    // F-7.3 보너스 — 알림 피드는 admin 만 listAlertEvents 호출 가능.
+    // viewer / operator 도 대시보드 진입은 가능하므로 분기.
+    const me = await getCurrentUser()
+    isAdmin = me.role === "admin"
   } catch (e) {
     if (e instanceof UnauthenticatedError) {
       redirect("/login")
@@ -69,19 +77,29 @@ export default async function AdvertiserDashboardPage({
 
   // RSC 사전 호출 — 키 있으면 병렬 (waterfall 방지). 없으면 모두 null (외부 호출 차단).
   // checkConnection / getDashboardKpi / getTopCampaigns 는 모두 advertiserId 권한 재검증 포함.
-  const [connectionInitial, kpiInitial, topCampaignsInitial] =
+  // alertsInitial 은 admin 전용 (listAlertEvents 가 admin 가드) — 그 외에는 null 로 패스.
+  const [
+    connectionInitial,
+    kpiInitial,
+    topCampaignsInitial,
+    alertsInitial,
+  ] = await Promise.all([
+    advertiser.hasKeys ? checkConnection(advertiser.id) : Promise.resolve(null),
+    advertiser.hasKeys ? getDashboardKpi(advertiser.id) : Promise.resolve(null),
     advertiser.hasKeys
-      ? await Promise.all([
-          checkConnection(advertiser.id),
-          getDashboardKpi(advertiser.id),
-          getTopCampaigns(advertiser.id, {
-            metric: "impCnt",
-            period: "recent7d",
-            limit: 5,
-            order: "desc",
-          }),
-        ])
-      : [null, null, null]
+      ? getTopCampaigns(advertiser.id, {
+          metric: "impCnt",
+          period: "recent7d",
+          limit: 5,
+          order: "desc",
+        })
+      : Promise.resolve(null),
+    isAdmin
+      ? listAlertEvents({ advertiserId: advertiser.id, limit: 5 })
+          .then((p) => p.items)
+          .catch(() => null)
+      : Promise.resolve(null),
+  ])
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -139,6 +157,8 @@ export default async function AdvertiserDashboardPage({
         hasKeys={advertiser.hasKeys}
         initial={topCampaignsInitial}
       />
+
+      <AlertEventsFeed isAdmin={isAdmin} initial={alertsInitial} />
 
       <Card>
         <CardHeader className="border-b">
