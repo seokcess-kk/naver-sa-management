@@ -231,6 +231,12 @@ export default async function AdvertiserDashboardPage({
           >
             비딩 정책 (F-11.1)
           </Button>
+          <Button
+            variant="outline"
+            render={<Link href={`/${advertiser.id}/marginal-utility`} />}
+          >
+            한계효용 분석 (F-11.3)
+          </Button>
         </CardContent>
       </Card>
 
