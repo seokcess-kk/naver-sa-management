@@ -17,9 +17,10 @@
  *   - 모든 변경은 ChangeBatch + ChangeItem 적재 (롤백 자체도 새 ChangeBatch — CLAUDE.md "모든 변경은 ChangeBatch")
  *   - 시크릿은 logAudit 적재 단계에서 마스킹됨 (lib/audit/log.ts sanitize). 본 모듈은 raw 응답·payload 첨부 금지.
  *
- * 롤백 한계 (drift 감지 정밀화는 후속 PR):
- *   - 본 PR 은 SA 재조회 없이 **DB 현재값 vs ChangeItem.after** 비교만 수행.
- *   - 즉, 동기화(*.sync) 후 외부 변경(타 사용자·자동화·네이버측)이 있으면 감지 못 할 수 있음.
+ * 롤백 drift 감지 (RollbackOptions.saRecheck):
+ *   - 기본 (saRecheck=false): DB 현재값 vs ChangeItem.after 비교만. SA 호출 0회. 외부 변경 감지 X.
+ *   - 정밀 (saRecheck=true, F-6.4): SA 재조회로 외부 변경(타 사용자/자동화/네이버측)까지 감지.
+ *     비용: 광고그룹별 list API + 광고주 단위 list 1~2회. 토큰 버킷 자동 throttle.
  *   - ignoreDrift=true 일 때만 drift 행도 강제 롤백. 기본값(false)은 skip.
  *
  * UI 는 `import { ... } from "@/app/admin/change-batches/actions"` 로 호출.
@@ -35,13 +36,35 @@ import { logAudit } from "@/lib/audit/log"
 // 자격증명 resolver 자동 등록 (retry / rollback 시 SA API 호출 위해 필요)
 import "@/lib/naver-sa/credentials"
 
-import { updateKeywordsBulk, type KeywordBulkUpdateItem } from "@/lib/naver-sa/keywords"
-import { updateAdgroupsBulk, type AdgroupBulkUpdateItem } from "@/lib/naver-sa/adgroups"
-import { updateCampaignsBulk, type CampaignBulkUpdateItem } from "@/lib/naver-sa/campaigns"
-import { updateAdsBulk, type AdBulkUpdateItem } from "@/lib/naver-sa/ads"
+import {
+  updateKeywordsBulk,
+  listKeywords,
+  type KeywordBulkUpdateItem,
+  type Keyword,
+} from "@/lib/naver-sa/keywords"
+import {
+  updateAdgroupsBulk,
+  listAdgroups,
+  type AdgroupBulkUpdateItem,
+  type AdGroup,
+} from "@/lib/naver-sa/adgroups"
+import {
+  updateCampaignsBulk,
+  listCampaigns,
+  type CampaignBulkUpdateItem,
+  type Campaign,
+} from "@/lib/naver-sa/campaigns"
+import {
+  updateAdsBulk,
+  listAds,
+  type AdBulkUpdateItem,
+  type Ad,
+} from "@/lib/naver-sa/ads"
 import {
   updateAdExtensionsBulk,
+  listAdExtensions,
   type AdExtensionBulkUpdateItem,
+  type AdExtension,
 } from "@/lib/naver-sa/ad-extensions"
 
 import type {
@@ -118,6 +141,20 @@ export type RetryResult = {
 export type RollbackOptions = {
   /** true 면 drift 항목도 강제 롤백. 기본 false (drift 행은 skip). */
   ignoreDrift?: boolean
+  /**
+   * true=SA 재조회로 정밀 검사. false(기본)=DB current vs after 단순 비교(레거시).
+   *
+   * SA 재조회 모드 (F-6.4 정밀화):
+   *   - DB 가 아닌 네이버 SA 측 현재값을 진실로 비교 → 외부 변경(타 사용자/자동화/네이버측) 감지.
+   *   - targetType 별 list API 1회로 전체 nccId 인덱싱 → 단건 N회 호출 회피.
+   *     (Keyword/Ad/AdExtension 은 광고그룹 단위 list 라 광고그룹 K개면 K회.)
+   *   - SA 호출 실패 시 보수적으로 drift=true 처리 (롤백 차단).
+   *
+   * 레거시 모드 (기본):
+   *   - SA 호출 0회. DB 현재 컬럼 vs ChangeItem.after 만 비교.
+   *   - 동기화(*.sync) 후 외부 변경은 감지 못 함.
+   */
+  saRecheck?: boolean
 }
 
 export type RollbackItemResult = {
@@ -188,6 +225,7 @@ const filterSchema = z.object({
 
 const rollbackOptionsSchema = z.object({
   ignoreDrift: z.boolean().optional(),
+  saRecheck: z.boolean().optional(),
 })
 
 // =============================================================================
@@ -907,8 +945,10 @@ async function failAllWith(
  *   2. 원 ChangeBatch 조회 + items where status='done' (failed 항목은 변경 적용 안 됐으므로 롤백 불요)
  *   3. ROLLBACK_SUPPORTED_ACTIONS 화이트리스트 검증 — 비지원이면 throw
  *   4. summary.advertiserId → advertiser + hasKeys 검증
- *   5. drift 감지 (단순화: SA 재조회 X, DB 현재값 vs ChangeItem.after 비교)
- *      - DB 의 toggle/budget/bid 등 현재 값과 after 가 일치하면 drift 없음 → 롤백 적용
+ *   5. drift 감지 (옵션):
+ *      - saRecheck=false (기본): DB 현재값 vs ChangeItem.after 비교 (레거시 — SA 호출 0회)
+ *      - saRecheck=true: SA 재조회로 외부 변경 감지 (광고그룹별 list API K회 + 광고주별 1회)
+ *      - 일치하면 drift 없음 → 롤백 적용
  *      - 불일치 시 drift — ignoreDrift=false 면 skip + reason="drift"
  *   6. 새 ChangeBatch 생성 (action="rollback:${원action}", attempt=1, summary={advertiserId, originalBatchId})
  *      ChangeItem 적재 — before/after 뒤바꿔서 (롤백 적용값 = 원 before)
@@ -917,9 +957,10 @@ async function failAllWith(
  *   9. ChangeBatch finalize
  *  10. AuditLog action="batch.rollback"
  *
- * drift 감지 한계 (후속 PR):
- *   - 본 PR 은 SA 재조회 없음. DB 가 동기화 직후 상태와 동일하다고 가정.
- *   - SA 측 외부 변경(타 사용자·자동화)은 detect 안 됨. F-6.4 정밀화 PR 에서 SA 재조회 도입.
+ * drift 감지 모드:
+ *   - 레거시 (saRecheck=false, 기본): DB 비교만. 동기화 직후 상태 가정. SA 외부 변경 감지 X.
+ *   - 정밀 (saRecheck=true, F-6.4): SA 재조회로 비교. 외부 변경(타 사용자/자동화/네이버측) 감지.
+ *     비용: 광고그룹 K개면 K회 + 광고주 단위 1~2회 (list API).
  */
 export async function rollbackChangeBatch(
   batchId: string,
@@ -929,6 +970,7 @@ export async function rollbackChangeBatch(
   const id = shortId.parse(batchId)
   const opts = rollbackOptionsSchema.parse(options ?? {})
   const ignoreDrift = opts.ignoreDrift === true
+  const saRecheck = opts.saRecheck === true
 
   // -- 1. 원 batch 조회 -------------------------------------------------------
   const batch = await prisma.changeBatch.findUnique({
@@ -963,9 +1005,12 @@ export async function rollbackChangeBatch(
   const advertiserId = extractAdvertiserId(batch.summary)
   const advertiserMeta = await loadAdvertiserOrThrow(advertiserId)
 
-  // -- 3. drift 감지 — DB 현재값 vs ChangeItem.after ---------------------------
-  // targetType 별로 DB 행을 한 번에 조회 (N+1 회피).
-  const driftMap = await detectDrift(batch.items)
+  // -- 3. drift 감지 ---------------------------------------------------------
+  // saRecheck=true → SA 재조회 (외부 변경 감지). false(기본) → DB 비교 (레거시).
+  // 둘 다 targetType 별 list API 1회로 인덱싱 (단건 N회 호출 회피).
+  const driftMap = saRecheck
+    ? await detectDriftSA(batch.items, advertiserMeta.customerId)
+    : await detectDrift(batch.items)
 
   // -- 4. before 가 비어있는 항목은 롤백 대상 외 (적재 시 실수) ---------------
   type Prepared = {
@@ -1051,6 +1096,7 @@ export async function rollbackChangeBatch(
         originalBatchId: id,
         originalAction: batch.action,
         ignoreDrift,
+        saRecheck,
         // 디버깅 메타: 사전 skip 건수
         preSkipped: earlyResults.length,
         driftSkipped: driftSkipped.length,
@@ -1195,6 +1241,7 @@ export async function rollbackChangeBatch(
       failed,
       drift: driftSkipped.length,
       ignoreDrift,
+      saRecheck,
     },
   })
 
@@ -1411,6 +1458,374 @@ async function detectDrift(
   }
 
   return result
+}
+
+/**
+ * drift 감지 (정밀 — F-6.4 SA 재조회).
+ *
+ * DB 가 아닌 **네이버 SA 측 현재값**을 진실로 비교 → 외부 변경(타 사용자/자동화/네이버측) 감지.
+ *
+ * 호출 비용:
+ *   - Keyword/Ad/AdExtension: DB 에서 부모 nccAdgroupId 룩업 → 광고그룹별 list API 호출.
+ *     광고그룹 K개면 K회 호출 (단건 N회 호출 회피).
+ *   - AdGroup: listAdgroups(customerId) 1회.
+ *   - Campaign: listCampaigns(customerId) 1회.
+ *   - 토큰 버킷이 자동 throttle. 큰 batch 라도 광고그룹 수만 늘어남.
+ *
+ * SA 호출 실패 처리 (보수):
+ *   - 그룹 list 실패 → 해당 그룹 모든 item drift=true (롤백 차단)
+ *   - 응답에 nccId 누락 → 해당 item drift=true (네이버 측 삭제 가능성)
+ *
+ * 비교 규칙 (after JSON 키 vs SA 응답값):
+ *   - userLock: SA.userLock (boolean) 직접 비교. SA 미정의 시 false 가정.
+ *   - bidAmt: SA.bidAmt (number|null) 직접 비교.
+ *   - useGroupBidAmt: SA.useGroupBidAmt (boolean) 직접 비교.
+ *   - dailyBudget: SA.dailyBudget (number|null) 직접 비교.
+ *   - 미지원 키는 비교 skip (drift 에 영향 없음).
+ *
+ * 반환: itemId → drift 여부 boolean
+ */
+async function detectDriftSA(
+  items: Array<{
+    id: string
+    targetType: string
+    targetId: string | null
+    after: Prisma.JsonValue
+  }>,
+  customerId: string,
+): Promise<Map<string, boolean>> {
+  const result = new Map<string, boolean>()
+
+  // -- 1. targetType 별로 grouping ---------------------------------------------
+  const keywordItems: Array<{ id: string; targetId: string; after: Record<string, unknown> }> = []
+  const adgroupItems: Array<{ id: string; targetId: string; after: Record<string, unknown> }> = []
+  const campaignItems: Array<{ id: string; targetId: string; after: Record<string, unknown> }> = []
+  const adItems: Array<{ id: string; targetId: string; after: Record<string, unknown> }> = []
+  const extItems: Array<{ id: string; targetId: string; after: Record<string, unknown> }> = []
+
+  for (const it of items) {
+    if (typeof it.targetId !== "string" || it.targetId.length === 0) {
+      result.set(it.id, false) // targetId 없음 — 비교 불가, 롤백 시도 허용
+      continue
+    }
+    const after = (it.after ?? {}) as Record<string, unknown>
+    switch (it.targetType) {
+      case "Keyword":
+        keywordItems.push({ id: it.id, targetId: it.targetId, after })
+        break
+      case "AdGroup":
+        adgroupItems.push({ id: it.id, targetId: it.targetId, after })
+        break
+      case "Campaign":
+        campaignItems.push({ id: it.id, targetId: it.targetId, after })
+        break
+      case "Ad":
+        adItems.push({ id: it.id, targetId: it.targetId, after })
+        break
+      case "AdExtension":
+        extItems.push({ id: it.id, targetId: it.targetId, after })
+        break
+      default:
+        result.set(it.id, false) // 알 수 없는 targetType — 롤백 시도 허용
+    }
+  }
+
+  // -- 2. Keyword/Ad/AdExtension: DB 에서 nccAdgroupId 매핑 ---------------------
+  // Keyword/Ad: nccKeywordId/nccAdId 로 조회 → adgroup.nccAdgroupId
+  // AdExtension: nccExtId 로 조회 → adgroup.nccAdgroupId (ownerType="adgroup" 가정)
+  const kAdgroupMap = await mapToAdgroupId(
+    "Keyword",
+    keywordItems.map((it) => it.targetId),
+  )
+  const aAdgroupMap = await mapToAdgroupId(
+    "Ad",
+    adItems.map((it) => it.targetId),
+  )
+  const eAdgroupMap = await mapToAdgroupId(
+    "AdExtension",
+    extItems.map((it) => it.targetId),
+  )
+
+  // -- 3. SA list API 호출 (광고그룹별 / 광고주 단위) ---------------------------
+  // 호출 실패 시 conservativeDriftIds 에 해당 item id 추가 (drift=true 처리).
+  const conservativeDriftIds = new Set<string>()
+
+  // 3-1. Keyword: 광고그룹별 listKeywords
+  const kSaMap = new Map<string, Keyword>()
+  if (keywordItems.length > 0) {
+    const adgroupGroups = groupBy(keywordItems, (it) => kAdgroupMap.get(it.targetId) ?? "")
+    for (const [nccAdgroupId, group] of adgroupGroups) {
+      if (!nccAdgroupId) {
+        // DB 매핑 실패 — 해당 키워드는 보수적으로 drift 처리
+        for (const it of group) conservativeDriftIds.add(it.id)
+        continue
+      }
+      try {
+        const remote = await listKeywords(customerId, { nccAdgroupId })
+        for (const k of remote) kSaMap.set(k.nccKeywordId, k)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        console.warn(
+          `[detectDriftSA] listKeywords failed nccAdgroupId=${nccAdgroupId}: ${msg}`,
+        )
+        for (const it of group) conservativeDriftIds.add(it.id)
+      }
+    }
+  }
+
+  // 3-2. Ad: 광고그룹별 listAds
+  const aSaMap = new Map<string, Ad>()
+  if (adItems.length > 0) {
+    const adgroupGroups = groupBy(adItems, (it) => aAdgroupMap.get(it.targetId) ?? "")
+    for (const [nccAdgroupId, group] of adgroupGroups) {
+      if (!nccAdgroupId) {
+        for (const it of group) conservativeDriftIds.add(it.id)
+        continue
+      }
+      try {
+        const remote = await listAds(customerId, { nccAdgroupId })
+        for (const a of remote) aSaMap.set(a.nccAdId, a)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        console.warn(
+          `[detectDriftSA] listAds failed nccAdgroupId=${nccAdgroupId}: ${msg}`,
+        )
+        for (const it of group) conservativeDriftIds.add(it.id)
+      }
+    }
+  }
+
+  // 3-3. AdExtension: 광고그룹별 listAdExtensions (type 필터 없음 — 전체 가져와 nccExtId 매칭)
+  const eSaMap = new Map<string, AdExtension>()
+  if (extItems.length > 0) {
+    const adgroupGroups = groupBy(extItems, (it) => eAdgroupMap.get(it.targetId) ?? "")
+    for (const [nccAdgroupId, group] of adgroupGroups) {
+      if (!nccAdgroupId) {
+        for (const it of group) conservativeDriftIds.add(it.id)
+        continue
+      }
+      try {
+        const remote = await listAdExtensions(customerId, { nccAdgroupId })
+        for (const ext of remote) eSaMap.set(ext.nccExtId, ext)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        console.warn(
+          `[detectDriftSA] listAdExtensions failed nccAdgroupId=${nccAdgroupId}: ${msg}`,
+        )
+        for (const it of group) conservativeDriftIds.add(it.id)
+      }
+    }
+  }
+
+  // 3-4. AdGroup: listAdgroups 1회
+  const gSaMap = new Map<string, AdGroup>()
+  if (adgroupItems.length > 0) {
+    try {
+      const remote = await listAdgroups(customerId)
+      for (const g of remote) gSaMap.set(g.nccAdgroupId, g)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.warn(`[detectDriftSA] listAdgroups failed: ${msg}`)
+      for (const it of adgroupItems) conservativeDriftIds.add(it.id)
+    }
+  }
+
+  // 3-5. Campaign: listCampaigns 1회
+  const cSaMap = new Map<string, Campaign>()
+  if (campaignItems.length > 0) {
+    try {
+      const remote = await listCampaigns(customerId)
+      for (const c of remote) cSaMap.set(c.nccCampaignId, c)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.warn(`[detectDriftSA] listCampaigns failed: ${msg}`)
+      for (const it of campaignItems) conservativeDriftIds.add(it.id)
+    }
+  }
+
+  // -- 4. 비교 — after JSON 키별로 SA 응답값과 비교 ----------------------------
+  // saMissing → drift=true (네이버 측 삭제 가능성). conservativeDriftIds 도 동일 처리.
+
+  // Keyword
+  for (const it of keywordItems) {
+    if (conservativeDriftIds.has(it.id)) {
+      result.set(it.id, true)
+      continue
+    }
+    const sa = kSaMap.get(it.targetId)
+    if (!sa) {
+      result.set(it.id, true) // SA 응답 누락 — 외부 삭제 가능성, 보수적 drift
+      continue
+    }
+    let drift = false
+    const after = it.after
+    if ("userLock" in after) {
+      const saLock = sa.userLock ?? false
+      if (saLock !== Boolean(after.userLock)) drift = true
+    }
+    if (!drift && "bidAmt" in after) {
+      const saBid = sa.bidAmt === undefined || sa.bidAmt === null ? null : Number(sa.bidAmt)
+      const afterBid = after.bidAmt === null || after.bidAmt === undefined ? null : Number(after.bidAmt)
+      if (saBid !== afterBid) drift = true
+    }
+    if (!drift && "useGroupBidAmt" in after) {
+      const saUseGroup = sa.useGroupBidAmt ?? false
+      if (saUseGroup !== Boolean(after.useGroupBidAmt)) drift = true
+    }
+    result.set(it.id, drift)
+  }
+
+  // AdGroup
+  for (const it of adgroupItems) {
+    if (conservativeDriftIds.has(it.id)) {
+      result.set(it.id, true)
+      continue
+    }
+    const sa = gSaMap.get(it.targetId)
+    if (!sa) {
+      result.set(it.id, true)
+      continue
+    }
+    let drift = false
+    const after = it.after
+    if ("userLock" in after) {
+      const saLock = sa.userLock ?? false
+      if (saLock !== Boolean(after.userLock)) drift = true
+    }
+    if (!drift && "bidAmt" in after) {
+      const saBid = sa.bidAmt === undefined || sa.bidAmt === null ? null : Number(sa.bidAmt)
+      const afterBid = after.bidAmt === null || after.bidAmt === undefined ? null : Number(after.bidAmt)
+      if (saBid !== afterBid) drift = true
+    }
+    if (!drift && "dailyBudget" in after) {
+      const saBudget = sa.dailyBudget === undefined || sa.dailyBudget === null ? null : Number(sa.dailyBudget)
+      const afterBudget = after.dailyBudget === null || after.dailyBudget === undefined ? null : Number(after.dailyBudget)
+      if (saBudget !== afterBudget) drift = true
+    }
+    result.set(it.id, drift)
+  }
+
+  // Campaign
+  for (const it of campaignItems) {
+    if (conservativeDriftIds.has(it.id)) {
+      result.set(it.id, true)
+      continue
+    }
+    const sa = cSaMap.get(it.targetId)
+    if (!sa) {
+      result.set(it.id, true)
+      continue
+    }
+    let drift = false
+    const after = it.after
+    if ("userLock" in after) {
+      const saLock = sa.userLock ?? false
+      if (saLock !== Boolean(after.userLock)) drift = true
+    }
+    if (!drift && "dailyBudget" in after) {
+      const saBudget = sa.dailyBudget === undefined || sa.dailyBudget === null ? null : Number(sa.dailyBudget)
+      const afterBudget = after.dailyBudget === null || after.dailyBudget === undefined ? null : Number(after.dailyBudget)
+      if (saBudget !== afterBudget) drift = true
+    }
+    result.set(it.id, drift)
+  }
+
+  // Ad
+  for (const it of adItems) {
+    if (conservativeDriftIds.has(it.id)) {
+      result.set(it.id, true)
+      continue
+    }
+    const sa = aSaMap.get(it.targetId)
+    if (!sa) {
+      result.set(it.id, true)
+      continue
+    }
+    let drift = false
+    const after = it.after
+    if ("userLock" in after) {
+      const saLock = sa.userLock ?? false
+      if (saLock !== Boolean(after.userLock)) drift = true
+    }
+    result.set(it.id, drift)
+  }
+
+  // AdExtension
+  for (const it of extItems) {
+    if (conservativeDriftIds.has(it.id)) {
+      result.set(it.id, true)
+      continue
+    }
+    const sa = eSaMap.get(it.targetId)
+    if (!sa) {
+      result.set(it.id, true)
+      continue
+    }
+    let drift = false
+    const after = it.after
+    if ("userLock" in after) {
+      const saLock = sa.userLock ?? false
+      if (saLock !== Boolean(after.userLock)) drift = true
+    }
+    result.set(it.id, drift)
+  }
+
+  return result
+}
+
+/**
+ * targetType 별로 ncc{Type}Id → 부모 nccAdgroupId 매핑.
+ *
+ * SA list API 가 광고그룹 단위라 광고그룹 ID 가 필요. ChangeItem.after JSON 에는 보통
+ * 부모 nccAdgroupId 가 없으므로 DB 에서 join 으로 가져온다.
+ *
+ * AdExtension: ownerType="adgroup" 가정 (P1 SPEC). campaign 단위 확장소재는 매핑 실패 → 보수 drift.
+ */
+async function mapToAdgroupId(
+  targetType: "Keyword" | "Ad" | "AdExtension",
+  ids: string[],
+): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map()
+  const out = new Map<string, string>()
+  if (targetType === "Keyword") {
+    const rows = await prisma.keyword.findMany({
+      where: { nccKeywordId: { in: ids } },
+      select: { nccKeywordId: true, adgroup: { select: { nccAdgroupId: true } } },
+    })
+    for (const r of rows) {
+      if (r.adgroup?.nccAdgroupId) out.set(r.nccKeywordId, r.adgroup.nccAdgroupId)
+    }
+  } else if (targetType === "Ad") {
+    const rows = await prisma.ad.findMany({
+      where: { nccAdId: { in: ids } },
+      select: { nccAdId: true, adgroup: { select: { nccAdgroupId: true } } },
+    })
+    for (const r of rows) {
+      if (r.adgroup?.nccAdgroupId) out.set(r.nccAdId, r.adgroup.nccAdgroupId)
+    }
+  } else {
+    // AdExtension — ownerType="adgroup" 만 매핑 (campaign 은 P1 비대상)
+    const rows = await prisma.adExtension.findMany({
+      where: { nccExtId: { in: ids }, ownerType: "adgroup" },
+      select: { nccExtId: true, adgroup: { select: { nccAdgroupId: true } } },
+    })
+    for (const r of rows) {
+      if (r.adgroup?.nccAdgroupId) out.set(r.nccExtId, r.adgroup.nccAdgroupId)
+    }
+  }
+  return out
+}
+
+/** 작은 그룹화 헬퍼 — Map<key, items[]>. */
+function groupBy<T>(items: T[], keyFn: (it: T) => string): Map<string, T[]> {
+  const out = new Map<string, T[]>()
+  for (const it of items) {
+    const k = keyFn(it)
+    const list = out.get(k) ?? []
+    list.push(it)
+    out.set(k, list)
+  }
+  return out
 }
 
 /**

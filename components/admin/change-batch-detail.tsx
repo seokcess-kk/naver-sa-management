@@ -480,24 +480,27 @@ function RollbackModal({
   const [open, setOpen] = React.useState(false)
   const [pending, setPending] = React.useState(false)
   const [ignoreDrift, setIgnoreDrift] = React.useState(false)
+  const [saRecheck, setSaRecheck] = React.useState(false)
 
   function handleOpenChange(next: boolean) {
     setOpen(next)
     if (!next) {
       setIgnoreDrift(false)
+      setSaRecheck(false)
     }
   }
 
   async function handleConfirm() {
     setPending(true)
     try {
-      const res = await rollbackChangeBatch(batchId, { ignoreDrift })
+      const res = await rollbackChangeBatch(batchId, { ignoreDrift, saRecheck })
       onResult(res)
       toast.success(
         `롤백 완료 — 성공 ${res.success} / 실패 ${res.failed} / drift skip ${res.drift}`,
       )
       setOpen(false)
       setIgnoreDrift(false)
+      setSaRecheck(false)
       router.refresh()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -533,11 +536,26 @@ function RollbackModal({
           <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
             <div className="font-medium text-foreground">drift 감지</div>
             <p className="mt-1 text-muted-foreground">
-              DB 현재값과 적재된 after JSON 이 다르면 drift 로 판정합니다 —
-              네이버 SA 측 외부 변경 / 타 사용자 변경이 있었을 가능성. 기본은
-              drift 항목 skip.
+              기본은 DB 현재값과 적재된 after JSON 이 다르면 drift 로
+              판정합니다. SA 재조회 옵션을 켜면 네이버 SA 측 현재값과 직접
+              비교해 외부 변경(타 사용자/자동화/네이버측)도 감지합니다. drift
+              항목은 기본 skip.
             </p>
           </div>
+
+          <label className="flex items-start gap-2 text-sm">
+            <Checkbox
+              checked={saRecheck}
+              onCheckedChange={(v) => setSaRecheck(v === true)}
+            />
+            <span>
+              <strong>SA 재조회로 정밀 검사</strong>
+              <span className="ml-1 text-muted-foreground">
+                — 네이버 SA 측 외부 변경(타 사용자/자동화/네이버측)을
+                감지합니다. 호출이 늘어 시간이 더 걸립니다.
+              </span>
+            </span>
+          </label>
 
           <label className="flex items-start gap-2 text-sm">
             <Checkbox
