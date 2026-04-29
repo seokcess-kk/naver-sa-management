@@ -1,12 +1,13 @@
 "use server"
 
 /**
- * F-7.1 KPI + F-7.4 TOP — Server Actions
+ * F-7.1 KPI + F-7.2 트렌드 + F-7.4 TOP — Server Actions
  *
- * 책임 (SPEC 6.7 F-7.1 / F-7.4):
- *   1. getDashboardKpi   — 오늘/어제/7일/30일 4개 기간 × {imp, clk, salesAmt} 합계
- *   2. getTopCampaigns   — 캠페인 TOP/BOTTOM (지표/기간/limit 옵션)
- *   3. getTopKeywords    — 키워드 TOP/BOTTOM (지표/기간/limit 옵션)
+ * 책임 (SPEC 6.7 F-7.1 / F-7.2 / F-7.4):
+ *   1. getDashboardKpi      — 오늘/어제/7일/30일 4개 기간 × {imp, clk, salesAmt} 합계
+ *   2. getStatsTimeSeries   — 광고주 전체 시계열 (일별 N일 / 시간별 오늘 24h)
+ *   3. getTopCampaigns      — 캠페인 TOP/BOTTOM (지표/기간/limit 옵션)
+ *   4. getTopKeywords       — 키워드 TOP/BOTTOM (지표/기간/limit 옵션)
  *
  * 운영 정책 (CLAUDE.md / backend-engineer.md):
  *   - 진입부 getCurrentAdvertiser(advertiserId) — 권한 / 광고주 횡단 차단
@@ -18,8 +19,9 @@
  *   - 시크릿 마스킹: Stats 응답에 키 없음 — OK
  *
  * 비대상:
- *   - F-7.2 트렌드 차트 (시계열) — 후속 PR
- *   - F-7.3 알림 피드 — F-8.x AlertEvent 모델 의존
+ *   - F-7.2 캠페인/키워드 단위 시계열 (광고주 전체만)
+ *   - F-7.2 시간대 페이스 분석 (P1.5)
+ *   - F-7.3 알림 피드 — F-8.x AlertEvent 모델 의존 (별도 액션)
  *
  * 데이터 소스 정책 (CLAUDE.md):
  *   - P1: Stats API 동기 호출 + Redis 캐시. 자체 적재 테이블 X.
@@ -66,6 +68,55 @@ export type DashboardKpi = Record<KpiPeriod, KpiSummary>
 
 /** F-7.4 TOP 정렬용 지표. */
 export type TopMetric = "impCnt" | "clkCnt" | "salesAmt" | "ctr" | "cpc"
+
+// =============================================================================
+// F-7.2 트렌드 차트 — 타입
+// =============================================================================
+
+/**
+ * 트렌드 차트 단위.
+ * - daily : 최근 N일 (기본 7일, 오늘 포함)
+ * - hourly: 오늘만 24시간 (0~23시)
+ */
+export type TimeSeriesGrain = "daily" | "hourly"
+
+/**
+ * 시계열 단일 포인트.
+ *
+ * - daily : ts = "YYYY-MM-DD"
+ * - hourly: ts = "YYYY-MM-DD HH" (HH 0-padded)
+ *
+ * ctr / cpc 는 Stats 응답에 있으면 그대로, 없으면 합계로 계산 (KPI 와 동일 정책).
+ */
+export type TimeSeriesPoint = {
+  ts: string
+  impCnt: number
+  clkCnt: number
+  salesAmt: number
+  ctr: number
+  cpc: number
+}
+
+/** 트렌드 차트 입력. */
+export type TimeSeriesInput = {
+  grain: TimeSeriesGrain
+  /** daily 만 사용. 기본 7. 1 이상 30 이하. */
+  days?: number
+}
+
+const TIME_SERIES_DAYS_DEFAULT = 7
+const TIME_SERIES_DAYS_MAX = 30
+const TIME_SERIES_DAYS_MIN = 1
+
+const timeSeriesInputSchema = z.object({
+  grain: z.enum(["daily", "hourly"]),
+  days: z
+    .number()
+    .int()
+    .min(TIME_SERIES_DAYS_MIN)
+    .max(TIME_SERIES_DAYS_MAX)
+    .optional(),
+})
 
 const TOP_INPUT_LIMIT_DEFAULT = 5
 const TOP_INPUT_LIMIT_MAX = 20
@@ -442,4 +493,152 @@ export async function getTopKeywords(
   )
 
   return { ok: true, rows: result.slice(0, parsed.limit) }
+}
+
+// =============================================================================
+// 4. getStatsTimeSeries (F-7.2)
+// =============================================================================
+
+/** YYYY-MM-DD (UTC 기준 — stats.ts 의 todayDateString 정책과 동일). */
+function todayYmd(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+/**
+ * 오늘로부터 N일치 날짜 배열 (오늘 포함, 오래된 → 최신 순).
+ *
+ * 예: days=7, 오늘=2026-04-28 → ["2026-04-22", ..., "2026-04-28"]
+ */
+function recentDays(days: number): string[] {
+  const out: string[] = []
+  // UTC 기준 — Date.UTC 로 자정 고정 (DST/timezone 영향 차단).
+  const now = new Date()
+  const baseUtc = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+  )
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(baseUtc - i * 24 * 60 * 60 * 1000)
+    out.push(d.toISOString().slice(0, 10))
+  }
+  return out
+}
+
+/**
+ * F-7.2 광고주 전체 시계열 (일별 N일 / 시간별 오늘 24h).
+ *
+ * 처리 (응답 호환성 우선):
+ *   - daily : N개 날짜 각각 timeRange={since:d, until:d} 로 병렬 호출. ids 미지정.
+ *             → 각 응답은 row 1개(광고주 전체 합산) 또는 다중(앱별 분해 가능성) 가정
+ *               → aggregateRows 형태로 합산 (KPI 와 동일 정책).
+ *   - hourly: datePreset="today" + breakdown="hh24" 1회 호출.
+ *             → 응답 row 의 hh24 필드(0~23)로 buckets 구성. 결측 시간대는 0 채움.
+ *
+ * 캐시:
+ *   stats.ts 자체 캐시 (오늘 5분 / 과거 1시간). daily 는 N번 호출이지만 과거 일자는
+ *   재방문 시 캐시 hit (1시간) → 광고주별 호출 비용 누적 우려는 낮음.
+ *
+ * 안전:
+ *   - hasKeys=false → 즉시 차단
+ *   - days 는 1~30 으로 제한 (30 초과 시 캐시 / 호출량 / UX 모두 부적합)
+ *   - 응답에 음수 / NaN 들어와도 num() 으로 안전 변환
+ */
+export async function getStatsTimeSeries(
+  advertiserId: string,
+  input: TimeSeriesInput,
+): Promise<
+  { ok: true; points: TimeSeriesPoint[] } | { ok: false; error: string }
+> {
+  const { advertiser } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    return { ok: false, error: "API 키/시크릿 미입력" }
+  }
+
+  const parsed = timeSeriesInputSchema.parse(input)
+
+  try {
+    if (parsed.grain === "daily") {
+      const days = parsed.days ?? TIME_SERIES_DAYS_DEFAULT
+      const dates = recentDays(days)
+
+      // N일 병렬 호출. timeRange 로 단일 날짜 (since=until).
+      // ids 미지정 → 광고주 전체 합산 row 반환.
+      const responses = await Promise.all(
+        dates.map((d) =>
+          getStats(advertiser.customerId, {
+            fields: DEFAULT_STATS_FIELDS,
+            timeRange: { since: d, until: d },
+          }),
+        ),
+      )
+
+      const points: TimeSeriesPoint[] = dates.map((ts, i) => {
+        const summary = aggregateRows(responses[i])
+        return {
+          ts,
+          impCnt: summary.impCnt,
+          clkCnt: summary.clkCnt,
+          salesAmt: summary.salesAmt,
+          ctr: summary.ctr,
+          cpc: summary.cpc,
+        }
+      })
+
+      return { ok: true, points }
+    }
+
+    // hourly — datePreset=today + breakdown=hh24
+    const rows = await getStats(advertiser.customerId, {
+      fields: DEFAULT_STATS_FIELDS,
+      datePreset: "today",
+      breakdown: "hh24",
+    })
+
+    const today = todayYmd()
+    // 24개 버킷 초기화 (impCnt/clkCnt/salesAmt 누적 후 ctr/cpc 재계산).
+    const buckets: Array<{
+      impCnt: number
+      clkCnt: number
+      salesAmt: number
+    }> = Array.from({ length: 24 }, () => ({
+      impCnt: 0,
+      clkCnt: 0,
+      salesAmt: 0,
+    }))
+
+    for (const r of rows) {
+      // hh24 는 passthrough 필드 — 0~23 정수 또는 문자열 가능성 모두 처리.
+      const raw = (r as Record<string, unknown>).hh24
+      let hour: number | null = null
+      if (typeof raw === "number" && Number.isFinite(raw)) {
+        hour = Math.floor(raw)
+      } else if (typeof raw === "string") {
+        const n = Number(raw)
+        if (Number.isFinite(n)) hour = Math.floor(n)
+      }
+      if (hour === null || hour < 0 || hour > 23) continue
+      buckets[hour].impCnt += num(r.impCnt)
+      buckets[hour].clkCnt += num(r.clkCnt)
+      buckets[hour].salesAmt += num(r.salesAmt)
+    }
+
+    const points: TimeSeriesPoint[] = buckets.map((b, i) => {
+      const ctr = b.impCnt > 0 ? (b.clkCnt / b.impCnt) * 100 : 0
+      const cpc = b.clkCnt > 0 ? b.salesAmt / b.clkCnt : 0
+      return {
+        ts: `${today} ${String(i).padStart(2, "0")}`,
+        impCnt: b.impCnt,
+        clkCnt: b.clkCnt,
+        salesAmt: b.salesAmt,
+        ctr,
+        cpc,
+      }
+    })
+
+    return { ok: true, points }
+  } catch (e) {
+    console.error("[getStatsTimeSeries] failed:", e)
+    return { ok: false, error: errorMessage(e, "트렌드 조회 실패") }
+  }
 }

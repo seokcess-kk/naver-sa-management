@@ -1,18 +1,19 @@
 /**
- * 광고주 컨텍스트 대시보드 (F-7.1 KPI + F-7.4 TOP)
+ * 광고주 컨텍스트 대시보드 (F-7.1 KPI + F-7.2 트렌드 + F-7.4 TOP)
  *
  * - 권한: getCurrentAdvertiser 가 admin 또는 화이트리스트 검증을 처리
  * - 키 미설정 시 안내 카드 (testConnection / 동기화 / SA API 호출 차단됨)
  * - F-1.5 연결 상태 카드 (비즈머니 잔액 + 잠금 상태)
  * - F-7.1 KPI: 오늘 / 어제 / 7일 / 30일 (4 기간 × 4 지표)
+ * - F-7.2 트렌드: 일별(7일) / 시간별(오늘 24h) × 단일 metric LineChart
  * - F-7.4 TOP: 캠페인 / 키워드 (지표·기간·정렬·limit 가변)
  * - 캠페인 / 광고그룹 / 키워드 / 소재 / 확장소재 진입 링크
  *
  * RSC 사전 호출:
- *   checkConnection / getDashboardKpi / getTopCampaigns 를 Promise.all 로 병렬.
+ *   checkConnection / getDashboardKpi / getStatsTimeSeries / getTopCampaigns 병렬.
  *   hasKeys=false 시 모두 null 로 패스 (외부 호출 차단).
  *
- * SPEC 6.7 F-7.1 / F-7.4 / 11.2 대시보드.
+ * SPEC 6.7 F-7.1 / F-7.2 / F-7.4 / 11.2 대시보드.
  */
 
 import Link from "next/link"
@@ -36,11 +37,13 @@ import {
 import { KeyStatusBadge } from "@/components/admin/key-status-badge"
 import { ConnectionStatusCard } from "@/components/dashboard/connection-status-card"
 import { KpiCardsSection } from "@/components/dashboard/kpi-cards-section"
+import { TrendChartSection } from "@/components/dashboard/trend-chart-section"
 import { TopListSection } from "@/components/dashboard/top-list-section"
 import { AlertEventsFeed } from "@/components/dashboard/alert-events-feed"
 import { checkConnection } from "@/app/(dashboard)/[advertiserId]/actions"
 import {
   getDashboardKpi,
+  getStatsTimeSeries,
   getTopCampaigns,
 } from "@/app/(dashboard)/[advertiserId]/dashboard/actions"
 import { listAlertEvents } from "@/app/admin/alerts/actions"
@@ -76,16 +79,21 @@ export default async function AdvertiserDashboardPage({
   }
 
   // RSC 사전 호출 — 키 있으면 병렬 (waterfall 방지). 없으면 모두 null (외부 호출 차단).
-  // checkConnection / getDashboardKpi / getTopCampaigns 는 모두 advertiserId 권한 재검증 포함.
+  // checkConnection / getDashboardKpi / getStatsTimeSeries / getTopCampaigns 는
+  // 모두 advertiserId 권한 재검증 포함.
   // alertsInitial 은 admin 전용 (listAlertEvents 가 admin 가드) — 그 외에는 null 로 패스.
   const [
     connectionInitial,
     kpiInitial,
+    trendInitial,
     topCampaignsInitial,
     alertsInitial,
   ] = await Promise.all([
     advertiser.hasKeys ? checkConnection(advertiser.id) : Promise.resolve(null),
     advertiser.hasKeys ? getDashboardKpi(advertiser.id) : Promise.resolve(null),
+    advertiser.hasKeys
+      ? getStatsTimeSeries(advertiser.id, { grain: "daily", days: 7 })
+      : Promise.resolve(null),
     advertiser.hasKeys
       ? getTopCampaigns(advertiser.id, {
           metric: "impCnt",
@@ -150,6 +158,12 @@ export default async function AdvertiserDashboardPage({
         advertiserId={advertiser.id}
         hasKeys={advertiser.hasKeys}
         initial={kpiInitial}
+      />
+
+      <TrendChartSection
+        advertiserId={advertiser.id}
+        hasKeys={advertiser.hasKeys}
+        initial={trendInitial}
       />
 
       <TopListSection
