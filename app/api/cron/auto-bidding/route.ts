@@ -58,6 +58,10 @@ import {
   checkAdvertiserGuardrail,
   checkKeywordGuardrail,
 } from "@/lib/auto-bidding/guardrail"
+import {
+  getTargetingWeight,
+  type TargetingRuleSlice,
+} from "@/lib/auto-bidding/targeting-weight"
 
 // 자격증명 resolver 자동 등록 (SA 호출 가능하게)
 import "@/lib/naver-sa/credentials"
@@ -186,6 +190,36 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
         message: `advertiser_guardrail_check_failed: ${safeMessage(e)}`,
       })
       continue
+    }
+
+    // -- TargetingRule 로드 (F-11.4) — 광고주 1:1, 없으면 null (default 1.0 적용) -
+    //    failed 시에도 진행 (rule 미적용 = 안전 default 1.0).
+    let targetingRule: TargetingRuleSlice | null = null
+    try {
+      const row = await prisma.targetingRule.findUnique({
+        where: { advertiserId: adv.id },
+        select: {
+          enabled: true,
+          defaultWeight: true,
+          hourWeights: true,
+          deviceWeights: true,
+        },
+      })
+      if (row) {
+        targetingRule = {
+          enabled: row.enabled,
+          defaultWeight: decimalToNumber(row.defaultWeight),
+          hourWeights: jsonToRecord(row.hourWeights),
+          deviceWeights: jsonToRecord(row.deviceWeights),
+        }
+      }
+    } catch (e) {
+      // 적재 실패는 cron 전체를 막지 않음. errors 에 기록 후 default 1.0 로 진행.
+      errors.push({
+        advertiserId: adv.id,
+        message: `targeting_rule_load_failed: ${safeMessage(e)}`,
+      })
+      targetingRule = null
     }
 
     // -- 정책 조회 + 직렬 처리 ---------------------------------------------
@@ -335,6 +369,13 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
         continue
       }
 
+      // F-11.4 Targeting weight (KST 기준 dayKey-hour + device).
+      //   rule null → 1.0, enabled=false → 1.0 (모듈 내부 처리).
+      const targetingWeight = getTargetingWeight(targetingRule, {
+        now: new Date(),
+        device,
+      })
+
       // 결정 로직
       const decision = decideBidAdjustment({
         policy: {
@@ -354,6 +395,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
         },
         estimateBids: estimateRows,
         guardrail: { maxBidChangePct: adv.guardrailMaxBidChangePct },
+        targetingWeight,
       })
 
       if (decision.skip) {
@@ -452,6 +494,36 @@ function rnkToNumber(
   if (v == null) return null
   const n = v.toNumber()
   return Number.isFinite(n) ? n : null
+}
+
+/**
+ * Prisma Decimal → number (TargetingRule.defaultWeight 0..9.99).
+ * 변환 실패 시 1.0 (안전 default).
+ */
+function decimalToNumber(v: unknown): number {
+  if (v == null) return 1.0
+  if (typeof v === "number" && Number.isFinite(v)) return v
+  if (
+    typeof v === "object" &&
+    v !== null &&
+    "toNumber" in v &&
+    typeof (v as { toNumber: () => number }).toNumber === "function"
+  ) {
+    const n = (v as { toNumber: () => number }).toNumber()
+    return Number.isFinite(n) ? n : 1.0
+  }
+  return 1.0
+}
+
+/**
+ * Prisma JsonValue → Record<string, unknown> (key/value 검증은 weight parser 가 담당).
+ * null / 비-object → 빈 객체.
+ */
+function jsonToRecord(v: unknown): Record<string, unknown> {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    return v as Record<string, unknown>
+  }
+  return {}
 }
 
 /**

@@ -349,6 +349,180 @@ describe("decideBidAdjustment", () => {
   })
 })
 
+// =============================================================================
+// F-11.4 — targetingWeight 적용 분기
+// =============================================================================
+
+describe("decideBidAdjustment — targetingWeight (F-11.4)", () => {
+  it("16. targetingWeight 미지정 → 기존 동작 (default 1.0)", () => {
+    // Estimate 1100 in [800, 1200] → 1100 (weight 1.0 동등)
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1100 }],
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(1100)
+  })
+
+  it("17. targetingWeight 1.5 → Estimate 1100 × 1.5 = 1650, but guardrail upper 1200 → 1200", () => {
+    // currentBid 1000, pct 20 → upper 1200, lower 800
+    // Estimate 1100 × weight 1.5 = 1650 → guardrail upper 1200 → 1200
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1100 }],
+        targetingWeight: 1.5,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(1200)
+  })
+
+  it("18. targetingWeight 1.5 + maxBidChangePct 100 → 1100 × 1.5 = 1650 in [0..2000] → 1650", () => {
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1100 }],
+        guardrail: { maxBidChangePct: 100 }, // upper=2000, lower=0
+        targetingWeight: 1.5,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(1650)
+  })
+
+  it("19. targetingWeight 0.8 + Estimate 1100 → 880 in [800, 1200] → 880", () => {
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1100 }],
+        targetingWeight: 0.8,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(880)
+  })
+
+  it("20. targetingWeight 0.5 → 1100 × 0.5 = 550, but guardrail lower 800 → 800", () => {
+    // currentBid 1000, pct 20 → lower 800
+    // Estimate 1100 × 0.5 = 550 → guardrail lower 800 → 800
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1100 }],
+        targetingWeight: 0.5,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(800)
+  })
+
+  it("21. targetingWeight × maxBid cap — Estimate 800 × 2 = 1600, maxBid 1500 → 1500 (guardrail upper 1200 → 1200)", () => {
+    // currentBid 1000, pct 20 → upper 1200
+    // Estimate 800 × 2.0 = 1600 → maxBid cap 1500 → guardrail upper 1200 → 1200
+    const r = decideBidAdjustment(
+      baseInput({
+        policy: {
+          id: "p",
+          advertiserId: "adv",
+          keywordId: "kw",
+          device: "PC",
+          targetRank: 1,
+          maxBid: 1500,
+          minBid: null,
+        },
+        estimateBids: [{ keyword: "신발", position: 1, bid: 800 }],
+        targetingWeight: 2.0,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(1200)
+  })
+
+  it("22. targetingWeight × minBid cap — Estimate 1000 × 0.3 = 300, minBid 700 → 800 (guardrail lower 800)", () => {
+    // recentAvgRnk 1.0 vs targetRank 5 → 진행
+    // Estimate 1000 × 0.3 = 300 → minBid cap 700 → guardrail lower 800 → 800
+    const r = decideBidAdjustment(
+      baseInput({
+        policy: {
+          id: "p",
+          advertiserId: "adv",
+          keywordId: "kw",
+          device: "PC",
+          targetRank: 5,
+          maxBid: null,
+          minBid: 700,
+        },
+        keyword: {
+          id: "kw_1",
+          nccKeywordId: "ncc_kw_1",
+          bidAmt: 1000,
+          recentAvgRnk: 1.0,
+        },
+        estimateBids: [{ keyword: "신발", position: 5, bid: 1000 }],
+        targetingWeight: 0.3,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(800)
+  })
+
+  it("23. targetingWeight 0 (비정상) → 1.0 fallback (decide 내부 안전선)", () => {
+    // weight 0 은 decide 가 거부하고 1.0 으로 처리 → Estimate 1100 그대로 (in range) → 1100
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1100 }],
+        targetingWeight: 0,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(1100)
+  })
+
+  it("24. targetingWeight NaN → 1.0 fallback", () => {
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1100 }],
+        targetingWeight: Number.NaN,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(1100)
+  })
+
+  it("25. targetingWeight 1.0 → no_change 발생 (Estimate 1000 × 1.0 = 1000 = currentBid)", () => {
+    // Estimate 1000 × weight 1.0 = 1000, currentBid 1000 → skip no_change
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1000 }],
+        targetingWeight: 1.0,
+      }),
+    )
+    expect(r.skip).toBe(true)
+    if (!r.skip) return
+    expect(r.reason).toBe("no_change")
+  })
+
+  it("26. targetingWeight 1.1 + Estimate 1000 → 1100, no_change 회피 (변경 발생)", () => {
+    // currentBid 1000, Estimate 1000 × 1.1 = 1100 in [800, 1200] → 1100
+    const r = decideBidAdjustment(
+      baseInput({
+        estimateBids: [{ keyword: "신발", position: 1, bid: 1000 }],
+        targetingWeight: 1.1,
+      }),
+    )
+    expect(r.skip).toBe(false)
+    if (r.skip) return
+    expect(r.newBidAmt).toBe(1100)
+  })
+})
+
 describe("skipReasonToRunResult", () => {
   it("매핑 5종", () => {
     expect(skipReasonToRunResult("rank_unavailable")).toBe(

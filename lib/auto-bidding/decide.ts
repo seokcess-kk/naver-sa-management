@@ -21,6 +21,10 @@
  *   4. base = Estimate row.bid
  *      - policy.maxBid != null && base > maxBid → base = maxBid
  *      - policy.minBid != null && base < minBid → base = minBid
+ *   4.5 (F-11.4) Targeting weight 곱:
+ *      - input.targetingWeight (default 1.0) 곱
+ *      - 곱 결과를 다시 maxBid / minBid 로 cap (weight × maxBid 초과 방지)
+ *      - weight 적용은 "Estimate 기반 base" 위에 하므로 cron 이 산출한 시간/디바이스 강도 반영
  *   5. Guardrail (currentBid 기준 ±maxBidChangePct):
  *      - currentBid != null && currentBid > 0:
  *          upper = floor(currentBid * (100 + pct) / 100)
@@ -73,6 +77,12 @@ export type DecideInput = {
   /** Estimate.estimateAveragePositionBid 결과 (1..5위 입찰가). */
   estimateBids: AveragePositionBidRow[]
   guardrail: DecideGuardrail
+  /**
+   * F-11.4 Targeting weight (TargetingRule 기반 시간/디바이스 가중치).
+   * 미지정 시 1.0 (default — 기존 호출부 무회귀). Estimate base 위에 곱.
+   * 호출부(`lib/auto-bidding/targeting-weight.ts`)가 [0.1, 3.0] clamp 보장.
+   */
+  targetingWeight?: number
 }
 
 export type DecideResult =
@@ -130,7 +140,7 @@ export function decideBidAdjustment(input: DecideInput): DecideResult {
     return { skip: true, reason: "estimate_invalid" }
   }
 
-  // 4. policy max/min cap
+  // 4. policy max/min cap (1차)
   let base = row.bid
   if (policy.maxBid != null && base > policy.maxBid) {
     base = policy.maxBid
@@ -139,7 +149,29 @@ export function decideBidAdjustment(input: DecideInput): DecideResult {
     base = policy.minBid
   }
 
-  // 5. Guardrail ±N% (currentBid 기반)
+  // 4.5 Targeting weight 곱 (F-11.4) — 미지정 또는 비정상 시 1.0 (default).
+  //    Estimate-base 위에 시간/디바이스 강도 반영.
+  //    호출부 clamp 와 별도로 본 함수도 한 번 더 방어 (NaN/Infinity/음수 차단).
+  const rawWeight = input.targetingWeight
+  const weight =
+    typeof rawWeight === "number" &&
+    Number.isFinite(rawWeight) &&
+    rawWeight > 0
+      ? rawWeight
+      : 1.0
+  if (weight !== 1.0) {
+    base = base * weight
+    // weight 곱 후 maxBid / minBid 로 다시 cap (weight × Estimate 가 maxBid 를 초과하지 않게).
+    if (policy.maxBid != null && base > policy.maxBid) {
+      base = policy.maxBid
+    }
+    if (policy.minBid != null && base < policy.minBid) {
+      base = policy.minBid
+    }
+  }
+
+  // 5. Guardrail ±N% (currentBid 기반) — weight 적용 후 base 위에 다시 적용.
+  //    weight 가 큰 변동을 일으켜도 ±N% 내로 강제 수렴.
   const currentBid = keyword.bidAmt
   if (currentBid != null && currentBid > 0) {
     const pct = guardrail.maxBidChangePct

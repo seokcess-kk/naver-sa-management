@@ -237,6 +237,12 @@ export default async function AdvertiserDashboardPage({
           >
             한계효용 분석 (F-11.3)
           </Button>
+          <Button
+            variant="outline"
+            render={<Link href={`/${advertiser.id}/targeting`} />}
+          >
+            시간대·지역 타게팅 (F-11.4)
+          </Button>
         </CardContent>
       </Card>
 

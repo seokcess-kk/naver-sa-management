@@ -32,6 +32,7 @@ vi.mock("@/lib/naver-sa/credentials", () => ({}))
 const mockAdvertiserFindMany = vi.fn()
 const mockBiddingPolicyFindMany = vi.fn()
 const mockORCreate = vi.fn()
+const mockTargetingRuleFindUnique = vi.fn()
 
 vi.mock("@/lib/db/prisma", () => ({
   prisma: {
@@ -43,6 +44,9 @@ vi.mock("@/lib/db/prisma", () => ({
     },
     optimizationRun: {
       create: (...args: unknown[]) => mockORCreate(...args),
+    },
+    targetingRule: {
+      findUnique: (...args: unknown[]) => mockTargetingRuleFindUnique(...args),
     },
   },
 }))
@@ -127,6 +131,8 @@ beforeEach(() => {
   mockORCreate.mockResolvedValue({ id: "or_1" })
   mockUpdateKeyword.mockResolvedValue({ nccKeywordId: "ncc_kw_1" })
   mockGetCached.mockResolvedValue({ data: ESTIMATE_ROWS, cachedAll: true })
+  // F-11.4 — TargetingRule 기본 null (룰 없음 = weight 1.0 fallback). 기존 케이스 무회귀.
+  mockTargetingRuleFindUnique.mockResolvedValue(null)
 })
 
 afterEach(() => {
@@ -396,6 +402,115 @@ describe("cron auto-bidding — 정책 처리", () => {
     expect(body.runsSuccess).toBe(0)
     expect(mockORCreate).not.toHaveBeenCalled()
     expect(mockUpdateKeyword).not.toHaveBeenCalled()
+  })
+})
+
+// =============================================================================
+// F-11.4 — TargetingRule 통합
+// =============================================================================
+
+describe("cron auto-bidding — TargetingRule (F-11.4)", () => {
+  it("TargetingRule null → weight 1.0 → 기존 동작 (Estimate 1100 그대로)", async () => {
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    mockBiddingPolicyFindMany.mockResolvedValue([POLICY])
+    mockTargetingRuleFindUnique.mockResolvedValue(null)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.runsSuccess).toBe(1)
+
+    // weight 1.0 → Estimate 1100 그대로 (currentBid 1000 ±20% 안)
+    expect(mockUpdateKeyword).toHaveBeenCalledWith(
+      "c-1",
+      "ncc_kw_1",
+      { bidAmt: 1100, useGroupBidAmt: false },
+      "bidAmt,useGroupBidAmt",
+    )
+  })
+
+  it("TargetingRule enabled=false → weight 1.0 → 기존 동작", async () => {
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    mockBiddingPolicyFindMany.mockResolvedValue([POLICY])
+    mockTargetingRuleFindUnique.mockResolvedValue({
+      enabled: false,
+      defaultWeight: { toNumber: () => 2.0 },
+      hourWeights: { "wed-9": 2.0 }, // enabled=false 라 무시
+      deviceWeights: { PC: 2.0 },
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.runsSuccess).toBe(1)
+    // weight 1.0 → Estimate 1100 (in [800, 1200])
+    expect(mockUpdateKeyword).toHaveBeenCalledWith(
+      "c-1",
+      "ncc_kw_1",
+      { bidAmt: 1100, useGroupBidAmt: false },
+      "bidAmt,useGroupBidAmt",
+    )
+  })
+
+  it("TargetingRule enabled=true + 강한 weight → guardrail upper 1200 강제 수렴", async () => {
+    // 시점 의존성을 줄이기 위해 hourWeights 비워두고 defaultWeight 1.5 사용.
+    // device PC 1.2 → 1.5 × 1.2 = 1.8 → Estimate 1100 × 1.8 = 1980 → guardrail upper 1200
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    mockBiddingPolicyFindMany.mockResolvedValue([POLICY])
+    mockTargetingRuleFindUnique.mockResolvedValue({
+      enabled: true,
+      defaultWeight: { toNumber: () => 1.5 },
+      hourWeights: {},
+      deviceWeights: { PC: 1.2 },
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.runsSuccess).toBe(1)
+    // weight 1.8 → Estimate 1980 → guardrail upper 1200
+    expect(mockUpdateKeyword).toHaveBeenCalledWith(
+      "c-1",
+      "ncc_kw_1",
+      { bidAmt: 1200, useGroupBidAmt: false },
+      "bidAmt,useGroupBidAmt",
+    )
+  })
+
+  it("TargetingRule findUnique throw → errors[] + weight 1.0 fallback (cron 진행)", async () => {
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    mockBiddingPolicyFindMany.mockResolvedValue([POLICY])
+    mockTargetingRuleFindUnique.mockRejectedValue(new Error("DB connection lost"))
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    // 에러 적재 + weight 1.0 으로 진행 → 정책 happy path (1100)
+    expect(body.runsSuccess).toBe(1)
+    expect(body.errors.some((e: { message: string }) =>
+      e.message.includes("targeting_rule_load_failed"),
+    )).toBe(true)
+    expect(mockUpdateKeyword).toHaveBeenCalledWith(
+      "c-1",
+      "ncc_kw_1",
+      { bidAmt: 1100, useGroupBidAmt: false },
+      "bidAmt,useGroupBidAmt",
+    )
+  })
+
+  it("findUnique 호출 인자 — { advertiserId } where + 4컬럼 select", async () => {
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    mockBiddingPolicyFindMany.mockResolvedValue([])
+
+    await GET(makeReq("Bearer test-secret") as never)
+
+    expect(mockTargetingRuleFindUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { advertiserId: "adv_1" },
+        select: expect.objectContaining({
+          enabled: true,
+          defaultWeight: true,
+          hourWeights: true,
+          deviceWeights: true,
+        }),
+      }),
+    )
   })
 })
 
