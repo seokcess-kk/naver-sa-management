@@ -31,6 +31,9 @@ export type AlertRuleType =
   | "bizmoney_low"
   | "api_auth_error"
   | "inspect_rejected"
+  | "cpc_surge"
+  | "impressions_drop"
+  | "budget_pace"
 
 export type AlertRuleRow = {
   id: string
@@ -61,6 +64,9 @@ const alertRuleTypeSchema = z.enum([
   "bizmoney_low",
   "api_auth_error",
   "inspect_rejected",
+  "cpc_surge",
+  "impressions_drop",
+  "budget_pace",
 ])
 
 /**
@@ -101,6 +107,30 @@ const inspectRejectedParamsSchema = z
   })
   .strict()
 
+const cpcSurgeParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    thresholdPct: z.number().int().min(5).max(500).optional(),
+    minClicks: z.number().int().min(10).max(10000).optional(),
+  })
+  .strict()
+
+const impressionsDropParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    thresholdPct: z.number().int().min(5).max(100).optional(),
+    minImpressions: z.number().int().min(100).max(1_000_000).optional(),
+  })
+  .strict()
+
+const budgetPaceParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    deviationPct: z.number().int().min(5).max(100).optional(),
+    minHour: z.number().int().min(1).max(23).optional(),
+  })
+  .strict()
+
 /** params 검증을 type 에 따라 분기. */
 function validateParams(
   type: AlertRuleType,
@@ -119,6 +149,15 @@ function validateParams(
       break
     case "inspect_rejected":
       parsed = inspectRejectedParamsSchema.safeParse(params)
+      break
+    case "cpc_surge":
+      parsed = cpcSurgeParamsSchema.safeParse(params)
+      break
+    case "impressions_drop":
+      parsed = impressionsDropParamsSchema.safeParse(params)
+      break
+    case "budget_pace":
+      parsed = budgetPaceParamsSchema.safeParse(params)
       break
     default:
       return { ok: false, error: `미지원 type: ${type}` }

@@ -12,11 +12,15 @@
  *   - budget_burn: thresholds (50/80/100% 기본, 멀티 체크박스)
  *   - bizmoney_low: days (기본 3)
  *   - api_auth_error / inspect_rejected: 추가 입력 X
+ *   - cpc_surge: thresholdPct(5..500, 기본 50) + minClicks(10..10000, 기본 100)
+ *   - impressions_drop: thresholdPct(5..100, 기본 50) + minImpressions(100..1000000, 기본 1000)
+ *   - budget_pace: deviationPct(5..100, 기본 30) + minHour(1..23, 기본 6)
  *
  * 안전장치:
  *   - thresholds 1개 이상 필수
  *   - days 1..30 범위
  *   - 광고주 셀렉트 비어있으면 제출 차단
+ *   - 신규 3종 type 별 Zod 범위와 동일하게 클라이언트 사전 검증
  */
 
 import * as React from "react"
@@ -73,6 +77,21 @@ const ALERT_TYPES: { value: AlertRuleType; label: string; description: string }[
     label: "검수 거절 (inspect_rejected)",
     description: "최근 N분 내 거절된 키워드/소재/확장소재",
   },
+  {
+    value: "cpc_surge",
+    label: "CPC 급등 (cpc_surge)",
+    description: "캠페인별 7일 평균 CPC 대비 오늘 CPC가 N% 이상 상승 (기본 +50%)",
+  },
+  {
+    value: "impressions_drop",
+    label: "노출 급감 (impressions_drop)",
+    description: "7일 평균 시간당 노출 대비 오늘 노출이 N% 이상 감소 (기본 -50%)",
+  },
+  {
+    value: "budget_pace",
+    label: "예산 페이스 이상 (budget_pace)",
+    description: "현재 시각 기준 예상 페이스 대비 N%p 이상 초과 소진 (기본 +30%p)",
+  },
 ]
 
 const DEFAULT_THRESHOLDS = [50, 80, 100]
@@ -80,14 +99,31 @@ const ALL_THRESHOLD_OPTIONS = [50, 80, 100, 150]
 
 type ParamsShape = {
   advertiserId: string
-  thresholds: number[] // budget_burn
-  days: number // bizmoney_low
+  // budget_burn
+  thresholds: number[]
+  // bizmoney_low
+  days: number
+  // cpc_surge
+  cpcThresholdPct: number
+  cpcMinClicks: number
+  // impressions_drop
+  impDropThresholdPct: number
+  impMinImpressions: number
+  // budget_pace
+  paceDeviationPct: number
+  paceMinHour: number
 }
 
 const INITIAL_PARAMS: ParamsShape = {
   advertiserId: "",
   thresholds: DEFAULT_THRESHOLDS,
   days: 3,
+  cpcThresholdPct: 50,
+  cpcMinClicks: 100,
+  impDropThresholdPct: 50,
+  impMinImpressions: 1000,
+  paceDeviationPct: 30,
+  paceMinHour: 6,
 }
 
 function rowToParams(rule: AlertRuleRow): ParamsShape {
@@ -105,7 +141,74 @@ function rowToParams(rule: AlertRuleRow): ParamsShape {
     typeof rawDays === "number" && Number.isFinite(rawDays) && rawDays >= 1
       ? Math.floor(rawDays)
       : 3
-  return { advertiserId, thresholds, days }
+
+  // ⚠️ cpc_surge / impressions_drop 둘 다 thresholdPct 키를 공유.
+  // rule.type 에 따라 어느 필드에 prefill 할지 분기.
+  const ruleType = rule.type as AlertRuleType
+  const rawThresholdPct = params.thresholdPct
+
+  const cpcThresholdPct =
+    ruleType === "cpc_surge" &&
+    typeof rawThresholdPct === "number" &&
+    Number.isFinite(rawThresholdPct) &&
+    rawThresholdPct >= 5 &&
+    rawThresholdPct <= 500
+      ? Math.floor(rawThresholdPct)
+      : 50
+  const rawMinClicks = params.minClicks
+  const cpcMinClicks =
+    typeof rawMinClicks === "number" &&
+    Number.isFinite(rawMinClicks) &&
+    rawMinClicks >= 10 &&
+    rawMinClicks <= 10000
+      ? Math.floor(rawMinClicks)
+      : 100
+
+  const impDropThresholdPct =
+    ruleType === "impressions_drop" &&
+    typeof rawThresholdPct === "number" &&
+    Number.isFinite(rawThresholdPct) &&
+    rawThresholdPct >= 5 &&
+    rawThresholdPct <= 100
+      ? Math.floor(rawThresholdPct)
+      : 50
+  const rawMinImpressions = params.minImpressions
+  const impMinImpressions =
+    typeof rawMinImpressions === "number" &&
+    Number.isFinite(rawMinImpressions) &&
+    rawMinImpressions >= 100 &&
+    rawMinImpressions <= 1_000_000
+      ? Math.floor(rawMinImpressions)
+      : 1000
+
+  const rawDeviationPct = params.deviationPct
+  const paceDeviationPct =
+    typeof rawDeviationPct === "number" &&
+    Number.isFinite(rawDeviationPct) &&
+    rawDeviationPct >= 5 &&
+    rawDeviationPct <= 100
+      ? Math.floor(rawDeviationPct)
+      : 30
+  const rawMinHour = params.minHour
+  const paceMinHour =
+    typeof rawMinHour === "number" &&
+    Number.isFinite(rawMinHour) &&
+    rawMinHour >= 1 &&
+    rawMinHour <= 23
+      ? Math.floor(rawMinHour)
+      : 6
+
+  return {
+    advertiserId,
+    thresholds,
+    days,
+    cpcThresholdPct,
+    cpcMinClicks,
+    impDropThresholdPct,
+    impMinImpressions,
+    paceDeviationPct,
+    paceMinHour,
+  }
 }
 
 function buildParams(
@@ -117,6 +220,15 @@ function buildParams(
     base.thresholds = [...shape.thresholds].sort((a, b) => a - b)
   } else if (type === "bizmoney_low") {
     base.days = shape.days
+  } else if (type === "cpc_surge") {
+    base.thresholdPct = shape.cpcThresholdPct
+    base.minClicks = shape.cpcMinClicks
+  } else if (type === "impressions_drop") {
+    base.thresholdPct = shape.impDropThresholdPct
+    base.minImpressions = shape.impMinImpressions
+  } else if (type === "budget_pace") {
+    base.deviationPct = shape.paceDeviationPct
+    base.minHour = shape.paceMinHour
   }
   // api_auth_error / inspect_rejected: 추가 필드 X (advertiserId 만)
   return base
@@ -220,6 +332,60 @@ function AlertRuleFormModalInner({
     ) {
       toast.error("days 는 1..30 사이의 정수여야 합니다")
       return
+    }
+    if (type === "cpc_surge") {
+      if (
+        !Number.isFinite(params.cpcThresholdPct) ||
+        params.cpcThresholdPct < 5 ||
+        params.cpcThresholdPct > 500
+      ) {
+        toast.error("CPC 임계 (%)는 5..500 사이의 정수여야 합니다")
+        return
+      }
+      if (
+        !Number.isFinite(params.cpcMinClicks) ||
+        params.cpcMinClicks < 10 ||
+        params.cpcMinClicks > 10000
+      ) {
+        toast.error("최소 클릭 수는 10..10000 사이의 정수여야 합니다")
+        return
+      }
+    }
+    if (type === "impressions_drop") {
+      if (
+        !Number.isFinite(params.impDropThresholdPct) ||
+        params.impDropThresholdPct < 5 ||
+        params.impDropThresholdPct > 100
+      ) {
+        toast.error("노출 감소 임계 (%)는 5..100 사이의 정수여야 합니다")
+        return
+      }
+      if (
+        !Number.isFinite(params.impMinImpressions) ||
+        params.impMinImpressions < 100 ||
+        params.impMinImpressions > 1_000_000
+      ) {
+        toast.error("최소 노출 수는 100..1000000 사이의 정수여야 합니다")
+        return
+      }
+    }
+    if (type === "budget_pace") {
+      if (
+        !Number.isFinite(params.paceDeviationPct) ||
+        params.paceDeviationPct < 5 ||
+        params.paceDeviationPct > 100
+      ) {
+        toast.error("초과 임계 (%p)는 5..100 사이의 정수여야 합니다")
+        return
+      }
+      if (
+        !Number.isFinite(params.paceMinHour) ||
+        params.paceMinHour < 1 ||
+        params.paceMinHour > 23
+      ) {
+        toast.error("최소 평가 시각은 1..23 사이의 정수여야 합니다")
+        return
+      }
     }
 
     const built = buildParams(type, params)
@@ -379,6 +545,142 @@ function AlertRuleFormModalInner({
                 비즈머니 잔액 &lt; 활성 캠페인 일예산 합 × N일 이면 알림.
               </p>
             </div>
+          )}
+
+          {type === "cpc_surge" && (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <Label className="text-xs">임계 (%)</Label>
+                <Input
+                  type="number"
+                  min={5}
+                  max={500}
+                  step={1}
+                  value={params.cpcThresholdPct}
+                  onChange={(e) =>
+                    setParams((s) => ({
+                      ...s,
+                      cpcThresholdPct: Number(e.target.value) || 0,
+                    }))
+                  }
+                  className="w-32"
+                />
+                <p className="text-xs text-muted-foreground">
+                  7일 평균 CPC 대비 N% 상승 시 알림. 기본 50.
+                </p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label className="text-xs">최소 클릭 수 (7일 합산)</Label>
+                <Input
+                  type="number"
+                  min={10}
+                  max={10000}
+                  step={10}
+                  value={params.cpcMinClicks}
+                  onChange={(e) =>
+                    setParams((s) => ({
+                      ...s,
+                      cpcMinClicks: Number(e.target.value) || 0,
+                    }))
+                  }
+                  className="w-32"
+                />
+                <p className="text-xs text-muted-foreground">
+                  7일 합산 클릭이 이 미만인 캠페인은 표본 부족으로 제외. 기본 100.
+                </p>
+              </div>
+            </>
+          )}
+
+          {type === "impressions_drop" && (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <Label className="text-xs">임계 (%)</Label>
+                <Input
+                  type="number"
+                  min={5}
+                  max={100}
+                  step={1}
+                  value={params.impDropThresholdPct}
+                  onChange={(e) =>
+                    setParams((s) => ({
+                      ...s,
+                      impDropThresholdPct: Number(e.target.value) || 0,
+                    }))
+                  }
+                  className="w-32"
+                />
+                <p className="text-xs text-muted-foreground">
+                  7일 평균 시간당 노출 대비 N% 감소 시 알림. 기본 50.
+                </p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label className="text-xs">최소 노출 수 (7일 합산)</Label>
+                <Input
+                  type="number"
+                  min={100}
+                  max={1000000}
+                  step={100}
+                  value={params.impMinImpressions}
+                  onChange={(e) =>
+                    setParams((s) => ({
+                      ...s,
+                      impMinImpressions: Number(e.target.value) || 0,
+                    }))
+                  }
+                  className="w-40"
+                />
+                <p className="text-xs text-muted-foreground">
+                  7일 합산 노출이 이 미만인 캠페인 제외. 기본 1000.
+                </p>
+              </div>
+            </>
+          )}
+
+          {type === "budget_pace" && (
+            <>
+              <div className="flex flex-col gap-1.5">
+                <Label className="text-xs">초과 임계 (%p)</Label>
+                <Input
+                  type="number"
+                  min={5}
+                  max={100}
+                  step={1}
+                  value={params.paceDeviationPct}
+                  onChange={(e) =>
+                    setParams((s) => ({
+                      ...s,
+                      paceDeviationPct: Number(e.target.value) || 0,
+                    }))
+                  }
+                  className="w-32"
+                />
+                <p className="text-xs text-muted-foreground">
+                  예상 페이스 대비 N%p 이상 초과 소진 시 알림. 기본 30. (예:
+                  14시(58%)에 88% 이상 소진 = +30%p)
+                </p>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label className="text-xs">최소 평가 시각 (시)</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={23}
+                  step={1}
+                  value={params.paceMinHour}
+                  onChange={(e) =>
+                    setParams((s) => ({
+                      ...s,
+                      paceMinHour: Number(e.target.value) || 0,
+                    }))
+                  }
+                  className="w-32"
+                />
+                <p className="text-xs text-muted-foreground">
+                  이 시각 미만은 평가 skip (자정 직후 노이즈 방지). 기본 6.
+                </p>
+              </div>
+            </>
           )}
 
           {(type === "api_auth_error" || type === "inspect_rejected") && (

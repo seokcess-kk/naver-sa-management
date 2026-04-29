@@ -43,6 +43,9 @@ import {
   evaluateBizmoneyLow,
   evaluateApiAuthError,
   evaluateInspectRejected,
+  evaluateCpcSurge,
+  evaluateImpressionsDrop,
+  evaluateBudgetPace,
   type AlertCandidate,
   type EvalContext,
 } from "@/lib/alerts/evaluators"
@@ -189,6 +192,27 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
               withinMinutes?: number
               maxCandidates?: number
             },
+          })
+          break
+        case "cpc_surge":
+          candidates = await evaluateCpcSurge(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as { thresholdPct?: number; minClicks?: number },
+          })
+          break
+        case "impressions_drop":
+          candidates = await evaluateImpressionsDrop(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as { thresholdPct?: number; minImpressions?: number },
+          })
+          break
+        case "budget_pace":
+          candidates = await evaluateBudgetPace(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as { deviationPct?: number; minHour?: number },
           })
           break
         default:
