@@ -3,12 +3,13 @@
  *
  * Prisma AdExtensionType enum 값을 한국어 라벨 + 색으로 표시.
  *
- * 표시 규칙 (P1 텍스트 2종 화이트리스트):
+ * 표시 규칙 (P1 화이트리스트 — 텍스트 2종 + 이미지 1종):
  *   - "headline"    → "추가제목" (sky/blue 톤)
  *   - "description" → "추가설명" (violet 톤)
+ *   - "image"       → "이미지" (emerald 톤) — F-5.3
  *   - 그 외          → 원본 문자열 (zinc 폴백)
  *
- * 본 PR(텍스트 2종) 외 타입(image/sublink/...)은 후속 PR 진입 시 enum 추가 후
+ * 본 PR 외 타입(sublink/...)은 후속 PR 진입 시 enum 추가 후
  * 본 컴포넌트에 분기 추가.
  *
  * 순수 표현 컴포넌트. RSC / 클라이언트 양쪽에서 사용 가능.
@@ -40,6 +41,18 @@ export function ExtensionTypeBadge({ type }: { type: string }) {
         )}
       >
         추가설명
+      </span>
+    )
+  }
+  if (type === "image") {
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+          "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300",
+        )}
+      >
+        이미지
       </span>
     )
   }

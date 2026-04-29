@@ -97,6 +97,7 @@ import {
   ExtensionsAddModal,
   type ExtensionAdgroupOption,
 } from "@/components/dashboard/extensions-add-modal"
+import { ExtensionsImageAddModal } from "@/components/dashboard/extensions-image-add-modal"
 import {
   ExtensionsDeleteModal,
   type DeleteAdExtensionTargetRow,
@@ -194,6 +195,23 @@ function extractExtensionText(
   return ""
 }
 
+/**
+ * payload(JSON)에서 image type 의 url 추출.
+ * actions.ts 의 createAdExtensionsBatch / syncAdExtensions 가 저장하는 shape:
+ *   - { image: { url: string, storagePath?: string } }
+ * 누락 / 비정상 → null.
+ */
+function extractImageUrl(payload: unknown): string | null {
+  if (payload === null || payload === undefined) return null
+  if (typeof payload !== "object") return null
+  const obj = payload as Record<string, unknown>
+  const img = obj.image
+  if (!img || typeof img !== "object") return null
+  const url = (img as Record<string, unknown>).url
+  if (typeof url === "string" && url.length > 0) return url
+  return null
+}
+
 // =============================================================================
 // 필터 정의 (클라이언트 측, 5천 행 메모리 충분)
 // =============================================================================
@@ -263,8 +281,33 @@ function makeColumns(ctx: RowCtx): ColumnDef<ExtensionRow>[] {
       id: "text",
       // accessor 가 아닌 id — 검색 필터는 별도 정의.
       accessorFn: (row) => extractExtensionText(row.payload, row.type),
-      header: "텍스트",
+      header: "텍스트 / 이미지",
       cell: ({ row }) => {
+        // image type 은 payload.image.url 썸네일 (40x40), 그 외는 텍스트.
+        if (row.original.type === "image") {
+          const imageUrl = extractImageUrl(row.original.payload)
+          return (
+            <div className="flex max-w-[320px] items-center gap-2">
+              {imageUrl ? (
+                // 외부 호스트(SA / Storage) 다양 → next/image 대신 native img.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={imageUrl}
+                  alt={row.original.nccExtId}
+                  className="size-10 rounded border object-cover"
+                  loading="lazy"
+                />
+              ) : (
+                <div className="flex size-10 items-center justify-center rounded border bg-muted text-[10px] text-muted-foreground">
+                  N/A
+                </div>
+              )}
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {row.original.nccExtId}
+              </span>
+            </div>
+          )
+        }
         const text = extractExtensionText(
           row.original.payload,
           row.original.type,
@@ -441,6 +484,7 @@ export function ExtensionsTable({
 
   // -- 모달 state -------------------------------------------------------------
   const [addOpen, setAddOpen] = React.useState(false)
+  const [imageAddOpen, setImageAddOpen] = React.useState(false)
   const [deleteRow, setDeleteRow] = React.useState<ExtensionRow | null>(null)
 
   // -- 다중 선택 + 일괄 액션 state -------------------------------------------
@@ -611,8 +655,8 @@ export function ExtensionsTable({
             확장소재
           </h1>
           <p className="text-sm text-muted-foreground">
-            추가제목 / 추가설명. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능.
-            (이미지 / 인라인 편집은 후속 PR)
+            추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄
+            변경 가능. (인라인 편집은 후속 PR)
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -640,7 +684,34 @@ export function ExtensionsTable({
                   : "추가제목 / 추가설명 일괄 추가"
             }
           >
-            확장소재 추가
+            텍스트 추가
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              if (!hasKeys) {
+                toast.error("키 미설정 — 확장소재 추가 비활성")
+                return
+              }
+              if (adgroups.length === 0) {
+                toast.error(
+                  "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
+                )
+                return
+              }
+              setImageAddOpen(true)
+            }}
+            disabled={!hasKeys || adgroups.length === 0}
+            title={
+              !hasKeys
+                ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
+                : adgroups.length === 0
+                  ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
+                  : "이미지 확장소재 일괄 추가 (광고그룹 N × 이미지 M)"
+            }
+          >
+            이미지 추가
           </Button>
           <SyncExtensionsButton advertiserId={advertiserId} hasKeys={hasKeys} />
         </div>
@@ -680,6 +751,7 @@ export function ExtensionsTable({
             <SelectItem value="ALL">타입 (전체)</SelectItem>
             <SelectItem value="headline">추가제목</SelectItem>
             <SelectItem value="description">추가설명</SelectItem>
+            <SelectItem value="image">이미지</SelectItem>
           </SelectContent>
         </Select>
         <Select
@@ -917,7 +989,7 @@ export function ExtensionsTable({
         />
       )}
 
-      {/* 추가 모달 (F-5.4) */}
+      {/* 추가 모달 (F-5.4 — 텍스트 N×M) */}
       {addOpen && (
         <ExtensionsAddModal
           advertiserId={advertiserId}
@@ -925,6 +997,23 @@ export function ExtensionsTable({
           open
           onOpenChange={(o) => {
             if (!o) setAddOpen(false)
+          }}
+          onClosed={(didApply) => {
+            if (didApply) {
+              router.refresh()
+            }
+          }}
+        />
+      )}
+
+      {/* 이미지 추가 모달 (F-5.3 — 이미지 N×M) */}
+      {imageAddOpen && (
+        <ExtensionsImageAddModal
+          advertiserId={advertiserId}
+          adgroups={adgroups}
+          open
+          onOpenChange={(o) => {
+            if (!o) setImageAddOpen(false)
           }}
           onClosed={(didApply) => {
             if (didApply) {
@@ -955,12 +1044,18 @@ export function ExtensionsTable({
 }
 
 // ExtensionRow → DeleteAdExtensionTargetRow (모달이 ExtensionRow 의존성을 가지지 않도록 좁힌 타입).
+//   - image type 은 텍스트가 없으므로 nccExtId 를 2차 확인 식별자로 사용
+//     (백엔드 deleteAdExtensionSingle 도 동일 폴백 — actions.ts line 1294-1296).
 function mapToDeleteTarget(row: ExtensionRow): DeleteAdExtensionTargetRow {
+  const text =
+    row.type === "image"
+      ? row.nccExtId
+      : extractExtensionText(row.payload, row.type)
   return {
     id: row.id,
     nccExtId: row.nccExtId,
     type: row.type,
-    text: extractExtensionText(row.payload, row.type),
+    text,
     adgroupName: row.adgroup.name,
   }
 }
@@ -1110,7 +1205,11 @@ function ExtensionToggleChangePreview({
           <TableBody>
             {items.map((it) => {
               const same = it.status === targetStatus
-              const text = extractExtensionText(it.payload, it.type)
+              const isImage = it.type === "image"
+              const text = isImage
+                ? ""
+                : extractExtensionText(it.payload, it.type)
+              const imageUrl = isImage ? extractImageUrl(it.payload) : null
               return (
                 <TableRow
                   key={it.id}
@@ -1119,9 +1218,25 @@ function ExtensionToggleChangePreview({
                   <TableCell className="max-w-[260px] truncate font-medium">
                     <div className="flex items-center gap-1.5">
                       <ExtensionTypeBadge type={it.type} />
-                      <span className="truncate">
-                        {text || "(텍스트 없음)"}
-                      </span>
+                      {isImage ? (
+                        imageUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={imageUrl}
+                            alt={it.nccExtId}
+                            className="size-7 rounded border object-cover"
+                            loading="lazy"
+                          />
+                        ) : (
+                          <span className="text-xs text-muted-foreground">
+                            (이미지 없음)
+                          </span>
+                        )
+                      ) : (
+                        <span className="truncate">
+                          {text || "(텍스트 없음)"}
+                        </span>
+                      )}
                     </div>
                     <div className="font-mono text-[10px] text-muted-foreground">
                       {it.nccExtId}

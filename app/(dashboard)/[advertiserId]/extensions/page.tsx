@@ -19,8 +19,8 @@
  *   - `where: { ownerType: "adgroup", adgroup: { campaign: { advertiserId } } }`
  *
  * type 화이트리스트 (P1):
- *   - 본 PR 은 headline / description 만 노출. image 등은 후속 PR.
- *   - `where.type: { in: ["headline", "description"] }`
+ *   - F-5.3 후속: headline / description / image 노출.
+ *   - `where.type: { in: ["headline", "description", "image"] }`
  *
  * SPEC 6.2 F-5.x / 11.2 / 안전장치 1·5.
  */
@@ -68,12 +68,12 @@ export default async function ExtensionsPage({
   }
 
   // raw 컬럼 select 안 함. ownerType=adgroup 한정 + adgroup.campaign.advertiserId join.
-  // type 화이트리스트는 P1 텍스트 2종 (headline / description). 후속 PR 에서 image 추가.
+  // type 화이트리스트는 P1 3종 (headline / description / image — F-5.3 추가).
   const rows = await prisma.adExtension.findMany({
     where: {
       ownerType: "adgroup",
       adgroup: { campaign: { advertiserId } },
-      type: { in: ["headline", "description"] },
+      type: { in: ["headline", "description", "image"] },
     },
     select: {
       id: true,

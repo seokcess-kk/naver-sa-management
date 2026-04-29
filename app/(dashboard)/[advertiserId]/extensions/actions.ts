@@ -1,19 +1,21 @@
 "use server"
 
 /**
- * F-5.x — 확장소재 관리 (Server Actions, P1 텍스트 2종)
+ * F-5.x — 확장소재 관리 (Server Actions, P1 텍스트 2종 + 이미지)
  *
  * 본 PR 범위:
- *   1. syncAdExtensions          — 광고그룹 순회 → listAdExtensions(type 별) → DB upsert (F-5.1/F-5.2)
+ *   1. syncAdExtensions          — 광고그룹 순회 → listAdExtensions(type 별) → DB upsert (F-5.1/F-5.2/F-5.3)
  *   2. bulkActionAdExtensions    — 다중 선택 ON/OFF (toggle, userLock) 일괄
- *   3. createAdExtensionsBatch   — 광고그룹 N × 텍스트 M 일괄 생성 (F-5.4)
- *   4. deleteAdExtensionSingle   — 단건 삭제 (admin + 2차 확인)
+ *   3. createAdExtensionsBatch   — 광고그룹 N × (텍스트 또는 이미지) M 일괄 생성 (F-5.3/F-5.4)
+ *   4. deleteAdExtensionSingle   — 단건 삭제 (admin + 2차 확인) — image 시 Storage cleanup 동반
+ *   5. uploadImage               — Supabase Storage 업로드 → publicURL 반환 (F-5.3)
  *
  * 본 PR 비대상 (후속 PR):
- *   - F-5.3 이미지(IMAGE)        — Supabase Storage 별도 셋업 필요
  *   - 인라인 편집(text 변경)     — type 별 fields 다양해 별도 PR
  *   - 다중 선택 삭제             — P1 비대상 (CLAUDE.md "비대상")
- *   - 9종 모든 type              — P1 화이트리스트는 headline / description (CLAUDE.md "비대상: P1 9종 확장소재")
+ *   - 9종 모든 type              — P1 화이트리스트는 headline / description / image (CLAUDE.md "비대상: P1 9종 확장소재")
+ *   - 이미지 리사이즈/최적화     — 네이버 SA 사양 따름
+ *   - signedURL                  — 본 PR은 publicURL 사용
  *
  * 운영 정책 (CLAUDE.md / backend-engineer.md):
  *   - 진입부 getCurrentAdvertiser(advertiserId) — 권한 + advertiser 객체
@@ -53,6 +55,7 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser, assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import { getAdminSupabase } from "@/lib/supabase/admin"
 import {
   createAdExtensions,
   deleteAdExtension,
@@ -72,27 +75,39 @@ import type {
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 
 // =============================================================================
-// 입력 type 화이트리스트 (P1: 텍스트 2종)
+// 입력 type 화이트리스트 (P1: 텍스트 2종 + 이미지)
 // =============================================================================
 //
 // CLAUDE.md "비대상: P1 9종 확장소재(P1은 3종만)".
-// 본 PR(텍스트 2종)은 더 좁은 화이트리스트. 이미지는 후속 PR.
+// P1 화이트리스트: headline / description / image.
 //
 // 백엔드 ↔ SA 사이 type 변환:
-//   - 입력(소문자): "headline" / "description"          (Prisma AdExtensionType enum 과 동일)
-//   - SA 호출(대문자): "HEADLINE" / "DESCRIPTION"        (lib/naver-sa/ad-extensions SaAdExtensionType)
+//   - 입력(소문자): "headline" / "description" / "image"   (Prisma AdExtensionType enum 과 동일)
+//   - SA 호출(대문자): "HEADLINE" / "DESCRIPTION" / "IMAGE" (lib/naver-sa/ad-extensions SaAdExtensionType)
 //   - 응답 매핑(소문자): SA 응답 type 문자열 → 소문자 enum
+//
+// 텍스트 type(headline/description)과 이미지 type(image)은 페이로드 shape 가 다르다:
+//   - 텍스트: { headline: "..." } / { description: "..." }
+//   - 이미지: { image: { url, storagePath? } }
+// → createAdExtensionsBatch / sync / single delete 모두 type 분기로 처리.
 
-const InputTypeSchema = z.enum(["headline", "description"])
+const InputTypeSchema = z.enum(["headline", "description", "image"])
 type InputType = z.infer<typeof InputTypeSchema>
+
+/** 텍스트 입력만 받는 type (이미지 입력 분기와 구분). */
+type TextInputType = "headline" | "description"
 
 const TYPE_TO_SA: Record<InputType, SaAdExtensionType> = {
   headline: "HEADLINE",
   description: "DESCRIPTION",
+  image: "IMAGE",
 }
 
-/** type 별 텍스트 길이 상한 (네이버 SA 가이드 기준 — P1 호출부 검증). */
-const TYPE_MAX_LEN: Record<InputType, number> = {
+/**
+ * type 별 텍스트 길이 상한 (네이버 SA 가이드 기준 — P1 호출부 검증).
+ * 이미지(image)는 텍스트 길이 적용 안 함 — undefined.
+ */
+const TYPE_MAX_LEN: Record<TextInputType, number> = {
   headline: 15,
   description: 45,
 }
@@ -180,8 +195,10 @@ export async function syncAdExtensions(
     adgroups.map((g) => [g.nccAdgroupId, g.id]),
   )
 
-  // 동기화 대상 type 목록: 입력 미지정 → 둘 다, 지정 → 하나만.
-  const targetTypes: InputType[] = type ? [type] : ["headline", "description"]
+  // 동기화 대상 type 목록: 입력 미지정 → 텍스트+이미지 모두, 지정 → 하나만.
+  const targetTypes: InputType[] = type
+    ? [type]
+    : ["headline", "description", "image"]
 
   let synced = 0
   let skipped = 0
@@ -234,13 +251,21 @@ export async function syncAdExtensions(
             continue
           }
 
-          const dbType: AdExtensionType = t // headline / description (소문자 그대로)
+          const dbType: AdExtensionType = t // headline / description / image (소문자 그대로)
           const mappedStatus = mapExtensionStatus(e)
           const mappedInspect = mapInspectStatus(e)
-          const text = extractText(e, t)
-          const payload: Record<string, string> = text
-            ? { [t]: text }
-            : {}
+          // type 별 페이로드 분기:
+          //   - 텍스트(headline/description): { [t]: text } (string 추출)
+          //   - 이미지(image): { image: { url, storagePath? } }
+          //     storagePath는 sync 단계에서는 알 수 없음 (외부 등록분일 수 있음). 누락 OK.
+          let payload: Record<string, unknown>
+          if (t === "image") {
+            const img = extractImage(e)
+            payload = img ? { image: img } : {}
+          } else {
+            const text = extractText(e, t)
+            payload = text ? { [t]: text } : {}
+          }
           const inspectMemoVal =
             typeof e.inspectMemo === "string" && e.inspectMemo.length > 0
               ? e.inspectMemo
@@ -400,10 +425,34 @@ function mapInspectStatus(e: SaAdExtension): InspectStatus {
  *
  * 누락 시 빈 문자열 반환 (호출부가 payload 비우기 처리).
  */
-function extractText(e: SaAdExtension, t: InputType): string {
+function extractText(e: SaAdExtension, t: TextInputType): string {
   const anyE = e as unknown as Record<string, unknown>
   const v = anyE[t]
   return typeof v === "string" ? v : ""
+}
+
+/**
+ * 응답 페이로드에서 image 타입 정보 추출.
+ *
+ * 네이버 SA 응답 image type passthrough shape (sample 기준):
+ *   - e.image: { url: string, ... } 또는 e.image (string url)
+ * 둘 다 허용. 누락 시 null.
+ *
+ * 본 PR 단순화: { url } 만 추출 보존. 후속 PR에서 size/dimension 등 추가 가능.
+ */
+function extractImage(e: SaAdExtension): { url: string } | null {
+  const anyE = e as unknown as Record<string, unknown>
+  const img = anyE.image
+  if (typeof img === "string" && img.length > 0) {
+    return { url: img }
+  }
+  if (img && typeof img === "object") {
+    const url = (img as Record<string, unknown>).url
+    if (typeof url === "string" && url.length > 0) {
+      return { url }
+    }
+  }
+  return null
 }
 
 // =============================================================================
@@ -685,25 +734,53 @@ export async function bulkActionAdExtensions(
 // TODO(5천 건 한계): N=50 × M=20 = 최대 1000건. 단일 POST 호출 OK.
 //   더 큰 규모(또는 다른 광고주별 호출 분산 필요) 시 batch-executor-job 패턴 이관.
 
+/**
+ * type 별 입력 shape 분기:
+ *   - headline / description: texts 배열 필수 (길이 1~20, 텍스트 길이 type 별 상한)
+ *   - image:                  imageUrls 배열 필수 (publicURL — uploadImage Server Action 결과)
+ *
+ * superRefine 로 type 별 필드 존재성 + 텍스트 길이 상한 검증.
+ */
 const createExtensionsSchema = z
   .object({
     type: InputTypeSchema,
-    // 텍스트는 type 별 길이 상한 검증을 .superRefine 단계에서 수행.
-    // 1차 max 는 description 상한(45) 으로 두고, headline 입력 시 추가 검증.
-    texts: z.array(z.string().min(1).max(45)).min(1).max(20),
+    // 텍스트(headline/description) 입력. image type 인 경우 비어 있어야 함.
+    // 1차 max 는 description 상한(45). type=headline 일 때 superRefine 에서 15자 추가 검증.
+    texts: z.array(z.string().min(1).max(45)).max(20).optional(),
+    // 이미지(image) 입력. text type 인 경우 비어 있어야 함.
+    // 클라이언트가 uploadImage 로 미리 업로드한 publicURL 배열을 전달.
+    imageUrls: z.array(z.string().url()).max(20).optional(),
     nccAdgroupIds: z.array(z.string().min(1)).min(1).max(50),
   })
   .superRefine((v, ctx) => {
-    const limit = TYPE_MAX_LEN[v.type]
-    v.texts.forEach((t, i) => {
-      if (t.length > limit) {
+    if (v.type === "headline" || v.type === "description") {
+      if (!v.texts || v.texts.length === 0) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ["texts", i],
-          message: `${v.type} 텍스트는 ${limit}자 이내`,
+          path: ["texts"],
+          message: "텍스트가 필요합니다",
+        })
+        return
+      }
+      const limit = TYPE_MAX_LEN[v.type]
+      v.texts.forEach((t, i) => {
+        if (t.length > limit) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["texts", i],
+            message: `${v.type} 텍스트는 ${limit}자 이내`,
+          })
+        }
+      })
+    } else if (v.type === "image") {
+      if (!v.imageUrls || v.imageUrls.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["imageUrls"],
+          message: "이미지가 필요합니다",
         })
       }
-    })
+    }
   })
 
 export type CreateAdExtensionsBatchInput = z.infer<
@@ -711,9 +788,10 @@ export type CreateAdExtensionsBatchInput = z.infer<
 >
 
 export type CreateAdExtensionsBatchItem = {
-  index: number // 입력 평탄 배열 0-based 인덱스 (광고그룹×텍스트 — UI 결과 매핑용)
+  index: number // 입력 평탄 배열 0-based 인덱스 (광고그룹×텍스트/이미지 — UI 결과 매핑용)
   ownerId: string // nccAdgroupId
-  text: string // 입력 텍스트
+  text?: string // 텍스트(headline/description) 입력 시
+  imageUrl?: string // 이미지(image) 입력 시
   ok: boolean
   nccExtId?: string // 성공 시
   error?: string // 실패 시
@@ -758,6 +836,7 @@ export async function createAdExtensionsBatch(
 
   const parsed = createExtensionsSchema.parse(input)
   const sa = TYPE_TO_SA[parsed.type]
+  const isImage = parsed.type === "image"
 
   // -- 광고그룹 광고주 한정 검증 ---------------------------------------------
   // 입력 nccAdgroupIds 가 모두 광고주 소속인지 확인 (campaign.advertiserId join).
@@ -776,22 +855,29 @@ export async function createAdExtensionsBatch(
     dbAdgroups.map((g) => [g.nccAdgroupId, g.id]),
   )
 
-  // -- (광고그룹 × 텍스트) 조합 평탄화 ----------------------------------------
-  // 입력 순서 보존: 첫 광고그룹의 모든 텍스트 → 두 번째 광고그룹의 모든 텍스트 ...
+  // -- (광고그룹 × 입력값) 조합 평탄화 ---------------------------------------
+  // 입력 순서 보존: 첫 광고그룹의 모든 입력값 → 두 번째 광고그룹의 모든 입력값 ...
+  // type=headline/description 이면 input=text, type=image 이면 input=imageUrl.
   type FlatRow = {
     index: number // 평탄 0-based
     nccAdgroupId: string
-    text: string
+    text?: string // headline/description 인 경우
+    imageUrl?: string // image 인 경우
     externalId: string
   }
   const flat: FlatRow[] = []
   let flatIdx = 0
+  // 입력값 배열 통일 (text 또는 imageUrl).
+  const inputValues: string[] = isImage
+    ? (parsed.imageUrls ?? [])
+    : (parsed.texts ?? [])
   for (const agId of uniqAdgroupIds) {
-    for (const text of parsed.texts) {
+    for (const v of inputValues) {
       flat.push({
         index: flatIdx++,
         nccAdgroupId: agId,
-        text,
+        text: isImage ? undefined : v,
+        imageUrl: isImage ? v : undefined,
         externalId: `addext-${crypto.randomUUID()}`,
       })
     }
@@ -812,7 +898,7 @@ export async function createAdExtensionsBatch(
         advertiserId,
         type: parsed.type,
         adgroups: uniqAdgroupIds.length,
-        texts: parsed.texts.length,
+        items: inputValues.length,
         total,
       } as Prisma.InputJsonValue,
     },
@@ -828,31 +914,50 @@ export async function createAdExtensionsBatch(
     idempotencyKey: string
     status: "pending"
   }
-  const seeds: CreateItemSeed[] = flat.map((row) => ({
-    batchId: batch.id,
-    targetType: "AdExtension",
-    targetId: `pending:${row.externalId}`,
-    before: {} as Prisma.InputJsonValue,
-    after: {
+  const seeds: CreateItemSeed[] = flat.map((row) => {
+    // type 별 after payload 분기 (sync / DB upsert 와 동일 shape):
+    //   - 텍스트: { [type]: text }
+    //   - 이미지: { image: { url } }
+    const afterPayload: Record<string, unknown> = {
       ownerType: "adgroup",
       nccAdgroupId: row.nccAdgroupId,
       type: parsed.type,
-      [parsed.type]: row.text,
-    } as Prisma.InputJsonValue,
-    idempotencyKey: `${batch.id}:create:${row.externalId}`,
-    status: "pending" as const,
-  }))
+    }
+    if (isImage) {
+      afterPayload.image = { url: row.imageUrl }
+    } else {
+      afterPayload[parsed.type] = row.text
+    }
+    return {
+      batchId: batch.id,
+      targetType: "AdExtension",
+      targetId: `pending:${row.externalId}`,
+      before: {} as Prisma.InputJsonValue,
+      after: afterPayload as Prisma.InputJsonValue,
+      idempotencyKey: `${batch.id}:create:${row.externalId}`,
+      status: "pending" as const,
+    }
+  })
   await prisma.changeItem.createMany({ data: seeds })
 
   // -- SA createAdExtensions 호출 --------------------------------------------
-  // 모든 항목 단일 POST. type 별 텍스트 필드(headline / description) 부착.
-  const items: AdExtensionCreateItem[] = flat.map((row) => ({
-    ownerId: row.nccAdgroupId,
-    ownerType: "ADGROUP",
-    type: sa,
-    [parsed.type]: row.text,
-    externalId: row.externalId,
-  }))
+  // 모든 항목 단일 POST. type 별 페이로드:
+  //   - 텍스트(headline/description): { [type]: text }
+  //   - 이미지(image): { image: { url } } — 네이버 SA passthrough (sample 기준)
+  const items: AdExtensionCreateItem[] = flat.map((row) => {
+    const base: AdExtensionCreateItem = {
+      ownerId: row.nccAdgroupId,
+      ownerType: "ADGROUP",
+      type: sa,
+      externalId: row.externalId,
+    }
+    if (isImage) {
+      base.image = { url: row.imageUrl }
+    } else {
+      ;(base as Record<string, unknown>)[parsed.type] = row.text
+    }
+    return base
+  })
 
   let successTotal = 0
   let failedTotal = 0
@@ -862,7 +967,9 @@ export async function createAdExtensionsBatch(
     const created = await createAdExtensions(advertiser.customerId, items)
 
     // 응답 매핑 — 1차: 길이 일치 → 인덱스 매핑
-    //              2차: 불일치 → (ownerId, type, text) 정확 매칭 (응답 type 소문자 정규화)
+    //              2차: 불일치 → (ownerId, type, 입력값) 정확 매칭
+    //                   - 텍스트: 입력값=text
+    //                   - 이미지: 입력값=imageUrl (응답 image.url)
     const indexMatch = created.length === items.length
     const respByExactKey = new Map<string, SaAdExtension>()
     if (!indexMatch) {
@@ -871,15 +978,23 @@ export async function createAdExtensionsBatch(
           typeof c.type === "string" && c.type.length > 0
             ? c.type.toLowerCase()
             : parsed.type
-        const txt = extractText(c, parsed.type) // type 일치 가정 — 다르면 빈 문자열
-        if (txt) {
-          respByExactKey.set(`${c.ownerId}::${respTypeLc}::${txt}`, c)
+        if (isImage) {
+          const img = extractImage(c)
+          if (img?.url) {
+            respByExactKey.set(`${c.ownerId}::${respTypeLc}::${img.url}`, c)
+          }
+        } else {
+          const txt = extractText(c, parsed.type as TextInputType)
+          if (txt) {
+            respByExactKey.set(`${c.ownerId}::${respTypeLc}::${txt}`, c)
+          }
         }
       }
     }
 
     for (const row of flat) {
-      const key = `${row.nccAdgroupId}::${parsed.type}::${row.text}`
+      const inputVal = isImage ? (row.imageUrl ?? "") : (row.text ?? "")
+      const key = `${row.nccAdgroupId}::${parsed.type}::${inputVal}`
       const u: SaAdExtension | undefined = indexMatch
         ? created[row.index]
         : respByExactKey.get(key)
@@ -907,6 +1022,7 @@ export async function createAdExtensionsBatch(
             index: row.index,
             ownerId: row.nccAdgroupId,
             text: row.text,
+            imageUrl: row.imageUrl,
             ok: false,
             error: "광고그룹 매핑 불가",
           })
@@ -919,12 +1035,25 @@ export async function createAdExtensionsBatch(
             ? u.type.toLowerCase()
             : parsed.type
         const dbType: AdExtensionType =
-          respTypeLc === "headline" || respTypeLc === "description"
+          respTypeLc === "headline" ||
+          respTypeLc === "description" ||
+          respTypeLc === "image"
             ? respTypeLc
             : parsed.type
-        const respText = extractText(u, parsed.type)
-        const text = respText.length > 0 ? respText : row.text
-        const payload = { [parsed.type]: text } as Prisma.InputJsonValue
+        // type 별 payload 분기:
+        //   - 텍스트: { [type]: text } (응답 우선, 누락 시 입력 폴백)
+        //   - 이미지: { image: { url, storagePath? } }
+        //     storagePath 는 입력 imageUrl 이 Supabase Storage publicURL 인 경우 추출 가능 — 단순화: 미저장
+        let payload: Prisma.InputJsonValue
+        if (isImage) {
+          const respImg = extractImage(u)
+          const url = respImg?.url ?? row.imageUrl ?? ""
+          payload = { image: { url } } as Prisma.InputJsonValue
+        } else {
+          const respText = extractText(u, parsed.type as TextInputType)
+          const text = respText.length > 0 ? respText : (row.text ?? "")
+          payload = { [parsed.type]: text } as Prisma.InputJsonValue
+        }
         const inspectMemoVal =
           typeof u.inspectMemo === "string" && u.inspectMemo.length > 0
             ? u.inspectMemo
@@ -983,6 +1112,7 @@ export async function createAdExtensionsBatch(
           index: row.index,
           ownerId: row.nccAdgroupId,
           text: row.text,
+          imageUrl: row.imageUrl,
           ok: true,
           nccExtId: u.nccExtId,
         })
@@ -1002,6 +1132,7 @@ export async function createAdExtensionsBatch(
           index: row.index,
           ownerId: row.nccAdgroupId,
           text: row.text,
+          imageUrl: row.imageUrl,
           ok: false,
           error: errMsg,
         })
@@ -1023,6 +1154,7 @@ export async function createAdExtensionsBatch(
         index: row.index,
         ownerId: row.nccAdgroupId,
         text: row.text,
+        imageUrl: row.imageUrl,
         ok: false,
         error: safeMsg,
       })
@@ -1051,7 +1183,7 @@ export async function createAdExtensionsBatch(
       advertiserId,
       type: parsed.type,
       adgroups: uniqAdgroupIds.length,
-      texts: parsed.texts.length,
+      items: inputValues.length,
       total,
       success: successTotal,
       failed: failedTotal,
@@ -1147,8 +1279,10 @@ export async function deleteAdExtensionSingle(
   }
 
   // -- 5. 2차 확인 검증 ------------------------------------------------------
-  // payload 에서 type 별 텍스트 추출. 사용자가 입력한 confirmText 와 정확 일치 (양 끝 trim).
-  // type 이 P1 외(image/sublink 등 — 후속 PR 진입로 확장 시) 면 nccExtId 폴백.
+  // payload 에서 type 별 식별자 추출. 사용자가 입력한 confirmText 와 정확 일치 (양 끝 trim).
+  // - headline / description: payload.{type} (사용자 텍스트)
+  // - image: payload.image.url 또는 nccExtId (이미지 URL 은 너무 길어 nccExtId 권장)
+  //   본 PR 단순화: image 는 nccExtId 비교 (UI 측에서 nccExtId 표기 후 입력 받음)
   const payload = (dbExt.payload ?? {}) as Record<string, unknown>
   let storedText = ""
   if (dbExt.type === "headline") {
@@ -1156,6 +1290,9 @@ export async function deleteAdExtensionSingle(
   } else if (dbExt.type === "description") {
     storedText =
       typeof payload.description === "string" ? payload.description : ""
+  } else if (dbExt.type === "image") {
+    // image 는 nccExtId 폴백 (URL 너무 길어 사용자 입력 부담).
+    storedText = dbExt.nccExtId
   }
   if (storedText.length === 0) {
     // 텍스트 정보가 비어 있으면 안전망으로 nccExtId 비교.
@@ -1231,6 +1368,33 @@ export async function deleteAdExtensionSingle(
       where: { batchId: batch.id, idempotencyKey },
       data: { status: "done" },
     })
+
+    // -- image type Storage cleanup (best-effort) --------------------------
+    // image 확장소재이고 payload.image.storagePath 가 있으면 Supabase Storage 파일도 삭제.
+    // 실패해도 SA 삭제는 이미 성공이므로 console.warn 만 — 사용자 흐름 차단 X.
+    if (dbExt.type === "image") {
+      const imgPayload = (dbExt.payload ?? {}) as Record<string, unknown>
+      const img = imgPayload.image as Record<string, unknown> | undefined
+      const storagePath =
+        img && typeof img.storagePath === "string" ? img.storagePath : null
+      if (storagePath) {
+        try {
+          const { error: rmErr } = await getAdminSupabase()
+            .storage.from("ad-extension-images")
+            .remove([storagePath])
+          if (rmErr) {
+            console.warn(
+              `[deleteAdExtensionSingle] storage cleanup failed nccExtId=${dbExt.nccExtId} path=${storagePath}: ${rmErr.message}`,
+            )
+          }
+        } catch (e) {
+          console.warn(
+            `[deleteAdExtensionSingle] storage cleanup unknown error nccExtId=${dbExt.nccExtId}:`,
+            e,
+          )
+        }
+      }
+    }
   } else {
     await prisma.changeItem.updateMany({
       where: { batchId: batch.id, idempotencyKey },
@@ -1268,4 +1432,151 @@ export async function deleteAdExtensionSingle(
     return { ok: false, error: errorMsg ?? "삭제 실패" }
   }
   return { ok: true, batchId: batch.id, nccExtId: dbExt.nccExtId }
+}
+
+// =============================================================================
+// 5. uploadImage — Supabase Storage 업로드 (F-5.3)
+// =============================================================================
+//
+// 흐름:
+//   1. 클라이언트 file → base64 변환 후 Server Action 호출
+//   2. 본 액션:
+//      - getCurrentAdvertiser 권한
+//      - MIME 화이트리스트 (PNG / JPEG / WebP)
+//      - size 5MB 제한
+//      - 광고주별 디렉토리 경로(`{advertiserId}/{cuid}.{ext}`) — 광고주 격리
+//      - service_role 클라이언트(getAdminSupabase) 로 bucket 'ad-extension-images' 업로드
+//      - publicURL 반환 (네이버 SA createAdExtensions 호출 시 image.url 로 사용)
+//
+// Storage bucket 운영 가이드:
+//   - 본 PR 은 코드만 추가. bucket 자체는 Supabase 콘솔에서 미리 생성 필요:
+//     - bucket name: ad-extension-images
+//     - Public bucket: ON (publicURL 으로 네이버 SA 가 접근)
+//     - File size limit: 5MB (코드와 동일)
+//     - Allowed MIME types: image/png, image/jpeg, image/webp
+//   - RLS 정책 별도 마이그레이션 X — 본 bucket 은 service_role 단독 사용.
+//     클라이언트 직접 업로드는 차단(서버 액션 통과). 클라이언트가 publicURL 을 직접 GET 하는 건 OK.
+//
+// AuditLog: 업로드 자체는 변경 액션 아니므로 미기록 (createAdExtensionsBatch / deleteAdExtensionSingle 단계에서 기록).
+//
+// 본 PR 비대상:
+//   - signedURL (publicURL 사용)
+//   - 이미지 리사이즈/최적화 (네이버 SA 사양 따름)
+//   - DB Asset 테이블 등록 (업로드 자체 추적 미수행)
+
+const uploadImageSchema = z.object({
+  /**
+   * 이미지 데이터 base64 문자열 (data URL 접두 X — 순수 base64).
+   * 클라이언트에서 File → ArrayBuffer → Uint8Array → btoa(...) 또는 Buffer.from().toString("base64").
+   *
+   * Server Action 페이로드 크기 한계(기본 1MB) 회피 위해 Next.js 의
+   * `serverActions.bodySizeLimit` 설정을 늘리거나, 후속 PR 에서 multipart/route handler 로 이관 가능.
+   */
+  fileBase64: z.string().min(1),
+  fileType: z.enum(["image/png", "image/jpeg", "image/webp"]),
+  /** UI 표시용 파일명. 실제 저장명은 cuid 사용. */
+  originalName: z.string().optional(),
+})
+
+export type UploadImageInput = z.infer<typeof uploadImageSchema>
+
+export type UploadImageResult =
+  | { ok: true; storagePath: string; publicUrl: string; size: number }
+  | { ok: false; error: string }
+
+/** MIME → 확장자 매핑. */
+const MIME_TO_EXT: Record<UploadImageInput["fileType"], string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+}
+
+/** 업로드 size 상한 (5MB). */
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024
+
+/**
+ * 이미지 업로드 (광고주 격리 + size/MIME 검증).
+ *
+ *   1. getCurrentAdvertiser 권한 (광고주 한정)
+ *   2. Zod 검증 (MIME 화이트리스트)
+ *   3. base64 디코드 → Buffer
+ *   4. size 5MB 제한 검증
+ *   5. 경로 산정: `{advertiserId}/{crypto.randomUUID()}.{ext}` — 다른 광고주 디렉토리 접근 차단
+ *   6. getAdminSupabase().storage.upload(...) — upsert: false (UUID 충돌 사실상 불가)
+ *   7. publicURL 반환
+ *
+ * 오류는 결과 객체로 반환 (UI 가 catch 부담 X).
+ */
+export async function uploadImage(
+  advertiserId: string,
+  input: UploadImageInput,
+): Promise<UploadImageResult> {
+  const { advertiser } = await getCurrentAdvertiser(advertiserId)
+
+  const parsed = uploadImageSchema.safeParse(input)
+  if (!parsed.success) {
+    return { ok: false, error: "입력 검증 실패" }
+  }
+
+  // -- base64 디코드 ---------------------------------------------------------
+  // data URL prefix 가 섞여 있으면 제거 (클라이언트가 무심코 보낸 경우 방어).
+  let b64 = parsed.data.fileBase64
+  const commaIdx = b64.indexOf(",")
+  if (b64.startsWith("data:") && commaIdx > 0) {
+    b64 = b64.slice(commaIdx + 1)
+  }
+
+  let buffer: Buffer
+  try {
+    buffer = Buffer.from(b64, "base64")
+  } catch {
+    return { ok: false, error: "base64 디코드 실패" }
+  }
+  if (buffer.length === 0) {
+    return { ok: false, error: "빈 파일" }
+  }
+  if (buffer.length > MAX_IMAGE_SIZE_BYTES) {
+    return {
+      ok: false,
+      error: `파일 크기 한도(${MAX_IMAGE_SIZE_BYTES / 1024 / 1024}MB) 초과`,
+    }
+  }
+
+  // -- 경로 산정 (광고주 격리) -----------------------------------------------
+  // advertiserId 디렉토리 prefix 강제 — 다른 광고주 디렉토리 접근 차단 (코드상).
+  const ext = MIME_TO_EXT[parsed.data.fileType]
+  const fileName = `${crypto.randomUUID()}.${ext}`
+  const storagePath = `${advertiser.id}/${fileName}`
+
+  // -- Supabase Storage 업로드 -----------------------------------------------
+  const supa = getAdminSupabase()
+  const { error: upErr } = await supa.storage
+    .from("ad-extension-images")
+    .upload(storagePath, buffer, {
+      contentType: parsed.data.fileType,
+      upsert: false,
+    })
+  if (upErr) {
+    console.warn(
+      `[uploadImage] upload failed advertiserId=${advertiserId} path=${storagePath}: ${upErr.message}`,
+    )
+    return { ok: false, error: "업로드 실패" }
+  }
+
+  // -- publicURL ---------------------------------------------------------------
+  const { data: pubData } = supa.storage
+    .from("ad-extension-images")
+    .getPublicUrl(storagePath)
+  if (!pubData?.publicUrl) {
+    // 업로드는 성공했으나 URL 추출 실패 (이론상 발생 X). cleanup 후 에러.
+    await supa.storage.from("ad-extension-images").remove([storagePath])
+    return { ok: false, error: "publicURL 추출 실패" }
+  }
+
+  return {
+    ok: true,
+    storagePath,
+    publicUrl: pubData.publicUrl,
+    size: buffer.length,
+  }
 }
