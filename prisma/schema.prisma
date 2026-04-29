@@ -123,6 +123,16 @@ enum AlertEventStatus {
   muted
 }
 
+// F-10 — Estimate API 결과 캐시 type 분기 (3개 endpoint)
+//   - average_position : 키워드 + 순위(1..5) → 입찰가 (F-10.1)
+//   - exposure_minimum : 키워드 → 최소 노출 입찰가 (F-10.2)
+//   - performance_bulk : 키워드 + 입찰가 후보 → 예상 노출/클릭/CPC (F-10.3)
+enum EstimateType {
+  average_position
+  exposure_minimum
+  performance_bulk
+}
+
 // =============================================================================
 // 사용자 / 권한
 // =============================================================================
@@ -184,10 +194,11 @@ model Advertiser {
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
-  campaigns   Campaign[]
-  access      UserAdvertiserAccess[]
-  stats       StatDaily[]
-  statsHourly StatHourly[]
+  campaigns      Campaign[]
+  access         UserAdvertiserAccess[]
+  stats          StatDaily[]
+  statsHourly    StatHourly[]
+  estimateCaches EstimateCache[]
 
   @@index([customerId])
   @@index([status])
@@ -254,7 +265,8 @@ model Keyword {
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 
-  adgroup AdGroup @relation(fields: [adgroupId], references: [id], onDelete: Cascade)
+  adgroup        AdGroup         @relation(fields: [adgroupId], references: [id], onDelete: Cascade)
+  estimateCaches EstimateCache[]
 
   @@index([adgroupId, status])
 }
@@ -474,10 +486,63 @@ model StatHourly {
 }
 
 // =============================================================================
+// F-10 — Estimate API 캐시 (P2 비딩 시뮬레이터)
+// =============================================================================
+// 3개 endpoint 결과를 단일 테이블에 type 분기로 저장. 30분 TTL.
+//
+// 키 설계:
+//   공통 키        : advertiserId + keywordId + device + type
+//   endpoint별 키  :
+//     - average_position : position (1..5)        → bid     = 0 sentinel
+//     - exposure_minimum : 추가 키 없음           → position=0, bid=0 sentinel
+//     - performance_bulk : bid (특정 후보 입찰가) → position = 0 sentinel
+//
+//   sentinel 0 사용 근거:
+//     Postgres 의 NULL 은 unique 비교에서 서로 다르게 취급되어, NULL 을 키 일부로 두면
+//     동일 (advertiser, keyword, device, type) 의 row 가 중복 삽입될 수 있음. 0 을
+//     "N/A" sentinel 로 강제하면 unique 위반이 정확히 캐시 hit 으로 작동. position 은
+//     1..5 만 의미 있고 bid 는 양수만 의미 있으므로 0 충돌 없음.
+//
+// result Json 의 shape (passthrough):
+//   - average_position : { bid: number }
+//   - exposure_minimum : { bid: number }
+//   - performance_bulk : { impressions: number, clicks: number, cpc: number, cost: number }
+//   엔드포인트 응답 변경에 대비해 schema 강제 X — 호출부에서 Zod 파싱.
+//
+// TTL:
+//   expiresAt = createdAt + 30 min. read 시 lazy 만료 검사 (expiresAt > now()).
+//   만료 행 정리는 cleanup cron 후속 PR 권고 (StatHourly retention 패턴 동일).
+//
+// keywordId 는 내부 Keyword.id 사용 (FK Cascade) — nccKeywordId 가 아님.
+// advertiserId 비정규화 (StatDaily / StatHourly F-9.x 패턴 일관) — RLS 단일 EXISTS.
+model EstimateCache {
+  id           String       @id @default(cuid())
+  advertiserId String
+  keywordId    String
+  device       StatDevice // PC / MOBILE (estimate 는 디바이스 분리 호출). ALL 비사용.
+  type         EstimateType
+  position     Int          @default(0) // 1..5 (average_position 만), 그 외 type 은 0 sentinel
+  bid          Int          @default(0) // performance_bulk 만 양수, 그 외 type 은 0 sentinel
+  result       Json // endpoint 별 shape (위 주석)
+  expiresAt    DateTime // createdAt + 30 min
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  advertiser Advertiser @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
+  keyword    Keyword    @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  // 캐시 hit 키 — 위 sentinel 정책 덕에 NOT NULL 컬럼 unique 깔끔.
+  @@unique([advertiserId, keywordId, device, type, position, bid])
+  // cleanup cron (만료 행 삭제) 효율
+  @@index([expiresAt])
+  // 키워드 단위 일괄 무효화 (예: 키워드 입찰가 변경 시 해당 키워드 캐시 전체 drop)
+  @@index([keywordId])
+}
+
+// =============================================================================
 // P2 엔티티 (선언 보류 — 작업 시점에 추가)
 // =============================================================================
 // model BiddingPolicy   { ... } // 키워드별 목표 순위
 // model OptimizationRun { ... } // 자동 비딩 실행 기록
-// model EstimateCache   { ... } // Estimate API 결과 30분 캐시
 // model RankObservation { ... } // 시간별 순위 관측
 // model LlmCallLog      { ... } // LLM 호출 비용

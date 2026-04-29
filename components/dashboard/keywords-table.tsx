@@ -128,6 +128,7 @@ import {
   KeywordsDeleteModal,
   type DeleteTargetRow,
 } from "@/components/dashboard/keywords-delete-modal"
+import { KeywordEstimateModal } from "@/components/dashboard/keyword-estimate-modal"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -256,6 +257,8 @@ type StagingCtx = {
   isAdmin: boolean
   /** F-3.7 — 행 삭제 모달 열기 (action 컬럼 케밥 메뉴) */
   onRequestDelete: (row: KeywordRow) => void
+  /** F-10 — 입찰가 시뮬레이터 모달 열기 (action 컬럼 케밥 메뉴). hasKeys 필요. */
+  onRequestEstimate: (row: KeywordRow) => void
 }
 
 // =============================================================================
@@ -637,6 +640,13 @@ function KeywordRowActions({
       ? "이미 삭제된 키워드"
       : undefined
 
+  // F-10 — hasKeys=false 면 시뮬레이터 호출 불가 (Server Action 측에서 차단되긴 하나
+  // UI 레벨에서도 사전 disabled 로 표시. ctx.editable=hasKeys 재사용).
+  const canEstimate = ctx.editable
+  const estimateTitle = canEstimate
+    ? undefined
+    : "키 미설정 — 시뮬레이터 사용 불가"
+
   return (
     <div className="flex justify-end">
       <DropdownMenu>
@@ -651,7 +661,17 @@ function KeywordRowActions({
             </Button>
           }
         />
-        <DropdownMenuContent align="end" sideOffset={4} className="w-44">
+        <DropdownMenuContent align="end" sideOffset={4} className="w-48">
+          <DropdownMenuItem
+            disabled={!canEstimate}
+            title={estimateTitle}
+            onClick={() => {
+              if (!canEstimate) return
+              ctx.onRequestEstimate(row)
+            }}
+          >
+            입찰가 시뮬레이터
+          </DropdownMenuItem>
           <DropdownMenuItem
             variant="destructive"
             disabled={!canDelete}
@@ -940,6 +960,8 @@ export function KeywordsTable({
   // -- F-3.7 단건 삭제 모달 (admin 한정) -------------------------------------
   // null = 닫힘. 비-null 객체 mount 시점에만 모달 마운트 → 닫힐 때 자동 reset.
   const [deleteRow, setDeleteRow] = React.useState<KeywordRow | null>(null)
+  // -- F-10 입찰가 시뮬레이터 모달 (read 전용 — staging 미적용, 전 권한자 사용 가능) -----
+  const [estimateRow, setEstimateRow] = React.useState<KeywordRow | null>(null)
 
   // -- 다중 선택 + 일괄 액션 state (F-3.3) -----------------------------------
   // TanStack Table 의 rowSelection 은 row.id 기반 (getRowId=row.id 설정 → DB Keyword.id).
@@ -979,6 +1001,10 @@ export function KeywordsTable({
     setDeleteRow(row)
   }, [])
 
+  const onRequestEstimate = React.useCallback((row: KeywordRow) => {
+    setEstimateRow(row)
+  }, [])
+
   // ctx 는 셀이 직접 staging 을 읽고 변경할 수 있도록 columns 에 주입
   const ctx = React.useMemo<StagingCtx>(
     () => ({
@@ -988,8 +1014,17 @@ export function KeywordsTable({
       editable: hasKeys,
       isAdmin,
       onRequestDelete,
+      onRequestEstimate,
     }),
-    [staging, applyPatch, revertRow, hasKeys, isAdmin, onRequestDelete],
+    [
+      staging,
+      applyPatch,
+      revertRow,
+      hasKeys,
+      isAdmin,
+      onRequestDelete,
+      onRequestEstimate,
+    ],
   )
 
   const columns = React.useMemo(() => makeColumns(ctx), [ctx])
@@ -1671,6 +1706,26 @@ export function KeywordsTable({
             if (didApply) {
               router.refresh()
             }
+          }}
+        />
+      )}
+
+      {/* F-10 입찰가 시뮬레이터 모달 — estimateRow!=null 시만 mount → 자동 reset.
+          다른 행에서 재오픈해도 estimateRow.id 가 바뀌면 key 변화로 강제 unmount/remount
+          (모달 내부 device / 탭별 결과 / bids 입력 모두 초기화).
+          read 전용이라 router.refresh 불필요. staging / selection 무영향. */}
+      {estimateRow !== null && (
+        <KeywordEstimateModal
+          key={estimateRow.id}
+          advertiserId={advertiserId}
+          keyword={{
+            id: estimateRow.id,
+            nccKeywordId: estimateRow.nccKeywordId,
+            keyword: estimateRow.keyword,
+          }}
+          open
+          onOpenChange={(o) => {
+            if (!o) setEstimateRow(null)
           }}
         />
       )}
