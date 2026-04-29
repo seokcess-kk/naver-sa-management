@@ -651,3 +651,112 @@ export async function registerAdvertisersBulk(input: {
     rows: reports,
   }
 }
+
+// =============================================================================
+// 6. toggleBiddingKillSwitch — F-11.6 자동 비딩 Kill Switch 토글
+// =============================================================================
+//
+// 정책:
+//   - admin 전용 (assertRole("admin")) — 운영 사고 격리 권한이라 보수적
+//   - 광고주 단위 (전역 X — F-11.6 결정 사항)
+//   - biddingKillSwitchAt / biddingKillSwitchBy 는 정지·재개 둘 다 갱신 (마지막 1건 보존)
+//   - AuditLog `advertiser.kill_switch_toggle` 적재 (감사 이중 안전망)
+//   - revalidatePath:
+//       /admin/advertisers/{id}        — admin 상세 페이지
+//       /[advertiserId]                — 광고주 컨텍스트 (대시보드 헤더 배너 등)
+//       /[advertiserId]/bidding-policies  — 정책 페이지 상태 표시
+//
+// 본 PR 비대상:
+//   - 자동 비딩 cron 측 Kill Switch 검사 (F-11.2 후속) — 본 액션은 컬럼 토글만.
+
+const killSwitchSchema = z.object({
+  advertiserId: z.string().trim().min(1).max(128),
+  enabled: z.boolean(),
+})
+
+export type ToggleKillSwitchInput = z.infer<typeof killSwitchSchema>
+
+export type ToggleKillSwitchResult =
+  | { ok: true; enabled: boolean; at: string; by: string }
+  | { ok: false; error: string }
+
+/**
+ * 광고주의 자동 비딩 Kill Switch 토글.
+ *
+ *   1. assertRole("admin") — operator/viewer 차단 (AuthorizationError throw)
+ *   2. Zod 검증
+ *   3. 광고주 존재 확인 (없으면 ok:false). status 'archived' 도 차단.
+ *   4. update biddingKillSwitch / biddingKillSwitchAt / biddingKillSwitchBy
+ *   5. AuditLog 적재 — before/after 에 enabled / at / by
+ *   6. revalidatePath (admin + 광고주 컨텍스트 + 정책 페이지)
+ */
+export async function toggleBiddingKillSwitch(
+  input: ToggleKillSwitchInput,
+): Promise<ToggleKillSwitchResult> {
+  const me = await assertRole("admin")
+  const parsed = killSwitchSchema.safeParse(input)
+  if (!parsed.success) {
+    return {
+      ok: false,
+      error: `입력 검증 실패: ${parsed.error.issues
+        .map((i) => i.message)
+        .join(", ")}`,
+    }
+  }
+  const { advertiserId, enabled } = parsed.data
+
+  const before = await prisma.advertiser.findUnique({
+    where: { id: advertiserId },
+    select: {
+      id: true,
+      status: true,
+      biddingKillSwitch: true,
+      biddingKillSwitchAt: true,
+      biddingKillSwitchBy: true,
+    },
+  })
+  if (!before) {
+    return { ok: false, error: "존재하지 않는 광고주입니다" }
+  }
+  if (before.status === "archived") {
+    return { ok: false, error: "아카이브된 광고주는 토글할 수 없습니다" }
+  }
+
+  const at = new Date()
+
+  await prisma.advertiser.update({
+    where: { id: advertiserId },
+    data: {
+      biddingKillSwitch: enabled,
+      // 정지·재개 둘 다 갱신 (마지막 1건 보존)
+      biddingKillSwitchAt: at,
+      biddingKillSwitchBy: me.id,
+    },
+  })
+
+  await logAudit({
+    userId: me.id,
+    action: "advertiser.kill_switch_toggle",
+    targetType: "Advertiser",
+    targetId: advertiserId,
+    before: {
+      enabled: before.biddingKillSwitch,
+      at:
+        before.biddingKillSwitchAt === null
+          ? null
+          : before.biddingKillSwitchAt.toISOString(),
+      by: before.biddingKillSwitchBy,
+    },
+    after: {
+      enabled,
+      at: at.toISOString(),
+      by: me.id,
+    },
+  })
+
+  revalidatePath(`/admin/advertisers/${advertiserId}`)
+  revalidatePath(`/${advertiserId}`)
+  revalidatePath(`/${advertiserId}/bidding-policies`)
+
+  return { ok: true, enabled, at: at.toISOString(), by: me.id }
+}

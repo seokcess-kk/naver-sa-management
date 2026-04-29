@@ -216,6 +216,24 @@ export default async function AdvertiserDashboardPage({
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader className="border-b">
+          <CardTitle>비딩 최적화 (P2)</CardTitle>
+          <CardDescription>
+            키워드 단위 목표 노출 순위 정책. 자동 조정 cron(F-11.2)이 정책을
+            기준으로 입찰가를 매시간 조정합니다.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-wrap gap-2 py-4">
+          <Button
+            variant="outline"
+            render={<Link href={`/${advertiser.id}/bidding-policies`} />}
+          >
+            비딩 정책 (F-11.1)
+          </Button>
+        </CardContent>
+      </Card>
+
       <p className="text-xs text-muted-foreground">
         다른 광고주로 전환은 상단 셀렉터로. 권한 점검은{" "}
         <Link href="/admin/advertisers" className="underline">
