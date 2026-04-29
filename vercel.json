@@ -8,6 +8,10 @@
     {
       "path": "/api/batch/run",
       "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/stat-daily",
+      "schedule": "0 18 * * *"
     }
   ]
 }

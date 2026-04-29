@@ -181,6 +181,7 @@ model Advertiser {
 
   campaigns Campaign[]
   access    UserAdvertiserAccess[]
+  stats     StatDaily[]
 
   @@index([customerId])
   @@index([status])
@@ -392,22 +393,33 @@ model AlertEvent {
 // conversions / revenue는 매출 조인 시점에 채움.
 
 model StatDaily {
-  id          String     @id @default(cuid())
-  date        DateTime   @db.Date
-  level       StatLevel
-  refId       String // campaignId / adgroupId / keywordId (네이버 nccId 또는 내부 id 통일)
-  device      StatDevice
-  impressions Int        @default(0)
-  clicks      Int        @default(0)
-  cost        Decimal    @default(0) @db.Decimal(14, 2)
-  avgRnk      Decimal?   @db.Decimal(5, 2)
-  // 매출/전환 조인은 P2부터 채움
-  conversions Int?
-  revenue     Decimal?   @db.Decimal(14, 2)
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
+  id           String     @id @default(cuid())
+  // F-9.1: advertiserId 비정규화 — refId는 level별로 다른 엔티티(campaign/adgroup/keyword)의
+  // 내부 id이므로 광고주 격리 / 단일 필터 KPI / RLS 단순화 위해 직접 보존.
+  // 적재 시 refId의 owner advertiser를 resolve하여 함께 채운다 (NOT NULL).
+  advertiserId String
+  date         DateTime   @db.Date
+  level        StatLevel
+  refId        String // campaignId / adgroupId / keywordId (네이버 nccId 또는 내부 id 통일)
+  device       StatDevice
+  impressions  Int        @default(0)
+  clicks       Int        @default(0)
+  cost         Decimal    @default(0) @db.Decimal(14, 2)
+  avgRnk       Decimal?   @db.Decimal(5, 2)
+  // 매출/전환 조인은 P2 후속 (CRM·매출 시스템 연동 시점)에 채움
+  conversions  Int?
+  revenue      Decimal?   @db.Decimal(14, 2)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  advertiser Advertiser @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
 
   @@unique([date, level, refId, device])
+  // 광고주 + 기간 KPI 카드(F-7.1) / TOP-N 차트(F-7.2)
+  @@index([advertiserId, date])
+  // 광고주 + 레벨별 차트 (예: 광고주 N의 keyword level 30일 추이)
+  @@index([advertiserId, level, date])
+  // 적재 / 디버깅용 — 기존 인덱스 유지
   @@index([date, level, refId])
 }
 
