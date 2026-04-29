@@ -350,3 +350,17 @@ export const naverSaClient = {
 }
 
 export type NaverSaClient = typeof naverSaClient
+
+// =============================================================================
+// 테스트 전용 internal export
+// =============================================================================
+// 운영 코드에서는 절대 import 하지 말 것 (public surface 는 naverSaClient.request).
+// 단위 테스트(client.test.ts)에서 내부 헬퍼 회귀 가드 용도로만 사용.
+export const __test__ = {
+  sign,
+  backoffMs,
+  tryConsumeToken,
+  consumeToken,
+  hashParams,
+  bucketKey,
+}
