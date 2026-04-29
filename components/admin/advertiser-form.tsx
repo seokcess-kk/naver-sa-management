@@ -26,6 +26,7 @@ import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import {
   Card,
@@ -114,6 +115,24 @@ const editSchema = z.object({
   tags: z.string().max(200, "태그는 최대 200자입니다").optional(),
   memo: z.string().max(500, "메모는 최대 500자입니다").optional(),
   status: z.enum(["active", "paused", "archived"]),
+  // F-11.5 Guardrail — backend updateSchema 의 범위와 정확히 일치.
+  // number input 의 빈 문자열을 NaN 으로 두지 않도록 react-hook-form 의 valueAsNumber 사용.
+  guardrailEnabled: z.boolean(),
+  guardrailMaxBidChangePct: z
+    .number({ message: "1~100 사이의 정수를 입력하세요" })
+    .int("정수만 입력 가능합니다")
+    .min(1, "최소 1 이상")
+    .max(100, "최대 100"),
+  guardrailMaxChangesPerKeyword: z
+    .number({ message: "1~20 사이의 정수를 입력하세요" })
+    .int("정수만 입력 가능합니다")
+    .min(1, "최소 1 이상")
+    .max(20, "최대 20"),
+  guardrailMaxChangesPerDay: z
+    .number({ message: "1~1000 사이의 정수를 입력하세요" })
+    .int("정수만 입력 가능합니다")
+    .min(1, "최소 1 이상")
+    .max(1000, "최대 1000"),
 })
 
 type CreateValues = z.infer<typeof createSchema>
@@ -153,6 +172,11 @@ type EditMode = {
     memo?: string | null
     tags?: string[]
     status: "active" | "paused" | "archived"
+    // F-11.5 Guardrail (자동 비딩 폭주 방지) — 편집 모드에서만 노출.
+    guardrailEnabled: boolean
+    guardrailMaxBidChangePct: number
+    guardrailMaxChangesPerKeyword: number
+    guardrailMaxChangesPerDay: number
   }
 }
 
@@ -365,6 +389,11 @@ function EditForm({ id, defaultValues }: EditMode) {
       tags: (defaultValues.tags ?? []).join(", "),
       memo: defaultValues.memo ?? "",
       status: defaultValues.status,
+      // F-11.5 Guardrail — 기존 DB 값 prefill (신규는 DB default 가 채워둠)
+      guardrailEnabled: defaultValues.guardrailEnabled,
+      guardrailMaxBidChangePct: defaultValues.guardrailMaxBidChangePct,
+      guardrailMaxChangesPerKeyword: defaultValues.guardrailMaxChangesPerKeyword,
+      guardrailMaxChangesPerDay: defaultValues.guardrailMaxChangesPerDay,
     },
   })
 
@@ -384,6 +413,11 @@ function EditForm({ id, defaultValues }: EditMode) {
         manager: values.manager || undefined,
         memo: values.memo || undefined,
         status: values.status,
+        // F-11.5 Guardrail — Zod 가 정수·범위 검증 통과 후라 그대로 전달.
+        guardrailEnabled: values.guardrailEnabled,
+        guardrailMaxBidChangePct: values.guardrailMaxBidChangePct,
+        guardrailMaxChangesPerKeyword: values.guardrailMaxChangesPerKeyword,
+        guardrailMaxChangesPerDay: values.guardrailMaxChangesPerDay,
       }
       // 빈 시크릿은 backend 시그니처상 "변경 안 함" — 굳이 보내지 않음
       if (values.apiKey) payload.apiKey = values.apiKey
@@ -392,7 +426,7 @@ function EditForm({ id, defaultValues }: EditMode) {
 
       await updateAdvertiser(id, payload)
       toast.success("광고주 수정 완료")
-      // 시크릿 입력 필드 초기화 (두 번째 저장에서 재입력 강제)
+      // 시크릿 입력 필드 초기화 (두 번째 저장에서 재입력 강제) + Guardrail 값 유지
       form.reset({
         name: values.name,
         apiKey: "",
@@ -403,6 +437,10 @@ function EditForm({ id, defaultValues }: EditMode) {
         tags: values.tags ?? "",
         memo: values.memo ?? "",
         status: values.status,
+        guardrailEnabled: values.guardrailEnabled,
+        guardrailMaxBidChangePct: values.guardrailMaxBidChangePct,
+        guardrailMaxChangesPerKeyword: values.guardrailMaxChangesPerKeyword,
+        guardrailMaxChangesPerDay: values.guardrailMaxChangesPerDay,
       })
       router.refresh()
       setSubmitting(false)
@@ -525,6 +563,11 @@ function EditForm({ id, defaultValues }: EditMode) {
               )}
             />
           </Field>
+
+          {/* ============================================================ */}
+          {/* F-11.5 Guardrail (자동 비딩 폭주 방지) */}
+          {/* ============================================================ */}
+          <GuardrailSection control={form.control} errors={form.formState.errors} />
         </CardContent>
         <CardFooter className="justify-end gap-2">
           <Button
@@ -608,6 +651,154 @@ function MemoField({ registerProps, currentValue, error }: MemoFieldProps) {
           {len}/500
         </span>
       </div>
+    </div>
+  )
+}
+
+// =====================================================================
+// GuardrailSection — F-11.5 자동 비딩 Guardrail 4 입력 (편집 모드 전용)
+// =====================================================================
+//
+// 구성:
+//   1) 활성 토글 (Switch)            — guardrailEnabled (Boolean)
+//   2) 1회 변경 ±% (1..100, 기본 20)
+//   3) 키워드별 일 변경 횟수 (1..20, 기본 3)
+//   4) 광고주 일 총 변경 횟수 (1..1000, 기본 50)
+//
+// 비활성(enabled=false) 상태에서도 한도 입력은 그대로 노출 — 토글만 off 상태로 보존.
+// 한도 input 은 number — react-hook-form valueAsNumber: true 사용 (빈 입력 → NaN 으로
+// Zod 가 메시지 표시).
+
+type GuardrailSectionProps = {
+  control: ReturnType<typeof useForm<EditValues>>["control"]
+  errors: ReturnType<
+    typeof useForm<EditValues>
+  >["formState"]["errors"]
+}
+
+function GuardrailSection({ control, errors }: GuardrailSectionProps) {
+  return (
+    <div className="flex flex-col gap-4 rounded-md border border-border bg-muted/30 p-4">
+      <div className="flex flex-col gap-1">
+        <h3 className="font-heading text-sm font-medium">
+          자동 비딩 Guardrail (P2)
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          자동 비딩 cron 이 입찰가를 조정할 때 폭주를 방지하는 한도. 운영 사고
+          격리를 위해 보수적으로 설정하세요.
+        </p>
+      </div>
+
+      {/* 1) 활성 토글 */}
+      <Controller
+        control={control}
+        name="guardrailEnabled"
+        render={({ field }) => (
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex flex-col gap-1">
+              <Label htmlFor="guardrail-enabled">Guardrail 활성</Label>
+              <p className="text-xs text-muted-foreground">
+                꺼두면 자동 비딩이 한도 검사 없이 실행됩니다 (긴급 운영 시에만).
+              </p>
+            </div>
+            <Switch
+              id="guardrail-enabled"
+              checked={field.value}
+              onCheckedChange={(checked) => field.onChange(checked)}
+            />
+          </div>
+        )}
+      />
+
+      {/* 2) 1회 변경 ±% */}
+      <Field
+        label="1회 변경 ±%"
+        error={errors.guardrailMaxBidChangePct?.message}
+        hint="1회 자동 조정 시 입찰가 변동 한도 (기본 20%). 1~100"
+        required
+      >
+        <Controller
+          control={control}
+          name="guardrailMaxBidChangePct"
+          render={({ field }) => (
+            <Input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={100}
+              step={1}
+              className="w-32"
+              value={Number.isNaN(field.value) ? "" : field.value}
+              onChange={(e) => {
+                const v = e.target.value
+                field.onChange(v === "" ? Number.NaN : Number(v))
+              }}
+              onBlur={field.onBlur}
+              ref={field.ref}
+            />
+          )}
+        />
+      </Field>
+
+      {/* 3) 키워드별 일 변경 횟수 */}
+      <Field
+        label="키워드별 일 변경 횟수"
+        error={errors.guardrailMaxChangesPerKeyword?.message}
+        hint="한 키워드 1일 최대 N회 자동 조정 (기본 3회). 1~20"
+        required
+      >
+        <Controller
+          control={control}
+          name="guardrailMaxChangesPerKeyword"
+          render={({ field }) => (
+            <Input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={20}
+              step={1}
+              className="w-32"
+              value={Number.isNaN(field.value) ? "" : field.value}
+              onChange={(e) => {
+                const v = e.target.value
+                field.onChange(v === "" ? Number.NaN : Number(v))
+              }}
+              onBlur={field.onBlur}
+              ref={field.ref}
+            />
+          )}
+        />
+      </Field>
+
+      {/* 4) 광고주 일 총 변경 횟수 */}
+      <Field
+        label="광고주 일 총 변경 횟수"
+        error={errors.guardrailMaxChangesPerDay?.message}
+        hint="광고주 전체 1일 최대 N회 (기본 50회 — 폭주 방지). 1~1000"
+        required
+      >
+        <Controller
+          control={control}
+          name="guardrailMaxChangesPerDay"
+          render={({ field }) => (
+            <Input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={1000}
+              step={1}
+              className="w-32"
+              value={Number.isNaN(field.value) ? "" : field.value}
+              onChange={(e) => {
+                const v = e.target.value
+                field.onChange(v === "" ? Number.NaN : Number(v))
+              }}
+              onBlur={field.onBlur}
+              ref={field.ref}
+            />
+          )}
+        />
+      </Field>
     </div>
   )
 }

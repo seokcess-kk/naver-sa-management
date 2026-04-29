@@ -50,7 +50,6 @@ import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { scrubString } from "@/lib/crypto/scrub-string"
 import {
-  estimateAveragePositionBid,
   estimateExposureMinimumBid,
   estimatePerformanceBulk,
   type AveragePositionBidRow,
@@ -58,6 +57,7 @@ import {
   type PerformanceBulkRow,
 } from "@/lib/naver-sa/estimate"
 import { EstimateType, StatDevice } from "@/lib/generated/prisma/enums"
+import { getCachedAveragePositionBid } from "@/lib/auto-bidding/estimate-cached"
 
 // =============================================================================
 // 공통 타입 / 상수
@@ -242,8 +242,9 @@ async function upsertCacheEntry(args: {
 //   shape = AveragePositionBidRow[]  (5개 row 통째 저장)
 //
 // 부분 positions 요청은 본 PR 비대상 — UI 가 5개 모두 표시.
-
-const AVERAGE_POSITIONS = [1, 2, 3, 4, 5] as const
+//
+// F-11.2 cron 도 동일 캐시 사용 — read/upsert 로직은 lib/auto-bidding/estimate-cached.ts 로
+// 분리. 본 Server Action 은 권한 검사 / 광고주 횡단 차단만 담당하고 캐시 흐름은 위임.
 
 export async function getAveragePositionBid(
   input: GetAveragePositionBidInput,
@@ -276,43 +277,21 @@ export async function getAveragePositionBid(
       }
     }
 
-    // 4) 캐시 조회 (단일 entry — positions [1..5] 묶음)
-    const cached = await readCacheEntry({
+    // 4) 공용 캐시 헬퍼 — F-11.2 cron 과 동일 read/upsert 흐름
+    const { data, cachedAll } = await getCachedAveragePositionBid({
       advertiserId,
+      customerId: advertiser.customerId,
       keywordId,
+      keywordText: kw.keyword,
       device,
-      type: EstimateType.average_position,
-      position: 0,
-      bid: 0,
     })
 
-    if (cached !== null) {
-      return {
-        ok: true,
-        data: cached as AveragePositionBidRow[],
-        cachedAll: true,
-        cachedCount: 1,
-      }
+    return {
+      ok: true,
+      data,
+      cachedAll,
+      cachedCount: cachedAll ? 1 : 0,
     }
-
-    // 5) 캐시 miss — SA 호출 후 upsert
-    const rows = await estimateAveragePositionBid(advertiser.customerId, {
-      keyword: kw.keyword,
-      device,
-      positions: [...AVERAGE_POSITIONS],
-    })
-
-    await upsertCacheEntry({
-      advertiserId,
-      keywordId,
-      device,
-      type: EstimateType.average_position,
-      position: 0,
-      bid: 0,
-      result: rows,
-    })
-
-    return { ok: true, data: rows, cachedAll: false, cachedCount: 0 }
   } catch (e) {
     return { ok: false, error: safeErrorMessage(e) }
   }

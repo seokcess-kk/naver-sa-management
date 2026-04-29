@@ -61,6 +61,11 @@ export default async function AdvertiserDetailPage({
       updatedAt: true,
       apiKeyEnc: true,
       secretKeyEnc: true,
+      // F-11.5 Guardrail (편집 폼 prefill)
+      guardrailEnabled: true,
+      guardrailMaxBidChangePct: true,
+      guardrailMaxChangesPerKeyword: true,
+      guardrailMaxChangesPerDay: true,
     },
   })
 
@@ -80,6 +85,11 @@ export default async function AdvertiserDetailPage({
     updatedAt: row.updatedAt,
     hasApiKey: row.apiKeyEnc !== null,
     hasSecretKey: row.secretKeyEnc !== null,
+    // F-11.5 Guardrail
+    guardrailEnabled: row.guardrailEnabled,
+    guardrailMaxBidChangePct: row.guardrailMaxBidChangePct,
+    guardrailMaxChangesPerKeyword: row.guardrailMaxChangesPerKeyword,
+    guardrailMaxChangesPerDay: row.guardrailMaxChangesPerDay,
   }
   const hasKeys = advertiser.hasApiKey && advertiser.hasSecretKey
 
@@ -161,6 +171,11 @@ export default async function AdvertiserDetailPage({
           memo: advertiser.memo,
           tags: advertiser.tags,
           status: advertiser.status,
+          // F-11.5 Guardrail
+          guardrailEnabled: advertiser.guardrailEnabled,
+          guardrailMaxBidChangePct: advertiser.guardrailMaxBidChangePct,
+          guardrailMaxChangesPerKeyword: advertiser.guardrailMaxChangesPerKeyword,
+          guardrailMaxChangesPerDay: advertiser.guardrailMaxChangesPerDay,
         }}
       />
 

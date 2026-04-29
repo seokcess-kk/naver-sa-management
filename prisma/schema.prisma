@@ -174,32 +174,43 @@ model UserAdvertiserAccess {
 // 시크릿은 평문 컬럼 금지 — AES-256-GCM 암호화 + 키 버전 컬럼 쌍.
 
 model Advertiser {
-  id                  String           @id @default(cuid())
-  customerId          String           @unique // 네이버 광고주 customerId
-  name                String
-  bizNo               String?
-  category            String?
-  manager             String?
-  memo                String?          @db.VarChar(500) // 자유 메모 (선택, max 500자)
-  tags                String[]         @default([])
-  status              AdvertiserStatus @default(active)
+  id                            String           @id @default(cuid())
+  customerId                    String           @unique // 네이버 광고주 customerId
+  name                          String
+  bizNo                         String?
+  category                      String?
+  manager                       String?
+  memo                          String?          @db.VarChar(500) // 자유 메모 (선택, max 500자)
+  tags                          String[]         @default([])
+  status                        AdvertiserStatus @default(active)
   // 모델 2: 광고주별 API 키·시크릿. F-1.2(CSV 일괄 등록)는 메타만 등록하고
   // 시크릿은 별도 화면에서 입력 → enc 컬럼은 nullable.
   // 키가 null이면 SA API 호출 불가 (credentials.ts에서 "Credentials not set" throw).
   // 버전 컬럼은 default 1 유지 (enc 채워질 때 의미 발생).
-  apiKeyEnc           Bytes?
-  apiKeyVersion       Int              @default(1)
-  secretKeyEnc        Bytes?
-  secretKeyVersion    Int              @default(1)
+  apiKeyEnc                     Bytes?
+  apiKeyVersion                 Int              @default(1)
+  secretKeyEnc                  Bytes?
+  secretKeyVersion              Int              @default(1)
   // F-11.6 — 비딩 자동화 Kill Switch (광고주 단위).
   //   true 이면 본 광고주의 자동 비딩 / 룰 트리거 / OptimizationRun 신규 실행 모두 차단.
   //   토글 메타 (At / By) 는 감사 추적 — 누가 언제 정지·재개했는지 기록.
   //   전역 Kill Switch 는 본 PR 비포함 (admin 환경변수로 후속 검토).
-  biddingKillSwitch   Boolean          @default(false)
-  biddingKillSwitchAt DateTime?
-  biddingKillSwitchBy String? // 마지막 토글한 user.id (UserProfile.id)
-  createdAt           DateTime         @default(now())
-  updatedAt           DateTime         @updatedAt
+  biddingKillSwitch             Boolean          @default(false)
+  biddingKillSwitchAt           DateTime?
+  biddingKillSwitchBy           String? // 마지막 토글한 user.id (UserProfile.id)
+  // F-11.5 — Guardrail (자동 비딩 폭주 방지). 광고주 단위 + 키워드 단위 한도.
+  //   guardrailEnabled=false 이면 본 광고주의 가드레일 검사 자체를 스킵 (긴급 운영 시).
+  //   maxBidChangePct: 1회 자동 조정에서 입찰가 ±N% 초과 변경 차단 (1..100, 기본 20).
+  //   maxChangesPerKeyword: 키워드별 24h 내 OptimizationRun(result=success) 횟수 한도 (1..20, 기본 3).
+  //   maxChangesPerDay: 광고주별 24h 내 총 변경 횟수 한도 (1..1000, 기본 50).
+  //   범위 검증은 호출부 Zod (UpdateAdvertiserGuardrail) 에서 강제. DB 는 default 만 강제.
+  //   룰(BiddingPolicy) 단위 한도는 본 PR 비포함 — 운영 데이터 누적 후 재검토.
+  guardrailEnabled              Boolean          @default(true)
+  guardrailMaxBidChangePct      Int              @default(20)
+  guardrailMaxChangesPerKeyword Int              @default(3)
+  guardrailMaxChangesPerDay     Int              @default(50)
+  createdAt                     DateTime         @default(now())
+  updatedAt                     DateTime         @updatedAt
 
   campaigns        Campaign[]
   access           UserAdvertiserAccess[]

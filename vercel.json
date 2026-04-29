@@ -20,6 +20,10 @@
     {
       "path": "/api/cron/stat-cleanup",
       "schedule": "30 18 * * *"
+    },
+    {
+      "path": "/api/cron/auto-bidding",
+      "schedule": "10 * * * *"
     }
   ]
 }

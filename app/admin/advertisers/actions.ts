@@ -89,6 +89,15 @@ const registerSchema = z
     }
   })
 
+// F-11.5 Guardrail 범위 (db_guardrail.md 와 일치):
+//   - guardrailMaxBidChangePct       1..100  (1회 자동 조정 ±N%)
+//   - guardrailMaxChangesPerKeyword  1..20   (키워드별 24h 한도)
+//   - guardrailMaxChangesPerDay      1..1000 (광고주별 24h 한도)
+// DB 측 default 만 강제 — 호출부 Zod 가 운영 상한을 강제.
+const guardrailMaxBidChangePctSchema = z.number().int().min(1).max(100)
+const guardrailMaxChangesPerKeywordSchema = z.number().int().min(1).max(20)
+const guardrailMaxChangesPerDaySchema = z.number().int().min(1).max(1000)
+
 const updateSchema = z
   .object({
     name: nameSchema.optional(),
@@ -100,6 +109,11 @@ const updateSchema = z
     memo: memoSchema,
     tags: tagsSchema,
     status: statusSchema.optional(),
+    // F-11.5 Guardrail — 모두 optional. 미전달 시 변경 안 함.
+    guardrailEnabled: z.boolean().optional(),
+    guardrailMaxBidChangePct: guardrailMaxBidChangePctSchema.optional(),
+    guardrailMaxChangesPerKeyword: guardrailMaxChangesPerKeywordSchema.optional(),
+    guardrailMaxChangesPerDay: guardrailMaxChangesPerDaySchema.optional(),
   })
   .superRefine((val, ctx) => {
     // 시크릿 둘 다 함께 변경. 한쪽만 있으면 거부.
@@ -234,6 +248,11 @@ export async function updateAdvertiser(
     memo?: string
     tags?: string[]
     status?: AdvertiserStatus
+    // F-11.5 Guardrail (자동 비딩 폭주 방지)
+    guardrailEnabled?: boolean
+    guardrailMaxBidChangePct?: number // 1..100
+    guardrailMaxChangesPerKeyword?: number // 1..20
+    guardrailMaxChangesPerDay?: number // 1..1000
   },
 ): Promise<void> {
   const me = await assertRole("admin")
@@ -251,6 +270,10 @@ export async function updateAdvertiser(
       memo: true,
       tags: true,
       status: true,
+      guardrailEnabled: true,
+      guardrailMaxBidChangePct: true,
+      guardrailMaxChangesPerKeyword: true,
+      guardrailMaxChangesPerDay: true,
     },
   })
   if (!before) {
@@ -266,6 +289,15 @@ export async function updateAdvertiser(
   if (parsed.memo !== undefined) data.memo = parsed.memo || null
   if (parsed.tags !== undefined) data.tags = parsed.tags
   if (parsed.status !== undefined) data.status = parsed.status
+  // F-11.5 Guardrail
+  if (parsed.guardrailEnabled !== undefined)
+    data.guardrailEnabled = parsed.guardrailEnabled
+  if (parsed.guardrailMaxBidChangePct !== undefined)
+    data.guardrailMaxBidChangePct = parsed.guardrailMaxBidChangePct
+  if (parsed.guardrailMaxChangesPerKeyword !== undefined)
+    data.guardrailMaxChangesPerKeyword = parsed.guardrailMaxChangesPerKeyword
+  if (parsed.guardrailMaxChangesPerDay !== undefined)
+    data.guardrailMaxChangesPerDay = parsed.guardrailMaxChangesPerDay
 
   let apiKeyChanged = false
   let secretKeyChanged = false
@@ -303,6 +335,11 @@ export async function updateAdvertiser(
       memo: before.memo,
       tags: before.tags,
       status: before.status,
+      // F-11.5 Guardrail before
+      guardrailEnabled: before.guardrailEnabled,
+      guardrailMaxBidChangePct: before.guardrailMaxBidChangePct,
+      guardrailMaxChangesPerKeyword: before.guardrailMaxChangesPerKeyword,
+      guardrailMaxChangesPerDay: before.guardrailMaxChangesPerDay,
     },
     // 시크릿은 평문 절대 X. 변경 여부만 boolean 으로 기록.
     after: {
@@ -316,6 +353,15 @@ export async function updateAdvertiser(
       status: parsed.status ?? before.status,
       apiKeyChanged,
       secretKeyChanged,
+      // F-11.5 Guardrail after
+      guardrailEnabled:
+        parsed.guardrailEnabled ?? before.guardrailEnabled,
+      guardrailMaxBidChangePct:
+        parsed.guardrailMaxBidChangePct ?? before.guardrailMaxBidChangePct,
+      guardrailMaxChangesPerKeyword:
+        parsed.guardrailMaxChangesPerKeyword ?? before.guardrailMaxChangesPerKeyword,
+      guardrailMaxChangesPerDay:
+        parsed.guardrailMaxChangesPerDay ?? before.guardrailMaxChangesPerDay,
     },
   })
 
