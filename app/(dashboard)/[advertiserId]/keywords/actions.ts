@@ -1420,9 +1420,11 @@ export async function bulkActionKeywords(
 //      (사용자 선택: skip / UPDATE 전환 / 전체 중단)
 // UPDATE/OFF 멱등성: nccKeywordId 가 자연 식별자.
 //
-// 본 PR 1차 규모 제약:
-//   - **1000행 상한** — Vercel 함수 시간 가정. 초과 시 throw.
-//   - 5천 행 / 청크 분할은 후속 PR(`batch-executor-job` Job Table) 이관 TODO.
+// 본 PR 규모 제약 (F-3.4 5천행 전환):
+//   - **5000행 상한** — Job Table + Chunk Executor 패턴(SPEC v0.2.1 3.5).
+//   - applyCsvChangeBatch 는 ChangeBatch + ChangeItem(status='pending') 적재까지만 동기.
+//   - 실제 SA 호출 / DB 반영은 /api/batch/run Cron 이 처리 (lib/batch/apply.ts).
+//   - UI 는 GET /api/batch/{id} 로 진행률 polling.
 
 // -- 공용 타입 ---------------------------------------------------------------
 
@@ -1469,7 +1471,7 @@ export type ParseAndValidateResult = {
   unknownAdgroupIds: string[]
 }
 
-const CSV_MAX_ROWS = 1000
+const CSV_MAX_ROWS = 5000
 
 /** 빈 셀 / 미정의 → undefined. 문자열은 trim 후 빈 문자열도 undefined. */
 function normCell(v: unknown): string | undefined {
@@ -1544,7 +1546,7 @@ export async function parseAndValidateCsv(
 
   if (rawRows.length > CSV_MAX_ROWS) {
     throw new Error(
-      `1000행 초과 (${rawRows.length}행) — 후속 PR Job Table 패턴 도입 후 지원`,
+      `${CSV_MAX_ROWS}행 초과 (${rawRows.length}행) — 더 작은 단위로 분할해 업로드`,
     )
   }
 
@@ -1940,49 +1942,50 @@ export type CsvApplyDirective =
       resolution: "skip" | "update"
     }
 
+/**
+ * 비동기 Job Table 패턴 — applyCsvChangeBatch 는 ChangeBatch + ChangeItem(pending)
+ * 적재까지만 동기 처리하고 즉시 batchId 반환. 실제 SA 호출 / DB 반영은 Cron 이 처리.
+ *
+ * UI 는 GET /api/batch/{batchId} 로 진행률 polling.
+ *
+ * status:
+ *   - "queued" : ChangeBatch 적재 완료 (DB 상 ChangeBatch.status='pending')
+ *
+ * 후속 응답(polling)에서 success/failed/items 를 받음. 본 응답 시점에는 미정.
+ */
 export type ApplyCsvResult = {
   batchId: string
+  /** ChangeItem(pending) 적재 행 수. */
   total: number
-  success: number
-  failed: number
+  /** 즉시 반환 시점에는 항상 'queued'. Cron 이 처리하면서 done/failed 로 전이. */
+  status: "queued"
   byOperation: {
-    CREATE: { ok: number; failed: number }
-    UPDATE: { ok: number; failed: number }
-    OFF: { ok: number; failed: number }
+    CREATE: number
+    UPDATE: number
+    OFF: number
   }
-  items: Array<{
-    rowIndex: number
-    ok: boolean
-    error?: string
-    nccKeywordId?: string
-  }>
 }
 
 /**
- * 사용자 확정 후 CSV 적용. ChangeBatch 생성 + operation 별 청크 처리 + DB 반영.
+ * 사용자 확정 후 CSV 적재. ChangeBatch + ChangeItem 생성 → 즉시 batchId 반환.
  *
  *   1. getCurrentAdvertiser — 권한 + advertiser. hasKeys=false throw
- *   2. directives 1000행 상한 검증
+ *   2. directives 5000행 상한 검증
  *   3. directives → 효과 행 변환:
  *      - kind:"valid": 그대로
  *      - kind:"conflict" + skip: 제외
  *      - kind:"conflict" + update: operation=UPDATE 강제, row.nccKeywordId 사용 (클라이언트 책임)
  *   4. 광고주 한정 사전 조회 재검증 (시간차 외부 변경 보호)
- *   5. ChangeBatch (status='running', action='keyword.csv') 생성
- *   6. ChangeItem createMany — operation 별 targetType/targetId/idempotencyKey 설정
- *   7. operation 별 그룹화 + 청크 처리:
- *      - CREATE: nccAdgroupId 별 그룹화 → createKeywords 호출. 응답 nccKeywordId 로 ChangeItem.targetId 갱신 + DB upsert
- *      - UPDATE: 행별 patch 합집합 → updateKeywordsBulk 1회. 행별 patch 필드만 DB update
- *      - OFF:    items=[{nccKeywordId, userLock:true}], fields="userLock". DB userLock=true + status 재계산
- *   8. ChangeItem 결과 매핑 ('done' / 'failed')
- *   9. ChangeBatch finalize (success>0 → done, 0 → failed)
- *  10. AuditLog 1건 — keyword.csv, summary={advertiserId, total, success, failed, byOperation}
- *  11. revalidatePath
+ *   5. ChangeBatch (status='pending', action='keyword.csv') 생성 — Cron 이 lease 획득
+ *   6. ChangeItem.createMany(status='pending') — Cron 이 status 정렬 픽업
+ *      after JSON 에 Cron 이 SA 호출에 필요한 모든 필드 포함 (operation/customerId/...)
+ *   7. AuditLog 1건 (적재 시점) — Cron 처리 결과는 별도 로깅 (현 PR 비대상)
+ *   8. revalidatePath — 적재 결과를 사용자가 즉시 볼 수 있게 (Cron 이 처리하면 후속 polling)
  *
- * 청크 분할 정책:
- *   - CREATE 는 광고그룹 단위 자연스러운 청크
- *   - UPDATE/OFF 는 단일 PUT (1000행 가정 — 1차 PR)
- *   - 5천 행 분할은 후속 PR `batch-executor-job` Job Table 패턴 이관 TODO
+ * 안전장치:
+ *   - SA 호출 X (Cron 이 처리)
+ *   - idempotencyKey unique([batchId, idem]) — 재시도 시 중복 적용 차단
+ *   - ChangeItem.after 에 customerId 만 (시크릿 키 평문 X)
  */
 export async function applyCsvChangeBatch(
   advertiserId: string,
@@ -1998,7 +2001,7 @@ export async function applyCsvChangeBatch(
   }
   if (directives.length > CSV_MAX_ROWS) {
     throw new Error(
-      `1000행 초과 (${directives.length}행) — 후속 PR Job Table 패턴 도입 후 지원`,
+      `${CSV_MAX_ROWS}행 초과 (${directives.length}행) — 더 작은 단위로 분할해 업로드`,
     )
   }
 
@@ -2025,7 +2028,7 @@ export async function applyCsvChangeBatch(
   }
   if (effRows.length > CSV_MAX_ROWS) {
     throw new Error(
-      `1000행 초과 (${effRows.length}행) — 후속 PR Job Table 패턴 도입 후 지원`,
+      `${CSV_MAX_ROWS}행 초과 (${effRows.length}행) — 더 작은 단위로 분할해 업로드`,
     )
   }
 
@@ -2094,7 +2097,14 @@ export async function applyCsvChangeBatch(
     }
   }
 
-  // -- 3. ChangeBatch + ChangeItem 생성 ---------------------------------
+  // -- 3. ChangeBatch + ChangeItem 생성 (status='pending') --------------
+  // SPEC v0.2.1 3.5 (Job Table + Chunk Executor):
+  //   - ChangeBatch.status='pending' → /api/batch/run Cron 이 lease 획득 → 처리.
+  //   - ChangeItem.after 에 Cron 이 SA 호출에 필요한 모든 필드 포함:
+  //       CREATE: operation/customerId/nccAdgroupId/keyword/matchType/bidAmt/useGroupBidAmt/userLock/externalId
+  //       UPDATE: operation/customerId/nccKeywordId/fields/patch
+  //       OFF:    operation/customerId/nccKeywordId
+  //   - customerId 만 포함 (시크릿 키 평문 X — credentials.ts 가 customerId → enc 룩업)
   const total = effRows.length
   const action = "keyword.csv"
 
@@ -2113,16 +2123,14 @@ export async function applyCsvChangeBatch(
     data: {
       userId: user.id,
       action,
-      status: "running",
+      status: "pending", // ← Cron 이 lease 획득 (SPEC 3.5)
       total,
       processed: 0,
-      attempt: 1,
+      attempt: 0,
       summary: batchSummary as Prisma.InputJsonValue,
     },
   })
 
-  // ChangeItem.idempotencyKey unique([batchId, idempotencyKey]).
-  // CREATE 는 externalId 기반, UPDATE/OFF 는 nccKeywordId 기반.
   type ItemSeed = {
     batchId: string
     targetType: string
@@ -2147,6 +2155,7 @@ export async function applyCsvChangeBatch(
       before: {} as Prisma.InputJsonValue,
       after: {
         operation: "CREATE",
+        customerId: advertiser.customerId,
         nccAdgroupId: r.nccAdgroupId,
         keyword: r.keyword,
         matchType: r.matchType,
@@ -2154,6 +2163,7 @@ export async function applyCsvChangeBatch(
         useGroupBidAmt: r.useGroupBidAmt ?? null,
         userLock: r.userLock ?? null,
         externalId: r.externalId,
+        rowIndex: r.rowIndex,
       } as Prisma.InputJsonValue,
       idempotencyKey: `${batch.id}:create:${r.externalId}`,
       status: "pending",
@@ -2163,25 +2173,36 @@ export async function applyCsvChangeBatch(
   for (const r of updateRows) {
     const k = validKeywordByNcc.get(r.nccKeywordId!)!
     const beforeObj: Record<string, unknown> = {}
-    const afterObj: Record<string, unknown> = {}
+    const patchObj: Record<string, unknown> = {}
+    const fieldsArr: string[] = []
     if (r.bidAmt !== undefined && r.bidAmt !== null) {
       beforeObj.bidAmt = k.bidAmt === null ? null : Number(k.bidAmt)
-      afterObj.bidAmt = r.bidAmt
+      patchObj.bidAmt = r.bidAmt
+      fieldsArr.push("bidAmt")
     }
     if (r.useGroupBidAmt !== undefined && r.useGroupBidAmt !== null) {
       beforeObj.useGroupBidAmt = k.useGroupBidAmt
-      afterObj.useGroupBidAmt = r.useGroupBidAmt
+      patchObj.useGroupBidAmt = r.useGroupBidAmt
+      fieldsArr.push("useGroupBidAmt")
     }
     if (r.userLock !== undefined && r.userLock !== null) {
       beforeObj.userLock = k.userLock
-      afterObj.userLock = r.userLock
+      patchObj.userLock = r.userLock
+      fieldsArr.push("userLock")
     }
     seeds.push({
       batchId: batch.id,
       targetType: "Keyword",
       targetId: r.nccKeywordId!,
       before: beforeObj as Prisma.InputJsonValue,
-      after: afterObj as Prisma.InputJsonValue,
+      after: {
+        operation: "UPDATE",
+        customerId: advertiser.customerId,
+        nccKeywordId: r.nccKeywordId,
+        fields: fieldsArr.join(","),
+        patch: patchObj,
+        rowIndex: r.rowIndex,
+      } as Prisma.InputJsonValue,
       idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
       status: "pending",
     })
@@ -2189,15 +2210,20 @@ export async function applyCsvChangeBatch(
 
   for (const r of offRows) {
     const k = validKeywordByNcc.get(r.nccKeywordId!)!
-    // 자기 멱등성: 이미 userLock=true 인 row 를 다시 OFF 로 적용해도 before=after 로
-    // ChangeItem 기록됨. 사용자 의도 자체는 명확 (OFF 로 만들기) 하므로 error 아님.
-    // F-6.4 롤백 도입 시: before === after 행은 효과 없는 변경으로 무시 처리 필요 (TODO).
+    // 자기 멱등성: 이미 userLock=true 행을 다시 OFF 로 적용해도 before=after 로
+    // ChangeItem 기록. F-6.4 롤백 도입 시 before === after 행 무시 처리 필요 (TODO).
     seeds.push({
       batchId: batch.id,
       targetType: "Keyword",
       targetId: r.nccKeywordId!,
       before: { userLock: k.userLock } as Prisma.InputJsonValue,
-      after: { userLock: true } as Prisma.InputJsonValue,
+      after: {
+        operation: "OFF",
+        customerId: advertiser.customerId,
+        nccKeywordId: r.nccKeywordId,
+        userLock: true,
+        rowIndex: r.rowIndex,
+      } as Prisma.InputJsonValue,
       idempotencyKey: `${batch.id}:off:${r.nccKeywordId}`,
       status: "pending",
     })
@@ -2205,440 +2231,12 @@ export async function applyCsvChangeBatch(
 
   await prisma.changeItem.createMany({ data: seeds })
 
-  // -- 4. operation 별 SA 호출 + DB 반영 -------------------------------
-  const results: ApplyCsvResult["items"] = []
-  let successTotal = 0
-  let failedTotal = 0
-  const byOperation: ApplyCsvResult["byOperation"] = {
-    CREATE: { ok: 0, failed: 0 },
-    UPDATE: { ok: 0, failed: 0 },
-    OFF: { ok: 0, failed: 0 },
-  }
+  // -- 4. SA 호출 / DB 반영 / finalize ---------------------------------
+  // 동기 처리 X — Cron(/api/batch/run)이 lease 획득 후 lib/batch/apply.ts 의
+  // applyChange 로 행별 처리. 결과 status 는 ChangeBatch.status / ChangeItem.status
+  // 로 적재되며 UI 는 GET /api/batch/{batchId} polling 으로 받음.
 
-  // 4-1. CREATE — 광고그룹 단위 그룹화 → createKeywords
-  // 광고그룹별 호출 단위로 부분 실패 허용 (다른 광고그룹은 계속).
-  if (createRows.length > 0) {
-    const byAdgroup = new Map<string, CsvRow[]>()
-    for (const r of createRows) {
-      const list = byAdgroup.get(r.nccAdgroupId!) ?? []
-      list.push(r)
-      byAdgroup.set(r.nccAdgroupId!, list)
-    }
-
-    for (const [nccAdgroupId, rows] of byAdgroup) {
-      const dbAdgroupId = validAdgroupNccToInternal.get(nccAdgroupId)!
-      const items: KeywordCreateItem[] = rows.map((r) => ({
-        keyword: r.keyword!,
-        bidAmt: r.bidAmt ?? null,
-        useGroupBidAmt:
-          r.useGroupBidAmt === null
-            ? undefined
-            : r.useGroupBidAmt ?? undefined,
-        userLock: r.userLock === null ? undefined : r.userLock ?? undefined,
-        externalId: r.externalId,
-      }))
-
-      try {
-        const created = await createKeywords(
-          advertiser.customerId,
-          nccAdgroupId,
-          items,
-        )
-
-        // 응답 매핑 — 네이버 SA bulk create 는 입력 순서와 1:1 대응이 일반 패턴.
-        // 1차: 응답 길이 == 입력 길이 → 인덱스 기반 매핑 (가장 정확).
-        // 2차(길이 불일치): (keyword, matchType) 정확 매칭만 시도. matchType 누락 응답에는
-        //   false-positive 매핑 위험으로 fallback 키 사용 안 함 (같은 keyword 다른 matchType
-        //   두 행이 동시에 CREATE 되는 경우 잘못된 행에 매핑되는 것을 차단).
-        const indexMatch = created.length === items.length
-        const respByExactKey = new Map<string, SaKeyword>()
-        if (!indexMatch) {
-          for (const k of created) {
-            const anyK = k as unknown as { matchType?: string }
-            const mt =
-              typeof anyK.matchType === "string" && anyK.matchType.length > 0
-                ? anyK.matchType.toUpperCase()
-                : ""
-            // 정확 (keyword, matchType) 매칭만 — matchType 누락 응답은 매칭 불가로 처리
-            if (mt) respByExactKey.set(`${k.keyword}::${mt}`, k)
-          }
-        }
-
-        for (let idx = 0; idx < rows.length; idx++) {
-          const r = rows[idx]
-          let u: SaKeyword | undefined
-          if (indexMatch) {
-            u = created[idx]
-          } else {
-            const respKey = `${r.keyword}::${r.matchType ?? ""}`
-            u = respByExactKey.get(respKey)
-          }
-
-          if (u) {
-            // ChangeItem.targetId 갱신 (pending → 실제 nccKeywordId)
-            await prisma.changeItem.updateMany({
-              where: {
-                batchId: batch.id,
-                idempotencyKey: `${batch.id}:create:${r.externalId}`,
-              },
-              data: { targetId: u.nccKeywordId, status: "done" },
-            })
-
-            // DB upsert (nccKeywordId unique).
-            // matchType 응답에 없으면 CSV row 의 matchType 사용 (passthrough 가정).
-            const anyU = u as unknown as { matchType?: string }
-            const mtFromResp =
-              typeof anyU.matchType === "string" && anyU.matchType.length > 0
-                ? anyU.matchType.toUpperCase()
-                : r.matchType ?? null
-
-            const userLockResp =
-              typeof u.userLock === "boolean"
-                ? u.userLock
-                : r.userLock ?? false
-            const useGroupBidResp =
-              typeof u.useGroupBidAmt === "boolean"
-                ? u.useGroupBidAmt
-                : r.useGroupBidAmt ?? true
-            const bidAmtResp =
-              typeof u.bidAmt === "number" ? u.bidAmt : r.bidAmt ?? null
-
-            const rawJson = u as unknown as Prisma.InputJsonValue
-
-            await prisma.keyword.upsert({
-              where: { nccKeywordId: u.nccKeywordId },
-              create: {
-                adgroupId: dbAdgroupId,
-                nccKeywordId: u.nccKeywordId,
-                keyword: u.keyword,
-                matchType: mtFromResp,
-                bidAmt: bidAmtResp,
-                useGroupBidAmt: useGroupBidResp,
-                userLock: userLockResp,
-                externalId: r.externalId ?? null,
-                status: mapKeywordStatus(u),
-                inspectStatus: mapInspectStatus(u),
-                raw: rawJson,
-              },
-              update: {
-                adgroupId: dbAdgroupId,
-                keyword: u.keyword,
-                matchType: mtFromResp ?? undefined,
-                bidAmt: bidAmtResp,
-                useGroupBidAmt: useGroupBidResp,
-                userLock: userLockResp,
-                externalId: r.externalId ?? null,
-                status: mapKeywordStatus(u),
-                inspectStatus: mapInspectStatus(u),
-                raw: rawJson,
-              },
-            })
-
-            results.push({
-              rowIndex: r.rowIndex,
-              ok: true,
-              nccKeywordId: u.nccKeywordId,
-            })
-            successTotal++
-            byOperation.CREATE.ok++
-          } else {
-            const errMsg = indexMatch
-              ? "응답에 누락"
-              : `응답 매핑 실패 (응답 길이=${created.length}, 입력=${items.length})`
-            await prisma.changeItem.updateMany({
-              where: {
-                batchId: batch.id,
-                idempotencyKey: `${batch.id}:create:${r.externalId}`,
-              },
-              data: { status: "failed", error: errMsg },
-            })
-            results.push({
-              rowIndex: r.rowIndex,
-              ok: false,
-              error: errMsg,
-            })
-            failedTotal++
-            byOperation.CREATE.failed++
-          }
-        }
-      } catch (e) {
-        // 광고그룹 단위 실패 — 해당 그룹 행만 failed (다른 광고그룹은 계속)
-        const msg = e instanceof Error ? e.message : String(e)
-        const safeMsg = msg.slice(0, 500)
-        for (const r of rows) {
-          await prisma.changeItem.updateMany({
-            where: {
-              batchId: batch.id,
-              idempotencyKey: `${batch.id}:create:${r.externalId}`,
-            },
-            data: { status: "failed", error: safeMsg },
-          })
-          results.push({
-            rowIndex: r.rowIndex,
-            ok: false,
-            error: safeMsg,
-          })
-          failedTotal++
-          byOperation.CREATE.failed++
-        }
-      }
-    }
-  }
-
-  // 4-2. UPDATE — 행별 patch 합집합 → updateKeywordsBulk 1회
-  if (updateRows.length > 0) {
-    const itemsForApi: KeywordBulkUpdateItem[] = []
-    const fieldUnion = new Set<"bidAmt" | "useGroupBidAmt" | "userLock">()
-    const patchByNcc = new Map<
-      string,
-      { bidAmt?: number | null; useGroupBidAmt?: boolean; userLock?: boolean }
-    >()
-
-    for (const r of updateRows) {
-      const item: KeywordBulkUpdateItem = { nccKeywordId: r.nccKeywordId! }
-      const patch: {
-        bidAmt?: number | null
-        useGroupBidAmt?: boolean
-        userLock?: boolean
-      } = {}
-      if (r.bidAmt !== undefined && r.bidAmt !== null) {
-        item.bidAmt = r.bidAmt
-        patch.bidAmt = r.bidAmt
-        fieldUnion.add("bidAmt")
-      }
-      if (r.useGroupBidAmt !== undefined && r.useGroupBidAmt !== null) {
-        item.useGroupBidAmt = r.useGroupBidAmt
-        patch.useGroupBidAmt = r.useGroupBidAmt
-        fieldUnion.add("useGroupBidAmt")
-      }
-      if (r.userLock !== undefined && r.userLock !== null) {
-        item.userLock = r.userLock
-        patch.userLock = r.userLock
-        fieldUnion.add("userLock")
-      }
-      // 모든 patch 가 빈 행 — UPDATE 인데 변경 필드 없음 → failed 처리
-      if (Object.keys(patch).length === 0) {
-        await prisma.changeItem.updateMany({
-          where: {
-            batchId: batch.id,
-            idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
-          },
-          data: { status: "failed", error: "변경 필드 없음" },
-        })
-        results.push({
-          rowIndex: r.rowIndex,
-          ok: false,
-          error: "변경 필드 없음",
-          nccKeywordId: r.nccKeywordId,
-        })
-        failedTotal++
-        byOperation.UPDATE.failed++
-        continue
-      }
-      itemsForApi.push(item)
-      patchByNcc.set(r.nccKeywordId!, patch)
-    }
-
-    if (itemsForApi.length > 0) {
-      const fields = Array.from(fieldUnion).join(",")
-      try {
-        const updated = await updateKeywordsBulk(
-          advertiser.customerId,
-          itemsForApi,
-          fields,
-        )
-        const updatedMap = new Map(updated.map((k) => [k.nccKeywordId, k]))
-
-        for (const r of updateRows) {
-          if (!patchByNcc.has(r.nccKeywordId!)) continue // 위에서 failed 처리됨
-          const u = updatedMap.get(r.nccKeywordId!)
-          const k = validKeywordByNcc.get(r.nccKeywordId!)!
-          const patch = patchByNcc.get(r.nccKeywordId!)!
-
-          if (u) {
-            const updateData: {
-              bidAmt?: number | null
-              useGroupBidAmt?: boolean
-              userLock?: boolean
-              status?: KeywordStatus
-              raw: Prisma.InputJsonValue
-            } = {
-              raw: u as unknown as Prisma.InputJsonValue,
-            }
-            if (patch.bidAmt !== undefined) {
-              updateData.bidAmt =
-                typeof u.bidAmt === "number" ? u.bidAmt : patch.bidAmt
-            }
-            if (patch.useGroupBidAmt !== undefined) {
-              updateData.useGroupBidAmt =
-                typeof u.useGroupBidAmt === "boolean"
-                  ? u.useGroupBidAmt
-                  : patch.useGroupBidAmt
-            }
-            if (patch.userLock !== undefined) {
-              updateData.userLock =
-                typeof u.userLock === "boolean" ? u.userLock : patch.userLock
-              updateData.status = mapKeywordStatus(u)
-            }
-
-            await prisma.keyword.update({
-              where: { id: k.id },
-              data: updateData,
-            })
-            await prisma.changeItem.updateMany({
-              where: {
-                batchId: batch.id,
-                idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
-              },
-              data: { status: "done" },
-            })
-            results.push({
-              rowIndex: r.rowIndex,
-              ok: true,
-              nccKeywordId: r.nccKeywordId,
-            })
-            successTotal++
-            byOperation.UPDATE.ok++
-          } else {
-            await prisma.changeItem.updateMany({
-              where: {
-                batchId: batch.id,
-                idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
-              },
-              data: { status: "failed", error: "응답에 누락" },
-            })
-            results.push({
-              rowIndex: r.rowIndex,
-              ok: false,
-              error: "응답에 누락",
-              nccKeywordId: r.nccKeywordId,
-            })
-            failedTotal++
-            byOperation.UPDATE.failed++
-          }
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        const safeMsg = msg.slice(0, 500)
-        // 일괄 실패 — itemsForApi 대상 모두 failed
-        for (const r of updateRows) {
-          if (!patchByNcc.has(r.nccKeywordId!)) continue
-          await prisma.changeItem.updateMany({
-            where: {
-              batchId: batch.id,
-              idempotencyKey: `${batch.id}:update:${r.nccKeywordId}`,
-            },
-            data: { status: "failed", error: safeMsg },
-          })
-          results.push({
-            rowIndex: r.rowIndex,
-            ok: false,
-            error: safeMsg,
-            nccKeywordId: r.nccKeywordId,
-          })
-          failedTotal++
-          byOperation.UPDATE.failed++
-        }
-      }
-    }
-  }
-
-  // 4-3. OFF — userLock=true 일괄 적용
-  if (offRows.length > 0) {
-    const itemsForApi: KeywordBulkUpdateItem[] = offRows.map((r) => ({
-      nccKeywordId: r.nccKeywordId!,
-      userLock: true,
-    }))
-
-    try {
-      const updated = await updateKeywordsBulk(
-        advertiser.customerId,
-        itemsForApi,
-        "userLock",
-      )
-      const updatedMap = new Map(updated.map((k) => [k.nccKeywordId, k]))
-
-      for (const r of offRows) {
-        const u = updatedMap.get(r.nccKeywordId!)
-        const k = validKeywordByNcc.get(r.nccKeywordId!)!
-
-        if (u) {
-          const newLock = typeof u.userLock === "boolean" ? u.userLock : true
-          await prisma.keyword.update({
-            where: { id: k.id },
-            data: {
-              userLock: newLock,
-              status: mapKeywordStatus(u),
-              raw: u as unknown as Prisma.InputJsonValue,
-            },
-          })
-          await prisma.changeItem.updateMany({
-            where: {
-              batchId: batch.id,
-              idempotencyKey: `${batch.id}:off:${r.nccKeywordId}`,
-            },
-            data: { status: "done" },
-          })
-          results.push({
-            rowIndex: r.rowIndex,
-            ok: true,
-            nccKeywordId: r.nccKeywordId,
-          })
-          successTotal++
-          byOperation.OFF.ok++
-        } else {
-          await prisma.changeItem.updateMany({
-            where: {
-              batchId: batch.id,
-              idempotencyKey: `${batch.id}:off:${r.nccKeywordId}`,
-            },
-            data: { status: "failed", error: "응답에 누락" },
-          })
-          results.push({
-            rowIndex: r.rowIndex,
-            ok: false,
-            error: "응답에 누락",
-            nccKeywordId: r.nccKeywordId,
-          })
-          failedTotal++
-          byOperation.OFF.failed++
-        }
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      const safeMsg = msg.slice(0, 500)
-      for (const r of offRows) {
-        await prisma.changeItem.updateMany({
-          where: {
-            batchId: batch.id,
-            idempotencyKey: `${batch.id}:off:${r.nccKeywordId}`,
-          },
-          data: { status: "failed", error: safeMsg },
-        })
-        results.push({
-          rowIndex: r.rowIndex,
-          ok: false,
-          error: safeMsg,
-          nccKeywordId: r.nccKeywordId,
-        })
-        failedTotal++
-        byOperation.OFF.failed++
-      }
-    }
-  }
-
-  // -- 5. ChangeBatch finalize -----------------------------------------
-  const finalStatus: "done" | "failed" = successTotal === 0 ? "failed" : "done"
-  await prisma.changeBatch.update({
-    where: { id: batch.id },
-    data: {
-      status: finalStatus,
-      processed: total,
-      finishedAt: new Date(),
-    },
-  })
-
-  // -- 6. AuditLog 1건 (시크릿 X) --------------------------------------
+  // -- 5. AuditLog (적재 시점) -----------------------------------------
   await logAudit({
     userId: user.id,
     action,
@@ -2649,26 +2247,21 @@ export async function applyCsvChangeBatch(
       batchId: batch.id,
       advertiserId,
       total,
-      success: successTotal,
-      failed: failedTotal,
-      byOperation,
+      status: "queued",
+      byOperation: batchSummary.byOperation,
     },
   })
 
   revalidatePath(`/${advertiserId}/keywords`)
 
-  // rowIndex 오름차순 정렬 (UI 결과 표시 친화)
-  results.sort((a, b) => a.rowIndex - b.rowIndex)
-
   return {
     batchId: batch.id,
     total,
-    success: successTotal,
-    failed: failedTotal,
-    byOperation,
-    items: results,
+    status: "queued",
+    byOperation: batchSummary.byOperation,
   }
 }
+
 
 // =============================================================================
 // 5. createKeywordsBatch — 키워드 추가 (단건·다건) (F-3.6)

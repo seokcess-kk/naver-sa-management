@@ -1,7 +1,7 @@
 "use client"
 
 /**
- * 키워드 CSV 가져오기 모달 (F-3.4)
+ * 키워드 CSV 가져오기 모달 (F-3.4 / 5천행 Job Table 패턴)
  *
  * 5단계 상태 머신:
  *   1. upload     — 파일 선택(input + drag&drop) + 형식 안내. 5MB / .csv .txt
@@ -9,8 +9,9 @@
  *   2. validating — 검증 중 스피너. throw 발생 시 upload 복귀 + toast.error
  *   3. review     — parseAndValidateCsv 결과 표시. 3 탭(정상 / 오류 / 충돌).
  *                   충돌 행 resolution 선택, 오류는 안내만(차단 X). 확정 → applying
- *   4. applying   — applyCsvChangeBatch 호출 진행 중. 완료 시 result
- *   5. result     — 카운트 카드 / byOperation 표 / ChangeBatch ID / 실패 리스트
+ *   4. applying   — applyCsvChangeBatch 호출 (즉시 batchId 반환) + GET /api/batch/{id}
+ *                   5초 간격 polling. ChangeBatch.status === 'done' / 'failed' 면 result.
+ *   5. result     — 카운트 카드 / 진행률 / ChangeBatch ID
  *                   "닫고 새로고침" → onClosed(true) → router.refresh
  *
  * 안전장치:
@@ -18,13 +19,13 @@
  *   - 오류 행은 적용 대상 미포함 (확정 시 자동 제외)
  *   - 충돌 행은 사용자 결정 필수 (skip / UPDATE 전환). 미선택 시 disabled
  *   - hasKeys=false 시 호출자 측에서 모달 진입 차단 (본 컴포넌트는 가정)
+ *   - polling 중 모달 닫기 → polling 취소 (cleanup)
  *
  * 비대상:
  *   - F-3.5 CSV 다운로드
- *   - 진행률 polling (5천 행은 후속 PR Job Table 패턴)
  *   - 키워드 추가/삭제 별도 액션
  *
- * SPEC 6.2 F-3.4 / 11장.
+ * SPEC v0.2.1 6.2 F-3.4 / 11장 / 3.5 (Job Table + Chunk Executor).
  */
 
 import * as React from "react"
@@ -70,6 +71,23 @@ type ErrorItem = Extract<CsvValidationItem, { kind: "error" }>
 type ValidItem = Extract<CsvValidationItem, { kind: "valid" }>
 type WarningItem = Extract<CsvValidationItem, { kind: "warning" }>
 
+/** GET /api/batch/{id} 응답 shape (lib/api/batch/[id]/route.ts 와 동일). */
+type BatchProgress = {
+  batch: {
+    id: string
+    action: string
+    status: string // "pending" | "running" | "done" | "failed" | "canceled"
+    total: number
+    processed: number
+    attempt: number
+    createdAt: string
+    finishedAt: string | null
+  }
+  counts: Record<string, number> // pending / done / failed / running / skipped
+}
+
+const POLL_INTERVAL_MS = 5000
+
 // =============================================================================
 // 메인 컴포넌트
 // =============================================================================
@@ -94,7 +112,10 @@ export function KeywordsCsvImportModal({
     Map<number, ConflictResolution>
   >(new Map())
   const [applying, setApplying] = React.useState(false)
-  const [result, setResult] = React.useState<ApplyCsvResult | null>(null)
+  /** 즉시 반환 받은 batchId + total + byOperation. polling 시작 시 채워짐. */
+  const [submitted, setSubmitted] = React.useState<ApplyCsvResult | null>(null)
+  /** 마지막 polling 결과 — applying / result 단계에서 진행률 표시용. */
+  const [progress, setProgress] = React.useState<BatchProgress | null>(null)
   const [activeTab, setActiveTab] = React.useState<string>("valid")
 
   // 모달 close 시 호출자에게 적용 여부 통보
@@ -194,18 +215,68 @@ export function KeywordsCsvImportModal({
 
     setApplying(true)
     setStep("applying")
+    setProgress(null)
     try {
+      // 즉시 반환 — ChangeBatch 적재만 동기. SA 호출은 Cron 이 처리.
       const r = await applyCsvChangeBatch(advertiserId, directives)
-      setResult(r)
-      setStep("result")
+      setSubmitted(r)
+      // polling 시작은 useEffect 가 step==='applying' && submitted!=null 감지로 트리거.
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       toast.error(`적용 실패: ${msg}`)
       setStep("review")
+      setSubmitted(null)
     } finally {
       setApplying(false)
     }
   }
+
+  // -- polling effect (applying → result 전이) ----------------------------
+  React.useEffect(() => {
+    if (step !== "applying" || !submitted) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    async function poll() {
+      if (cancelled || !submitted) return
+      try {
+        const res = await fetch(`/api/batch/${submitted.batchId}`, {
+          credentials: "include",
+          cache: "no-store",
+        })
+        if (!res.ok) {
+          // 인증 만료 등 — toast 후 review 복귀
+          throw new Error(`HTTP ${res.status}`)
+        }
+        const data = (await res.json()) as BatchProgress
+        if (cancelled) return
+        setProgress(data)
+
+        const status = data.batch.status
+        if (status === "done" || status === "failed" || status === "canceled") {
+          // 종료 — result 단계로
+          setStep("result")
+          return
+        }
+        // 진행 중 — 다음 polling 예약
+        timer = setTimeout(poll, POLL_INTERVAL_MS)
+      } catch (e) {
+        if (cancelled) return
+        const msg = e instanceof Error ? e.message : String(e)
+        toast.error(`진행률 조회 실패: ${msg}`)
+        // 일시 오류 — polling 재시도 (사용자가 수동 닫지 않는 한 계속)
+        timer = setTimeout(poll, POLL_INTERVAL_MS)
+      }
+    }
+
+    // 첫 호출은 짧은 지연 (백엔드 적재 직후 race condition 회피)
+    timer = setTimeout(poll, 500)
+
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [step, submitted])
 
   // -- 화면 분기 -----------------------------------------------------------
   return (
@@ -257,12 +328,12 @@ export function KeywordsCsvImportModal({
         )}
 
         {step === "applying" && (
-          <div className="py-12 text-center text-sm text-muted-foreground">
-            변경 적용 중...
-          </div>
+          <ApplyingView submitted={submitted} progress={progress} />
         )}
 
-        {step === "result" && result && <ResultView result={result} />}
+        {step === "result" && submitted && (
+          <ResultView submitted={submitted} progress={progress} />
+        )}
 
         <DialogFooter>
           {step === "upload" && (
@@ -405,7 +476,8 @@ function UploadView({
           </div>
           <p>
             DELETE 는 비대상입니다. 삭제는 OFF (userLock=true) 로 대체합니다.
-            1000행 상한 — 초과 시 검증 단계에서 거부됩니다.
+            5000행 상한 — 초과 시 검증 단계에서 거부됩니다. 적용은 백그라운드
+            Job 으로 진행되며, 상단 진행률이 5초 간격으로 갱신됩니다.
           </p>
         </div>
       </details>
@@ -880,60 +952,94 @@ function ReviewFooter({
 }
 
 // =============================================================================
+// applying 단계 — 진행률 polling
+// =============================================================================
+
+function ApplyingView({
+  submitted,
+  progress,
+}: {
+  submitted: ApplyCsvResult | null
+  progress: BatchProgress | null
+}) {
+  if (!submitted) {
+    return (
+      <div className="py-12 text-center text-sm text-muted-foreground">
+        변경 적용 시작 중...
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-col gap-3 py-4">
+      <ProgressPanel submitted={submitted} progress={progress} />
+      <p className="text-center text-[11px] text-muted-foreground">
+        백그라운드 Job 으로 처리 중입니다. 모달을 닫아도 작업은 계속되며, 결과는
+        ChangeBatch ID 로 다시 확인할 수 있습니다.
+      </p>
+    </div>
+  )
+}
+
+// =============================================================================
 // result 단계
 // =============================================================================
 
-function ResultView({ result }: { result: ApplyCsvResult }) {
+function ResultView({
+  submitted,
+  progress,
+}: {
+  submitted: ApplyCsvResult
+  progress: BatchProgress | null
+}) {
   function copyBatchId() {
     navigator.clipboard
-      .writeText(result.batchId)
+      .writeText(submitted.batchId)
       .then(() => toast.success("ChangeBatch ID 복사됨"))
       .catch(() => toast.error("복사 실패"))
   }
 
-  const failed = result.items.filter((i) => !i.ok)
+  const counts = progress?.counts ?? {}
+  const done = counts.done ?? 0
+  const failed = counts.failed ?? 0
+  const pending = counts.pending ?? 0
+  const total = progress?.batch.total ?? submitted.total
+  const finalStatus = progress?.batch.status ?? "running"
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="grid grid-cols-3 gap-2">
-        <CountCard label="요청" value={result.total} />
-        <CountCard label="성공" value={result.success} accent="emerald" />
+      <div className="grid grid-cols-4 gap-2">
+        <CountCard label="요청" value={total} />
+        <CountCard label="성공" value={done} accent="emerald" />
         <CountCard
           label="실패"
-          value={result.failed}
-          accent={result.failed > 0 ? "destructive" : undefined}
+          value={failed}
+          accent={failed > 0 ? "destructive" : undefined}
+        />
+        <CountCard
+          label="대기"
+          value={pending}
+          accent={pending > 0 ? "amber" : undefined}
         />
       </div>
 
-      {/* byOperation */}
+      {/* byOperation 적재 분포 (Cron 처리 결과별 분해는 후속 PR 에서 ChangeItem groupBy) */}
       <div className="overflow-hidden rounded-md border">
         <table className="w-full text-xs">
           <thead className="bg-muted/60">
             <tr className="text-left">
               <th className="px-2 py-1.5">operation</th>
-              <th className="px-2 py-1.5 text-right">성공</th>
-              <th className="px-2 py-1.5 text-right">실패</th>
+              <th className="px-2 py-1.5 text-right">적재</th>
             </tr>
           </thead>
           <tbody>
             {(["CREATE", "UPDATE", "OFF"] as const).map((op) => {
-              const stat = result.byOperation[op]
+              const n = submitted.byOperation[op]
               return (
                 <tr key={op} className="border-b last:border-0">
                   <td className="px-2 py-1">
                     <OpBadge op={op} />
                   </td>
-                  <td className="px-2 py-1 text-right font-mono text-emerald-700 dark:text-emerald-400">
-                    {stat.ok}
-                  </td>
-                  <td
-                    className={cn(
-                      "px-2 py-1 text-right font-mono",
-                      stat.failed > 0 && "text-destructive",
-                    )}
-                  >
-                    {stat.failed}
-                  </td>
+                  <td className="px-2 py-1 text-right font-mono">{n}</td>
                 </tr>
               )
             })}
@@ -945,7 +1051,7 @@ function ResultView({ result }: { result: ApplyCsvResult }) {
       <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
         <span className="text-xs text-muted-foreground">ChangeBatch ID</span>
         <code className="flex-1 truncate font-mono text-xs">
-          {result.batchId}
+          {submitted.batchId}
         </code>
         <Button
           size="icon-xs"
@@ -968,36 +1074,74 @@ function ResultView({ result }: { result: ApplyCsvResult }) {
         롤백 페이지(F-6.4)에서 본 ID 로 변경 이력을 조회·되돌릴 수 있습니다.
       </p>
 
-      {/* 실패 항목 */}
-      {failed.length > 0 && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/5">
-          <div className="border-b border-destructive/40 px-3 py-1.5 text-xs font-medium text-destructive">
-            실패 {failed.length}건
-          </div>
-          <ul className="max-h-40 overflow-y-auto px-3 py-2 text-xs">
-            {failed.map((it) => (
-              <li
-                key={`${it.rowIndex}-${it.nccKeywordId ?? "n"}`}
-                className="border-b border-destructive/10 py-1 last:border-0"
-              >
-                <span className="font-mono text-muted-foreground">
-                  행 {it.rowIndex}
-                  {it.nccKeywordId ? ` · ${it.nccKeywordId}` : ""}
-                </span>
-                <span className="ml-2 text-destructive">
-                  {it.error ?? "원인 미상"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {failed.length === 0 && result.success > 0 && (
+      {/* 상태 안내 */}
+      {finalStatus === "done" && failed === 0 && (
         <p className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900/40 dark:bg-emerald-900/20 dark:text-emerald-300">
           모든 변경이 성공적으로 적용되었습니다.
         </p>
       )}
+      {finalStatus === "failed" && (
+        <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          일부 또는 모든 변경이 실패했습니다. 실패 항목은 ChangeBatch ID 로
+          롤백 페이지(F-6.4)에서 확인 / 재시도할 수 있습니다.
+        </p>
+      )}
+    </div>
+  )
+}
+
+// =============================================================================
+// 진행률 패널 (applying / result 공용)
+// =============================================================================
+
+function ProgressPanel({
+  submitted,
+  progress,
+}: {
+  submitted: ApplyCsvResult
+  progress: BatchProgress | null
+}) {
+  const total = progress?.batch.total ?? submitted.total
+  const processed = progress?.batch.processed ?? 0
+  const status = progress?.batch.status ?? "pending"
+  const counts = progress?.counts ?? {}
+  const done = counts.done ?? 0
+  const failed = counts.failed ?? 0
+  const pending = counts.pending ?? Math.max(total - processed, 0)
+
+  const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 0
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between text-xs">
+        <span className="font-medium">진행률</span>
+        <span className="font-mono text-muted-foreground">
+          {processed} / {total} ({pct}%) · status={status}
+        </span>
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn(
+            "h-full rounded-full transition-all",
+            status === "failed"
+              ? "bg-destructive"
+              : status === "done"
+                ? "bg-emerald-500"
+                : "bg-primary",
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="grid grid-cols-4 gap-2 pt-1">
+        <CountCard label="대기" value={pending} />
+        <CountCard label="성공" value={done} accent="emerald" />
+        <CountCard
+          label="실패"
+          value={failed}
+          accent={failed > 0 ? "destructive" : undefined}
+        />
+        <CountCard label="요청" value={total} />
+      </div>
     </div>
   )
 }

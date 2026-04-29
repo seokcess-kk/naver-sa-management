@@ -4,6 +4,10 @@
     {
       "path": "/api/cron/alerts",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/batch/run",
+      "schedule": "* * * * *"
     }
   ]
 }
