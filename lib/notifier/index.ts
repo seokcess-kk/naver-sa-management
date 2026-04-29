@@ -20,6 +20,7 @@
 
 import { logChannel } from "@/lib/notifier/log"
 import { emailChannel } from "@/lib/notifier/email"
+import { slackChannel } from "@/lib/notifier/slack"
 import type {
   NotificationChannel,
   NotificationPayload,
@@ -36,13 +37,15 @@ export type {
  * 활성화된 채널 목록 결정.
  *
  * - log 채널: 항상 포함
+ * - slack 채널: SLACK_WEBHOOK_URL 가 있을 때만
  * - email 채널: RESEND_API_KEY 가 있을 때만 (env 없으면 stub 채널 자체를 추가하지 않음 — dispatch 결과
  *   배열을 단순화).
- *
- * 정식 채널 (Slack 등) 도입 시 본 함수에 분기 추가.
  */
 export function getChannels(): NotificationChannel[] {
   const channels: NotificationChannel[] = [logChannel]
+  if (process.env.SLACK_WEBHOOK_URL) {
+    channels.push(slackChannel)
+  }
   if (process.env.RESEND_API_KEY) {
     channels.push(emailChannel)
   }
