@@ -21,48 +21,7 @@
  */
 
 import { prisma } from "@/lib/db/prisma"
-import { mask } from "@/lib/crypto/secret"
-
-const SECRET_KEY_PATTERNS = [
-  /apikey/i,
-  /secretkey/i,
-  /password/i,
-  /accesskey/i,
-  /refreshtoken/i,
-  /^token$/i,
-]
-
-function isSecretKey(key: string): boolean {
-  return SECRET_KEY_PATTERNS.some((re) => re.test(key))
-}
-
-/**
- * before/after JSON 안에 시크릿 평문이 들어가면 자동 마스킹.
- * 깊이 제한: 6 (재귀 폭주 방지)
- */
-function sanitize(value: unknown, depth = 0): unknown {
-  if (depth > 6) return "[depth-limit]"
-  if (value === null || value === undefined) return value
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return value
-  }
-  if (Array.isArray(value)) {
-    return value.map((v) => sanitize(v, depth + 1))
-  }
-  if (typeof value === "object") {
-    const out: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (isSecretKey(k) && typeof v === "string") {
-        out[k] = mask(v)
-      } else {
-        out[k] = sanitize(v, depth + 1)
-      }
-    }
-    return out
-  }
-  // function / symbol / bigint 등은 직렬화 안전을 위해 string 화
-  return String(value)
-}
+import { sanitize } from "@/lib/audit/sanitize"
 
 export type AuditLogInput = {
   userId: string | null

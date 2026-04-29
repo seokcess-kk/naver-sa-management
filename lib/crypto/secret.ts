@@ -16,6 +16,9 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from "node:crypto"
 
+// mask 는 Edge Runtime 호환을 위해 별도 모듈로 분리. backward compat 으로 re-export.
+export { mask } from "@/lib/crypto/mask"
+
 const ALGO = "aes-256-gcm"
 const IV_LEN = 12
 const TAG_LEN = 16
@@ -117,15 +120,5 @@ export function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb)
 }
 
-/**
- * 평문 시크릿을 로그·UI용으로 마스킹.
- * 8자 미만은 전체 마스킹. 그 이상은 앞 4 + "****" + 뒤 4.
- *
- * 예: mask("ABCDEFGHIJKLMNOP") => "ABCD****MNOP"
- *     mask("short")           => "********"
- */
-export function mask(plainText: string): string {
-  if (typeof plainText !== "string") return "********"
-  if (plainText.length < 8) return "********"
-  return `${plainText.slice(0, 4)}****${plainText.slice(-4)}`
-}
+// mask 함수는 Edge Runtime 호환을 위해 lib/crypto/mask.ts 로 이전.
+// 본 파일 상단의 re-export 로 backward compat 유지.
