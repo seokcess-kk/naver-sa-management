@@ -19,26 +19,10 @@
 
 import type { ErrorEvent, Breadcrumb, EventHint } from "@sentry/nextjs"
 import { sanitize } from "@/lib/audit/sanitize"
+import { scrubString } from "@/lib/crypto/scrub-string"
 
-/**
- * value 자체에 시크릿 패턴이 들어있는 경우(키 이름이 시크릿 단어가 아니어도) 마스킹.
- * - "Authorization: Bearer xxx" 같이 라인에 토큰 보간된 경우
- * - 32+ hex 문자열 (HMAC signature, MD5/SHA hex 등)
- *
- * Bearer 토큰: 빈공간 또는 quote 같은 종결자까지만 매칭 (alpha-num + dot/dash/underscore)
- */
-const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
-  /Bearer\s+[A-Za-z0-9._\-]{12,}/g, // Authorization: Bearer ...
-  /[A-Fa-f0-9]{32,}/g, // 긴 hex (HMAC signature, MD5/SHA hex 등)
-]
-
-function scrubString(s: string): string {
-  let out = s
-  for (const re of SECRET_VALUE_PATTERNS) {
-    out = out.replace(re, "[REDACTED]")
-  }
-  return out
-}
+// SECRET_VALUE_PATTERNS / scrubString 은 lib/crypto/scrub-string.ts 로 이전.
+// cron route 등 sentry 의존성이 없는 경로에서도 동일 마스킹 로직을 재사용 가능하게 분리.
 
 /**
  * Sentry beforeSend 훅.

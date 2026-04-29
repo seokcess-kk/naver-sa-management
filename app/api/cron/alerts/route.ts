@@ -32,6 +32,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 
+import { scrubString } from "@/lib/crypto/scrub-string"
 import { prisma } from "@/lib/db/prisma"
 import { dispatch, type NotificationPayload } from "@/lib/notifier"
 
@@ -221,9 +222,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       }
     } catch (e) {
       // 평가기 throw — 다음 rule 계속. AlertEvent 적재 X (운영 노이즈 방지).
+      // scrubString 으로 console.error 출력의 Bearer 토큰 / 32+ hex 패턴 마스킹.
+      const raw = e instanceof Error ? e.message : String(e)
       console.error(
         `[cron/alerts] rule=${rule.id} type=${rule.type} eval failed:`,
-        e instanceof Error ? e.message : String(e),
+        scrubString(raw),
       )
       rulesSkipped++
       continue

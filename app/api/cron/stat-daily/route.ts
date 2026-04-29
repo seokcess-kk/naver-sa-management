@@ -36,6 +36,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 
+import { scrubString } from "@/lib/crypto/scrub-string"
 import { prisma } from "@/lib/db/prisma"
 import {
   ingestAdvertiserStatDaily,
@@ -81,13 +82,14 @@ type CronResponse = {
  * 에러 메시지를 안전한 길이/형식으로 정규화.
  *
  * - reports.* / client.ts 는 시크릿 평문을 메시지에 주입하지 않음 (모듈 정책)
- * - 단 만약을 대비해 길이 500 자 cap + 비-string 도 String() 변환
+ * - 단 만약을 대비해 scrubString 으로 Bearer 토큰 / 32+ hex 패턴 마스킹 (2차 방어)
+ * - 길이 500 자 cap + 비-string 도 String() 변환
  * - 객체 직렬화는 sanitize 적용 대상이 아니지만 (string only), 시크릿 키 값은
  *   상위 모듈이 message 에 넣지 않는 정책으로 1차 보장
  */
 function safeErrorMessage(e: unknown): string {
-  if (e instanceof Error) return e.message.slice(0, 500)
-  return String(e).slice(0, 500)
+  const raw = e instanceof Error ? e.message : String(e)
+  return scrubString(raw).slice(0, 500)
 }
 
 // =============================================================================

@@ -36,6 +36,7 @@
 
 import { NextRequest, NextResponse } from "next/server"
 
+import { scrubString } from "@/lib/crypto/scrub-string"
 import { prisma } from "@/lib/db/prisma"
 import {
   ingestAdvertiserStatHourly,
@@ -81,10 +82,13 @@ type CronResponse = {
 // 헬퍼
 // =============================================================================
 
-/** 에러 메시지를 안전한 길이/형식으로 정규화 (F-9.1 stat-daily 와 동일). */
+/** 에러 메시지를 안전한 길이/형식으로 정규화 (F-9.1 stat-daily 와 동일).
+ *
+ * scrubString 으로 Bearer 토큰 / 32+ hex 패턴 마스킹 적용 (시크릿 평문 2차 방어).
+ */
 function safeErrorMessage(e: unknown): string {
-  if (e instanceof Error) return e.message.slice(0, 500)
-  return String(e).slice(0, 500)
+  const raw = e instanceof Error ? e.message : String(e)
+  return scrubString(raw).slice(0, 500)
 }
 
 // =============================================================================

@@ -34,8 +34,9 @@
 
 import { NextRequest, NextResponse } from "next/server"
 
-import { prisma } from "@/lib/db/prisma"
 import { applyChange } from "@/lib/batch/apply"
+import { scrubString } from "@/lib/crypto/scrub-string"
+import { prisma } from "@/lib/db/prisma"
 
 // Prisma 사용 → Edge 가 아닌 Node 런타임 강제.
 export const runtime = "nodejs"
@@ -126,12 +127,15 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
           },
         })
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
+        // scrubString 으로 Bearer 토큰 / 32+ hex 패턴 마스킹 (applyChange 가 시크릿
+        // 평문을 메시지에 주입하지 않는다는 1차 보장의 2차 방어)
+        const raw = e instanceof Error ? e.message : String(e)
+        const msg = scrubString(raw).slice(0, 500)
         await prisma.changeItem.update({
           where: { id: item.id },
           data: {
             status: "failed",
-            error: msg.slice(0, 500),
+            error: msg,
             attempt: { increment: 1 },
           },
         })

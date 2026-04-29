@@ -16,6 +16,10 @@
     {
       "path": "/api/cron/stat-hourly",
       "schedule": "5 * * * *"
+    },
+    {
+      "path": "/api/cron/stat-cleanup",
+      "schedule": "30 18 * * *"
     }
   ]
 }
