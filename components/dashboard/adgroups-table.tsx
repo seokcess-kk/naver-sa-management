@@ -82,11 +82,6 @@ const CHANNEL_LABELS: Record<string, string> = {
   both: "PC+Mobile",
   none: "둘 다 OFF",
 }
-const BIDMODE_LABELS: Record<string, string> = {
-  ALL: "입찰 (전체)",
-  group: "그룹 입찰가 사용",
-  custom: "직접 입찰가",
-}
 
 // =============================================================================
 // 타입
@@ -153,7 +148,10 @@ export function AdgroupsTable({
   const [debouncedSearch, setDebouncedSearch] = React.useState("")
   const [statusFilter, setStatusFilter] = React.useState<string>("ALL")
   const [channelFilter, setChannelFilter] = React.useState<string>("ALL")
-  const [bidModeFilter, setBidModeFilter] = React.useState<string>("ALL")
+  // "입찰가 미설정" 단일 토글 — 그룹 기본 입찰가 (bidAmt) 가 null 인 광고그룹만 표시.
+  // (이전: "입찰 모드 select" 는 useGroupBidAmt 컬럼이 없어 잘못된 해석이라 제거.)
+  // 운영 가치: 입찰가 누락으로 동작 안 하는 광고그룹을 빠르게 찾기 위함.
+  const [noBidOnly, setNoBidOnly] = React.useState<boolean>(false)
 
   // 검색 input debounce 200ms
   React.useEffect(() => {
@@ -175,16 +173,10 @@ export function AdgroupsTable({
         if (channelFilter === "both" && !(pc && mbl)) return false
         if (channelFilter === "none" && !(!pc && !mbl)) return false
       }
-      if (bidModeFilter !== "ALL") {
-        // bidAmt null = 그룹 입찰가 사용 (그룹 자체 기본값에 의존)
-        // bidAmt 값 있음 = 직접 그룹 기본 입찰가 설정
-        const isCustom = g.bidAmt !== null
-        if (bidModeFilter === "group" && isCustom) return false
-        if (bidModeFilter === "custom" && !isCustom) return false
-      }
+      if (noBidOnly && g.bidAmt !== null) return false
       return true
     })
-  }, [adgroups, debouncedSearch, statusFilter, channelFilter, bidModeFilter])
+  }, [adgroups, debouncedSearch, statusFilter, channelFilter, noBidOnly])
 
   // 가시 행 기준 전체 선택
   const visibleSelectedCount = React.useMemo(
@@ -200,14 +192,14 @@ export function AdgroupsTable({
     searchInput !== "" ||
     statusFilter !== "ALL" ||
     channelFilter !== "ALL" ||
-    bidModeFilter !== "ALL"
+    noBidOnly
 
   function resetFilters() {
     setSearchInput("")
     setDebouncedSearch("")
     setStatusFilter("ALL")
     setChannelFilter("ALL")
-    setBidModeFilter("ALL")
+    setNoBidOnly(false)
   }
 
   function toggleAll() {
@@ -408,21 +400,22 @@ export function AdgroupsTable({
             <SelectItem value="none">둘 다 OFF</SelectItem>
           </SelectContent>
         </Select>
-        <Select
-          value={bidModeFilter}
-          onValueChange={(v) => setBidModeFilter(v ?? "ALL")}
+        {/*
+          "입찰가 미설정" 단일 토글 — bidAmt === null 인 광고그룹만 빠르게 찾기.
+          (이전 "입찰 모드 select" 는 schema 에 useGroupBidAmt 컬럼이 없어 잘못된 해석이라 제거.)
+        */}
+        <Label
+          htmlFor="adgroup-no-bid-only"
+          className="flex h-8 cursor-pointer select-none items-center gap-2 rounded-md border bg-background px-3 text-xs font-normal hover:bg-muted"
         >
-          <SelectTrigger className="w-44">
-            <SelectValue placeholder="입찰가">
-              {(v: string | null) => BIDMODE_LABELS[v ?? "ALL"] ?? "입찰 (전체)"}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="ALL">입찰 (전체)</SelectItem>
-            <SelectItem value="custom">직접 입찰가</SelectItem>
-            <SelectItem value="group">그룹 입찰가 사용</SelectItem>
-          </SelectContent>
-        </Select>
+          <Checkbox
+            id="adgroup-no-bid-only"
+            checked={noBidOnly}
+            onCheckedChange={(v) => setNoBidOnly(v === true)}
+            aria-label="입찰가 미설정 광고그룹만 표시"
+          />
+          입찰가 미설정만
+        </Label>
         {filtersApplied && (
           <Button size="sm" variant="ghost" onClick={resetFilters}>
             초기화

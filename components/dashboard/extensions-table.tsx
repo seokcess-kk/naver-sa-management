@@ -43,7 +43,7 @@
  */
 
 import * as React from "react"
-import { useRouter } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import {
   flexRender,
@@ -515,7 +515,27 @@ export function ExtensionsTable({
   userRole: "admin" | "operator" | "viewer"
 }) {
   const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
   const isAdmin = userRole === "admin"
+
+  // 필터를 URL query 로 동기화 (이동 후 복귀해도 맥락 보존).
+  // - default 값(빈 문자열 / "ALL") 은 query 에서 제거하여 URL 을 깔끔하게 유지.
+  // - replace 사용 — 히스토리 누적 방지.
+  // - scroll: false — 가상 스크롤 위치 유지.
+  // keywords-table 의 동일 패턴.
+  const updateQuery = React.useCallback(
+    (patch: Record<string, string>) => {
+      const next = new URLSearchParams(searchParams.toString())
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === "" || v === "ALL") next.delete(k)
+        else next.set(k, v)
+      }
+      const qs = next.toString()
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
+    },
+    [router, pathname, searchParams],
+  )
 
   // -- 모달 state -------------------------------------------------------------
   const [addOpen, setAddOpen] = React.useState(false)
@@ -544,21 +564,38 @@ export function ExtensionsTable({
   const columns = React.useMemo(() => makeColumns(ctx), [ctx])
 
   // -- 필터 state -------------------------------------------------------------
-  const [searchInput, setSearchInput] = React.useState("")
-  const [debouncedSearch, setDebouncedSearch] = React.useState("")
-  const [typeFilter, setTypeFilter] = React.useState<string>("ALL")
-  const [statusFilter, setStatusFilter] = React.useState<string>("ALL")
-  const [inspectFilter, setInspectFilter] = React.useState<string>("ALL")
-  const [adgroupFilter, setAdgroupFilter] = React.useState<string>("ALL")
+  // 초기값은 URL query 에서 읽음 (이동 후 복귀해도 맥락 보존).
+  // useSearchParams 가 client 에서만 동작하므로 SSR 단계에선 기본값으로 hydrate.
+  const [searchInput, setSearchInput] = React.useState(
+    () => searchParams.get("q") ?? "",
+  )
+  const [debouncedSearch, setDebouncedSearch] = React.useState(
+    () => searchParams.get("q") ?? "",
+  )
+  const [typeFilter, setTypeFilter] = React.useState<string>(
+    () => searchParams.get("type") ?? "ALL",
+  )
+  const [statusFilter, setStatusFilter] = React.useState<string>(
+    () => searchParams.get("status") ?? "ALL",
+  )
+  const [inspectFilter, setInspectFilter] = React.useState<string>(
+    () => searchParams.get("inspect") ?? "ALL",
+  )
+  const [adgroupFilter, setAdgroupFilter] = React.useState<string>(
+    () => searchParams.get("adgroup") ?? "ALL",
+  )
   const [sorting, setSorting] = React.useState<SortingState>([
     { id: "updatedAt", desc: true },
   ])
 
-  // 검색 input debounce 200ms
+  // 검색 input debounce 200ms — URL query 도 함께 갱신.
   React.useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(searchInput), 200)
+    const t = setTimeout(() => {
+      setDebouncedSearch(searchInput)
+      updateQuery({ q: searchInput })
+    }, 200)
     return () => clearTimeout(t)
-  }, [searchInput])
+  }, [searchInput, updateQuery])
 
   // 광고그룹 셀렉트 옵션 — 현재 데이터에 등장하는 광고그룹만 (필터링 한정)
   const adgroupOptions = React.useMemo(() => {
@@ -636,6 +673,13 @@ export function ExtensionsTable({
     setStatusFilter("ALL")
     setInspectFilter("ALL")
     setAdgroupFilter("ALL")
+    updateQuery({
+      q: "",
+      type: "ALL",
+      status: "ALL",
+      inspect: "ALL",
+      adgroup: "ALL",
+    })
   }
 
   // -- 다중 선택 + 일괄 액션 -------------------------------------------------
@@ -765,7 +809,11 @@ export function ExtensionsTable({
         />
         <Select
           value={typeFilter}
-          onValueChange={(v) => setTypeFilter(v ?? "ALL")}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setTypeFilter(next)
+            updateQuery({ type: next })
+          }}
         >
           <SelectTrigger className="w-36">
             <SelectValue placeholder="타입">
@@ -781,7 +829,11 @@ export function ExtensionsTable({
         </Select>
         <Select
           value={statusFilter}
-          onValueChange={(v) => setStatusFilter(v ?? "ALL")}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setStatusFilter(next)
+            updateQuery({ status: next })
+          }}
         >
           <SelectTrigger className="w-32">
             <SelectValue placeholder="상태">
@@ -797,7 +849,11 @@ export function ExtensionsTable({
         </Select>
         <Select
           value={inspectFilter}
-          onValueChange={(v) => setInspectFilter(v ?? "ALL")}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setInspectFilter(next)
+            updateQuery({ inspect: next })
+          }}
         >
           <SelectTrigger className="w-32">
             <SelectValue placeholder="검수">
@@ -815,7 +871,11 @@ export function ExtensionsTable({
         </Select>
         <Select
           value={adgroupFilter}
-          onValueChange={(v) => setAdgroupFilter(v ?? "ALL")}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setAdgroupFilter(next)
+            updateQuery({ adgroup: next })
+          }}
         >
           <SelectTrigger className="w-56">
             <SelectValue placeholder="광고그룹">

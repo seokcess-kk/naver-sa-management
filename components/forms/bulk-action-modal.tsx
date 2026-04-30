@@ -289,7 +289,7 @@ function ResultView<TItem>({
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       <div className="grid grid-cols-3 gap-2">
         <Stat label="요청" value={result.total} />
         <Stat label="성공" value={result.success} accent="emerald" />

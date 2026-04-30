@@ -518,7 +518,7 @@ function ReviewView({
   const okCount = validation.byKind.valid + validation.byKind.warning
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-4">
       {/* 카운터 바 */}
       <div className="grid grid-cols-3 gap-2">
         <CountCard
@@ -702,7 +702,7 @@ function ErrorTable({ items }: { items: ErrorItem[] }) {
   }
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
       <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-1.5 text-xs text-destructive">
         오류 행은 적용 대상에서 자동 제외됩니다. 수정 후 재업로드하거나, 정상·충돌
         행만 적용하려면 그대로 진행하세요.
