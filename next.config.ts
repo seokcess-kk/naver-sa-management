@@ -2,6 +2,9 @@ import type { NextConfig } from "next"
 import { withSentryConfig } from "@sentry/nextjs"
 
 const nextConfig: NextConfig = {
+  turbopack: {
+    root: process.cwd(),
+  },
   experimental: {
     serverActions: {
       // F-5.3 이미지 확장소재: 5MB 이미지 base64 + 메타. 여유 6MB.
