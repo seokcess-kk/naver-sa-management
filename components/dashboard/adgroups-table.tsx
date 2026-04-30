@@ -697,8 +697,8 @@ function NumericInput({
     n !== null && Number.isFinite(n) && n >= 0 && Number.isInteger(n)
 
   return (
-    <div className="flex flex-col gap-3">
-      <div>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1.5">
         <Label htmlFor="bulk-value">
           {action === "bid" ? "새 그룹 기본 입찰가 (원)" : "새 일 예산 (원)"}
         </Label>
@@ -712,7 +712,7 @@ function NumericInput({
           onChange={(e) => setValueInput(e.target.value)}
           placeholder={action === "bid" ? "예: 500" : "예: 50000"}
         />
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           선택한 모든 광고그룹에 동일 값이 적용됩니다. 0 이상의 정수.
         </p>
       </div>

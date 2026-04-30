@@ -2278,7 +2278,7 @@ function BulkActionInputForm({
       </div>
 
       {mode === "absolute" ? (
-        <div>
+        <div className="flex flex-col gap-1.5">
           <Label htmlFor="bulk-bidAmt">입찰가 (원)</Label>
           <Input
             id="bulk-bidAmt"
@@ -2294,14 +2294,14 @@ function BulkActionInputForm({
               if (e.key === "Enter" && valid) handleSubmitForm()
             }}
           />
-          <p className="mt-1 text-xs text-muted-foreground">
+          <p className="text-xs text-muted-foreground">
             선택한 모든 키워드에 동일 입찰가가 적용됩니다 (그룹입찰가 사용은
             해제). 0 이상의 정수.
           </p>
         </div>
       ) : (
         <>
-          <div>
+          <div className="flex flex-col gap-1.5">
             <Label htmlFor="bulk-percent">증감 (%)</Label>
             <Input
               id="bulk-percent"
@@ -2318,12 +2318,12 @@ function BulkActionInputForm({
                 if (e.key === "Enter" && valid) handleSubmitForm()
               }}
             />
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               -90% ~ +900% (정수 또는 소수 1자리). 음수는 입찰가 감소.
             </p>
           </div>
-          <div>
-            <Label className="mb-1.5 block">반올림 단위 (원)</Label>
+          <div className="flex flex-col gap-1.5">
+            <Label>반올림 단위 (원)</Label>
             <div className="flex gap-2">
               {([10, 50, 100] as const).map((v) => (
                 <Button

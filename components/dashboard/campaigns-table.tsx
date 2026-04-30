@@ -541,8 +541,8 @@ function CampaignBulkInput({
     n !== null && Number.isFinite(n) && n >= 0 && Number.isInteger(n)
 
   return (
-    <div className="flex flex-col gap-3">
-      <div>
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1.5">
         <Label htmlFor="bulk-budget">새 일 예산 (원)</Label>
         <Input
           id="bulk-budget"
@@ -554,7 +554,7 @@ function CampaignBulkInput({
           onChange={(e) => setBudgetInput(e.target.value)}
           placeholder="예: 50000"
         />
-        <p className="mt-1 text-xs text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           선택한 모든 캠페인에 동일 예산이 적용됩니다. 0 이상의 정수.
         </p>
       </div>
