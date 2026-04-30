@@ -36,9 +36,29 @@ function createPrismaClient(): PrismaClient {
   return new PrismaClient({ adapter })
 }
 
-export const prisma: PrismaClient =
-  globalForPrisma.prisma ?? createPrismaClient()
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPrisma.prisma = prisma
+function getPrismaClient(): PrismaClient {
+  if (globalForPrisma.prisma) return globalForPrisma.prisma
+  globalForPrisma.prisma = createPrismaClient()
+  return globalForPrisma.prisma
 }
+
+/**
+ * Lazy proxy — 모듈 import 시점에는 PrismaClient를 instantiate 하지 않음.
+ *
+ * 이유:
+ *   Next.js production build의 "Collecting page data" 단계는 RSC / Route Handler
+ *   모듈을 import 만 함 (핸들러 본문은 실행 X). 빌드 머신엔 DATABASE_URL 없어
+ *   top-level instantiate 시 throw → 빌드 실패.
+ *   첫 메소드 접근 시점에 instantiate → 빌드 통과 + 런타임 검증.
+ *
+ * 캐시:
+ *   dev hot-reload + production lambda 둘 다 globalForPrisma 1 인스턴스 공유.
+ *   cold start 마다 새 인스턴스 (lambda 격리 그대로).
+ */
+export const prisma: PrismaClient = new Proxy({} as PrismaClient, {
+  get(_target, prop, receiver) {
+    const client = getPrismaClient()
+    const value = Reflect.get(client, prop, receiver)
+    return typeof value === "function" ? value.bind(client) : value
+  },
+})
