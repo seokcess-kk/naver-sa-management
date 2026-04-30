@@ -18,6 +18,7 @@ import { ChevronDown, Check } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -78,7 +79,9 @@ export function AdvertiserSelector({
         <ChevronDown className="size-4 shrink-0 opacity-60" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72">
-        <DropdownMenuLabel>광고주 ({advertisers.length})</DropdownMenuLabel>
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>광고주 ({advertisers.length})</DropdownMenuLabel>
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
         {advertisers.map((a) => {
           const isSelected = a.id === currentId

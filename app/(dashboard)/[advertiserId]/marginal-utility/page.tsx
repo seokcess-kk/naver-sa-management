@@ -28,6 +28,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { MarginalUtilityClient } from "@/components/bidding/marginal-utility-client"
+import { PageHeader } from "@/components/navigation/page-header"
 
 export default async function MarginalUtilityPage({
   params,
@@ -56,15 +57,14 @@ export default async function MarginalUtilityPage({
 
   return (
     <div className="flex flex-col gap-6 p-6">
-      <div>
-        <h1 className="font-heading text-xl font-medium leading-snug">
-          한계효용 분석
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {advertiser.name} · 분석 기간 last 7일 (기본) · device 별 1~5위 입찰
-          한계효용 비교
-        </p>
-      </div>
+      <PageHeader
+        title="한계효용 분석"
+        description="분석 기간 last 7일 (기본) · device 별 1~5위 입찰 한계효용 비교"
+        breadcrumbs={[
+          { label: advertiser.name, href: `/${advertiserId}` },
+          { label: "한계효용 분석" },
+        ]}
+      />
 
       {/* 안내 박스 — 본 분석은 CPC 기반 (P2 매출 조인 후 ROAS/ROI 표시) */}
       <Card size="sm">

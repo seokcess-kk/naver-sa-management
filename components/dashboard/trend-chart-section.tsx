@@ -38,7 +38,6 @@ import {
   YAxis,
 } from "recharts"
 
-import { Button } from "@/components/ui/button"
 import {
   Card,
   CardContent,
@@ -52,7 +51,6 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart"
-import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
@@ -221,14 +219,10 @@ export function TrendChartSection({
     fetchSeries(v)
   }
 
-  function handleRefresh() {
-    fetchSeries(grain)
-  }
-
   // hasKeys=false → 안내 카드만
   if (!hasKeys) {
     return (
-      <Card>
+      <Card size="sm" className="h-full">
         <CardHeader className="border-b">
           <CardTitle>일자별 트렌드</CardTitle>
           <CardDescription>
@@ -240,64 +234,54 @@ export function TrendChartSection({
   }
 
   return (
-    <Card>
-      <CardHeader className="flex-row items-start justify-between gap-3 border-b">
-        <div>
+    <Card size="sm" className="h-full">
+      <CardHeader className="flex-row items-center justify-between gap-3 border-b">
+        <div className="min-w-0">
           <CardTitle>일자별 트렌드</CardTitle>
-          <CardDescription>
-            {state.kind === "ok"
-              ? `최근 조회: ${new Date(state.checkedAt).toLocaleString("ko-KR")} · ${grain === "daily" ? "최근 7일" : "오늘 24시간"} · ${METRIC_LABEL[metric]}`
-              : state.kind === "error"
-                ? `조회 실패: ${state.error}`
-                : "광고주 전체 시계열 — 일별 / 시간별 단일 지표"}
+          <CardDescription className="truncate">
+            {state.kind === "error"
+              ? `조회 실패: ${state.error}`
+              : `${grain === "daily" ? "최근 7일" : "오늘 24시간"} · ${METRIC_LABEL[metric]}`}
           </CardDescription>
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={handleRefresh}
-          disabled={pending}
-        >
-          <RefreshCwIcon
-            className={pending ? "animate-spin size-3.5" : "size-3.5"}
-          />
-          {pending ? "조회 중..." : "새로고침"}
-        </Button>
-      </CardHeader>
-
-      <CardContent className="flex flex-col gap-3 py-4">
-        {/* 컨트롤 */}
-        <div className="flex flex-wrap items-end gap-3">
+        {/* 컴팩트 컨트롤 — 헤더 우측 1줄 */}
+        <div className="flex items-center gap-2">
           <Tabs value={grain} onValueChange={handleGrainChange}>
             <TabsList>
-              <TabsTrigger value="daily">일별 (7일)</TabsTrigger>
-              <TabsTrigger value="hourly">시간별 (오늘)</TabsTrigger>
+              <TabsTrigger value="daily">일별</TabsTrigger>
+              <TabsTrigger value="hourly">시간별</TabsTrigger>
             </TabsList>
           </Tabs>
-
-          <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">지표</Label>
-            <Select
-              value={metric}
-              onValueChange={(v) => {
-                if (typeof v === "string") {
-                  setMetric(v as TopMetric)
+          <Select
+            value={metric}
+            onValueChange={(v) => {
+              if (typeof v === "string") {
+                setMetric(v as TopMetric)
+              }
+            }}
+          >
+            <SelectTrigger className="w-24" size="sm">
+              <SelectValue>
+                {(v: string | null) =>
+                  v ? (METRIC_LABEL[v as TopMetric] ?? v) : "지표"
                 }
-              }}
-            >
-              <SelectTrigger className="w-32">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {METRIC_ORDER.map((m) => (
-                  <SelectItem key={m} value={m}>
-                    {METRIC_LABEL[m]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {METRIC_ORDER.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {METRIC_LABEL[m]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {pending ? (
+            <RefreshCwIcon className="size-3.5 animate-spin text-muted-foreground" />
+          ) : null}
         </div>
+      </CardHeader>
+
+      <CardContent className="flex flex-col gap-3 pb-3 pt-3">
 
         {/* 에러 안내 */}
         {state.kind === "error" ? (
@@ -364,7 +348,7 @@ function TrendChart({
 
   return (
     <div className="rounded-md border p-2">
-      <ChartContainer config={config} className="aspect-[16/6] w-full">
+      <ChartContainer config={config} className="aspect-[16/5] h-[320px] w-full">
         <LineChart
           data={points}
           margin={{ top: 8, right: 16, left: 8, bottom: 8 }}

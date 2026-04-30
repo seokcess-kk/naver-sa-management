@@ -36,6 +36,7 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import {
   listAdgroups,
   updateAdgroupsBulk,
@@ -60,6 +61,19 @@ export type SyncAdgroupsResult =
   | { ok: false; error: string }
 
 /**
+ * `syncAdgroups` 옵션 — 두 번째 인자.
+ *
+ * - `campaignIds` : 캠페인 화이트리스트(앱 DB Campaign.id). 미지정 시 광고주 전체.
+ *                   UI에서 "선택한 캠페인만 동기화" 시 사용 (extensions 패턴 동일).
+ *
+ * SA `listAdgroups` 는 광고주 전체 광고그룹을 1회 호출로 반환 (캠페인 단위 호출 X).
+ * → 응답 후 DB upsert 단계에서 `nccCampaignId` 가 화이트리스트에 속한 행만 upsert.
+ */
+export type SyncAdgroupsOptions = {
+  campaignIds?: string[]
+}
+
+/**
  * 광고그룹 동기화 (광고주 단위 1회 호출).
  *
  *   1. getCurrentAdvertiser — 권한 검증 + 광고주 객체
@@ -67,6 +81,7 @@ export type SyncAdgroupsResult =
  *   3. listAdgroups(customerId) — SA 조회 (광고주 전체 광고그룹)
  *   4. DB Campaign 매핑 테이블 구성 (nccCampaignId → Campaign.id)
  *      - 응답의 광고그룹이 매핑에 없는 캠페인 소속이면 skip (캠페인 미동기화 상태)
+ *      - options.campaignIds 화이트리스트 적용 시 해당 캠페인 외 광고그룹은 skip (카운트 X — 무관 행)
  *   5. 각 row upsert (nccAdgroupId unique)
  *   6. AuditLog 1건 (요약만, 시크릿 X)
  *
@@ -74,19 +89,28 @@ export type SyncAdgroupsResult =
  */
 export async function syncAdgroups(
   advertiserId: string,
+  options: SyncAdgroupsOptions = {},
 ): Promise<SyncAdgroupsResult> {
   const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
   if (!advertiser.hasKeys) {
     return { ok: false, error: "API 키/시크릿 미입력" }
   }
 
+  const { campaignIds } = options
+  const hasCampaignFilter =
+    Array.isArray(campaignIds) && campaignIds.length > 0
+
   const start = Date.now()
 
-  // -- DB 캠페인 매핑 테이블 (광고주 한정) ---------------------------------------
+  // -- DB 캠페인 매핑 테이블 (광고주 한정 + 선택한 캠페인 한정) -----------------
   // 응답의 nccCampaignId → DB Campaign.id 룩업용. 응답에는 SA 의 nccCampaignId 만 있고
   // 앱 DB 의 AdGroup.campaignId 는 Campaign.id (cuid) 이므로 변환 필수.
+  // campaignIds 미지정 → 광고주 전체. 지정 → 화이트리스트 캠페인만 매핑 → 그 외 광고그룹은 응답에 있어도 skip.
   const campaigns = await prisma.campaign.findMany({
-    where: { advertiserId },
+    where: {
+      advertiserId,
+      ...(hasCampaignFilter ? { id: { in: campaignIds } } : {}),
+    },
     select: { id: true, nccCampaignId: true },
   })
   const campaignIdByNcc = new Map<string, string>(
@@ -192,8 +216,15 @@ export async function syncAdgroups(
       synced,
       skipped,
       customerId: advertiser.customerId,
+      campaignIds: hasCampaignFilter ? campaignIds : undefined,
     },
   })
+
+  // lastSyncAt 갱신 (UI 헤더 "마지막 동기화" 배지). 실패해도 sync 결과는 정상 반환.
+  // 캠페인 필터 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
+  if (!hasCampaignFilter) {
+    await recordSyncAt(advertiserId, "adgroups")
+  }
 
   revalidatePath(`/${advertiserId}/adgroups`)
 

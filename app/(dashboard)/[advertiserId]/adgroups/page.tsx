@@ -28,8 +28,10 @@ import {
   UnauthenticatedError,
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
+import { PageHeader } from "@/components/navigation/page-header"
 import { AdgroupsTable } from "@/components/dashboard/adgroups-table"
 import type { AdgroupRow } from "@/components/dashboard/adgroups-table"
+import { SyncAdgroupsWithFilter } from "@/components/dashboard/sync-adgroups-with-filter"
 
 export default async function AdgroupsPage({
   params,
@@ -80,6 +82,20 @@ export default async function AdgroupsPage({
     orderBy: { updatedAt: "desc" },
   })
 
+  // F-2.2 동기화 캠페인 필터 — 광고주 산하 캠페인 prefetch.
+  // status='deleted' 는 옵션에서 제외 (인라인 동기화 의미 없음).
+  const syncCampaignRows = await prisma.campaign.findMany({
+    where: { advertiserId, status: { not: "deleted" } },
+    select: { id: true, name: true, nccCampaignId: true, status: true },
+    orderBy: { name: "asc" },
+  })
+  const syncCampaigns = syncCampaignRows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    nccCampaignId: c.nccCampaignId,
+    status: c.status as "on" | "off" | "deleted",
+  }))
+
   // Decimal / Date → JSON-friendly 직렬화. AdgroupRow shape 으로 매핑.
   // bidAmt 는 Int? (Decimal 아님) — 추가 변환 불필요.
   // dailyBudget 는 Decimal(14,2) — Number() 로 변환.
@@ -102,10 +118,27 @@ export default async function AdgroupsPage({
   }))
 
   return (
-    <AdgroupsTable
-      advertiserId={advertiserId}
-      hasKeys={advertiser.hasKeys}
-      adgroups={adgroups}
-    />
+    <div className="flex flex-col gap-4 p-6">
+      <PageHeader
+        title="광고그룹"
+        description="ON/OFF · 입찰가 · 예산 · 기본 매체를 다중 선택 후 일괄 변경할 수 있습니다."
+        breadcrumbs={[
+          { label: advertiser.name, href: `/${advertiserId}` },
+          { label: "광고그룹" },
+        ]}
+        actions={
+          <SyncAdgroupsWithFilter
+            advertiserId={advertiserId}
+            hasKeys={advertiser.hasKeys}
+            campaigns={syncCampaigns}
+          />
+        }
+      />
+      <AdgroupsTable
+        advertiserId={advertiserId}
+        hasKeys={advertiser.hasKeys}
+        adgroups={adgroups}
+      />
+    </div>
   )
 }

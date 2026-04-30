@@ -29,11 +29,13 @@ import {
   UnauthenticatedError,
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
+import { PageHeader } from "@/components/navigation/page-header"
 import { AdsTable } from "@/components/dashboard/ads-table"
 import type {
   AdRow,
   AdAdgroupOption,
 } from "@/components/dashboard/ads-table"
+import { SyncAdsWithFilter } from "@/components/dashboard/sync-ads-with-filter"
 
 export default async function AdsPage({
   params,
@@ -114,6 +116,20 @@ export default async function AdsPage({
     campaign: { id: a.campaign.id, name: a.campaign.name },
   }))
 
+  // F-4.1 동기화 캠페인 필터 — 광고주 산하 캠페인 prefetch.
+  // status='deleted' 는 옵션에서 제외 (인라인 동기화 의미 없음).
+  const syncCampaignRows = await prisma.campaign.findMany({
+    where: { advertiserId, status: { not: "deleted" } },
+    select: { id: true, name: true, nccCampaignId: true, status: true },
+    orderBy: { name: "asc" },
+  })
+  const syncCampaigns = syncCampaignRows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    nccCampaignId: c.nccCampaignId,
+    status: c.status as "on" | "off" | "deleted",
+  }))
+
   // Date → ISO 직렬화. AdRow shape 으로 매핑.
   // fields 는 Prisma Json 그대로 통과 (클라이언트에서 extractAdPreview 가 휴리스틱 추출).
   const ads: AdRow[] = rows.map((a) => ({
@@ -137,12 +153,29 @@ export default async function AdsPage({
   }))
 
   return (
-    <AdsTable
-      advertiserId={advertiserId}
-      hasKeys={advertiser.hasKeys}
-      ads={ads}
-      adgroups={adgroups}
-      userRole={userRole}
-    />
+    <div className="flex flex-col gap-4 p-6">
+      <PageHeader
+        title="소재"
+        description="광고그룹별 소재 목록. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집·CSV 는 후속 PR)"
+        breadcrumbs={[
+          { label: advertiser.name, href: `/${advertiserId}` },
+          { label: "소재" },
+        ]}
+        actions={
+          <SyncAdsWithFilter
+            advertiserId={advertiserId}
+            hasKeys={advertiser.hasKeys}
+            campaigns={syncCampaigns}
+          />
+        }
+      />
+      <AdsTable
+        advertiserId={advertiserId}
+        hasKeys={advertiser.hasKeys}
+        ads={ads}
+        adgroups={adgroups}
+        userRole={userRole}
+      />
+    </div>
   )
 }

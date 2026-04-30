@@ -437,7 +437,13 @@ function GrantAccessModal({
               onValueChange={(v) => setSelected(v ?? "")}
             >
               <SelectTrigger>
-                <SelectValue placeholder="광고주 선택" />
+                <SelectValue placeholder="광고주 선택">
+                  {(v: string | null) => {
+                    if (!v) return "광고주 선택"
+                    const a = grantable.find((x) => x.id === v)
+                    return a ? `${a.name} (${a.customerId})` : v
+                  }}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {grantable.map((a) => (

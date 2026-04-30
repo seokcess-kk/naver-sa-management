@@ -319,7 +319,13 @@ function FormView({
           onValueChange={(v) => setNccAdgroupId(v ?? "")}
         >
           <SelectTrigger id="adgroup-select">
-            <SelectValue placeholder="광고그룹을 선택하세요" />
+            <SelectValue placeholder="광고그룹을 선택하세요">
+              {(v: string | null) => {
+                if (!v) return "광고그룹을 선택하세요"
+                const g = adgroups.find((x) => x.nccAdgroupId === v)
+                return g ? `${g.name} · ${g.campaign.name}` : v
+              }}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             {adgroups.map((g) => (

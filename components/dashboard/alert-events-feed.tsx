@@ -107,68 +107,61 @@ export function AlertEventsFeed({
   isAdmin,
   initial,
 }: {
-  /** admin 만 listAlertEvents 호출 가능. false 면 안내 표기. */
+  /** admin 만 listAlertEvents 호출 가능. false 면 컴포넌트 자체 hidden. */
   isAdmin: boolean
-  /** RSC 사전 호출 결과. 5건 슬라이스. admin 아님 / 미호출 시 null. */
+  /** RSC 사전 호출 결과. 5건 슬라이스. admin 아님 / 미호출 / 0건 시 hidden. */
   initial: AlertEventRow[] | null
 }) {
   const items = initial ?? []
 
+  // 컴팩트 정책: admin 이 아니거나 0건이면 영역 자체 hidden (대시보드 노이즈 제거).
+  if (!isAdmin || items.length === 0) {
+    return null
+  }
+
   return (
-    <Card>
+    <Card size="sm">
       <CardHeader className="flex-row items-start justify-between gap-3 border-b">
         <div>
-          <CardTitle>최근 알림 5건</CardTitle>
+          <CardTitle>최근 알림 {items.length}건</CardTitle>
           <CardDescription>
             이 광고주에 적재된 최신 알림 이벤트입니다.
           </CardDescription>
         </div>
-        {isAdmin && (
-          <Button
-            size="sm"
-            variant="outline"
-            render={<Link href="/admin/alerts" />}
-          >
-            전체 보기
-          </Button>
-        )}
+        <Button
+          size="sm"
+          variant="outline"
+          render={<Link href="/admin/alerts" />}
+        >
+          전체 보기
+        </Button>
       </CardHeader>
       <CardContent className="px-4 py-3">
-        {!isAdmin ? (
-          <div className="py-4 text-center text-sm text-muted-foreground">
-            알림 이벤트 조회는 관리자(admin) 전용입니다.
-          </div>
-        ) : items.length === 0 ? (
-          <div className="py-4 text-center text-sm text-muted-foreground">
-            최근 알림 없음.
-          </div>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {items.map((row) => {
-              const sev = payloadSeverity(row.payload)
-              const title = payloadTitle(
-                row.payload,
-                TYPE_LABEL[row.ruleType] ?? row.ruleType,
-              )
-              return (
-                <li
-                  key={row.id}
-                  className="flex items-center gap-3 rounded-md border bg-background px-3 py-2"
-                >
-                  <SeverityDot severity={sev} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm">{title}</div>
-                    <div className="truncate text-[11px] text-muted-foreground">
-                      {TYPE_LABEL[row.ruleType] ?? row.ruleType} ·{" "}
-                      {formatRelative(row.createdAt)}
-                    </div>
+        <ul className="flex flex-col gap-2">
+          {items.map((row) => {
+            const sev = payloadSeverity(row.payload)
+            const title = payloadTitle(
+              row.payload,
+              TYPE_LABEL[row.ruleType] ?? row.ruleType,
+            )
+            return (
+              <li
+                key={row.id}
+                className="flex items-center gap-3 rounded-md border bg-background px-3 py-2"
+              >
+                <SeverityDot severity={sev} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm">{title}</div>
+                  <div className="truncate text-[11px] text-muted-foreground">
+                    {TYPE_LABEL[row.ruleType] ?? row.ruleType} ·{" "}
+                    {formatRelative(row.createdAt)}
                   </div>
-                  <StatusBadge status={row.status} />
-                </li>
-              )
-            })}
-          </ul>
-        )}
+                </div>
+                <StatusBadge status={row.status} />
+              </li>
+            )
+          })}
+        </ul>
       </CardContent>
     </Card>
   )

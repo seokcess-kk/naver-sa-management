@@ -14,7 +14,6 @@
  */
 
 import { notFound, redirect } from "next/navigation"
-import Link from "next/link"
 
 import {
   AuthorizationError,
@@ -24,7 +23,7 @@ import {
 import { prisma } from "@/lib/db/prisma"
 import { getUserDetail, type UserDetail } from "@/app/admin/users/actions"
 import { UserDetailView } from "@/components/admin/user-detail"
-import { Button } from "@/components/ui/button"
+import { PageHeader } from "@/components/navigation/page-header"
 
 export default async function UserDetailPage({
   params,
@@ -66,26 +65,26 @@ export default async function UserDetailPage({
 
   return (
     <div className="flex flex-col gap-6 max-w-3xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            {user.displayName}
-          </h1>
-          <p className="text-sm text-muted-foreground">
+      <PageHeader
+        backHref="/admin/users"
+        backLabel="사용자 목록"
+        breadcrumbs={[
+          { label: "관리" },
+          { label: "사용자", href: "/admin/users" },
+          { label: user.displayName },
+        ]}
+        title={user.displayName}
+        description={
+          <span className="flex flex-wrap items-center gap-2">
             <span className="font-mono">{user.id}</span>
             {user.id === meId ? (
-              <span className="ml-2 inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+              <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
                 본인
               </span>
             ) : null}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" render={<Link href="/admin/users" />}>
-            목록
-          </Button>
-        </div>
-      </div>
+          </span>
+        }
+      />
 
       <UserDetailView
         user={user}

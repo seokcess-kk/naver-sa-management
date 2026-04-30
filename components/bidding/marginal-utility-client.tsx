@@ -225,7 +225,13 @@ export function MarginalUtilityClient({
                 onValueChange={(v) => v && setKeywordId(v)}
               >
                 <SelectTrigger id="keyword-select" className="w-full max-w-[640px]">
-                  <SelectValue placeholder="키워드를 선택하세요" />
+                  <SelectValue placeholder="키워드를 선택하세요">
+                    {(v: string | null) => {
+                      if (!v) return "키워드를 선택하세요"
+                      const opt = keywordOptions.find((x) => x.id === v)
+                      return opt ? `${opt.keyword} · 그룹: ${opt.adgroupName}` : v
+                    }}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {keywordOptions.map((opt) => (

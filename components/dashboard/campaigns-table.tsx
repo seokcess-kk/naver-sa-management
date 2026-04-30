@@ -39,6 +39,13 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
   Table,
   TableBody,
   TableCell,
@@ -47,13 +54,20 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { CampaignStatusBadge } from "@/components/dashboard/campaign-status-badge"
-import { SyncCampaignsButton } from "@/components/dashboard/sync-campaigns-button"
 import {
   BulkActionModal,
   type BulkActionResult,
 } from "@/components/forms/bulk-action-modal"
 import { bulkUpdateCampaigns } from "@/app/(dashboard)/[advertiserId]/campaigns/actions"
 import type { CampaignStatus } from "@/lib/generated/prisma/client"
+
+// shadcn Select 한글 라벨 매핑 (Base UI Select.Value 가 raw value 를 표시하지 않도록)
+const STATUS_LABELS: Record<string, string> = {
+  ALL: "상태 (전체)",
+  on: "ON",
+  off: "OFF",
+  deleted: "삭제됨",
+}
 
 // =============================================================================
 // 타입
@@ -103,15 +117,72 @@ export function CampaignsTable({
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
   const [modalAction, setModalAction] = React.useState<Action | null>(null)
 
+  // -- 필터 state -----------------------------------------------------------
+  const [searchInput, setSearchInput] = React.useState("")
+  const [debouncedSearch, setDebouncedSearch] = React.useState("")
+  const [statusFilter, setStatusFilter] = React.useState<string>("ALL")
+  const [typeFilter, setTypeFilter] = React.useState<string>("ALL")
+
+  // 검색 input debounce 200ms
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchInput), 200)
+    return () => clearTimeout(t)
+  }, [searchInput])
+
+  // 캠페인 type 셀렉트 옵션 — 현재 데이터에 등장하는 타입만 distinct
+  const typeOptions = React.useMemo(() => {
+    const set = new Set<string>()
+    for (const c of campaigns) {
+      if (c.campaignType) set.add(c.campaignType)
+    }
+    return Array.from(set).sort()
+  }, [campaigns])
+
+  // 클라이언트 필터링 — campaigns 는 수십 row 라 가상 스크롤 / TanStack 도입 X
+  const visibleCampaigns = React.useMemo(() => {
+    const q = debouncedSearch.trim().toLowerCase()
+    return campaigns.filter((c) => {
+      if (q !== "" && !c.name.toLowerCase().includes(q)) return false
+      if (statusFilter !== "ALL" && c.status !== statusFilter) return false
+      if (typeFilter !== "ALL" && c.campaignType !== typeFilter) return false
+      return true
+    })
+  }, [campaigns, debouncedSearch, statusFilter, typeFilter])
+
+  // 가시 행 기준 전체 선택 (선택 set 은 globally 유지 — 필터 변경해도 보존)
+  const visibleSelectedCount = React.useMemo(
+    () => visibleCampaigns.filter((c) => selected.has(c.id)).length,
+    [visibleCampaigns, selected],
+  )
   const allSelected =
-    campaigns.length > 0 && selected.size === campaigns.length
-  const someSelected = selected.size > 0 && !allSelected
+    visibleCampaigns.length > 0 &&
+    visibleSelectedCount === visibleCampaigns.length
+  const someSelected = visibleSelectedCount > 0 && !allSelected
+
+  const filtersApplied =
+    searchInput !== "" || statusFilter !== "ALL" || typeFilter !== "ALL"
+
+  function resetFilters() {
+    setSearchInput("")
+    setDebouncedSearch("")
+    setStatusFilter("ALL")
+    setTypeFilter("ALL")
+  }
 
   function toggleAll() {
     if (allSelected) {
-      setSelected(new Set())
+      // 가시 행만 해제 (선택 set 에 가시 외 항목 있어도 보존)
+      setSelected((prev) => {
+        const next = new Set(prev)
+        for (const c of visibleCampaigns) next.delete(c.id)
+        return next
+      })
     } else {
-      setSelected(new Set(campaigns.map((c) => c.id)))
+      setSelected((prev) => {
+        const next = new Set(prev)
+        for (const c of visibleCampaigns) next.add(c.id)
+        return next
+      })
     }
   }
 
@@ -210,19 +281,7 @@ export function CampaignsTable({
   }, [modalAction, selectedRows, advertiserId])
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            캠페인
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            ON/OFF · 일 예산을 다중 선택 후 일괄 변경할 수 있습니다.
-          </p>
-        </div>
-        <SyncCampaignsButton advertiserId={advertiserId} hasKeys={hasKeys} />
-      </header>
-
+    <div className="flex flex-col gap-4">
       {!hasKeys && (
         <Card>
           <CardHeader className="border-b">
@@ -237,6 +296,63 @@ export function CampaignsTable({
           </CardHeader>
         </Card>
       )}
+
+      {/* 필터 / 검색 toolbar */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
+        <Input
+          placeholder="캠페인명 검색..."
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          className="h-8 w-56"
+        />
+        <Select
+          value={statusFilter}
+          onValueChange={(v) => setStatusFilter(v ?? "ALL")}
+        >
+          <SelectTrigger className="w-32">
+            <SelectValue placeholder="상태">
+              {(v: string | null) => STATUS_LABELS[v ?? "ALL"] ?? "상태 (전체)"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">상태 (전체)</SelectItem>
+            <SelectItem value="on">ON</SelectItem>
+            <SelectItem value="off">OFF</SelectItem>
+            <SelectItem value="deleted">삭제됨</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select
+          value={typeFilter}
+          onValueChange={(v) => setTypeFilter(v ?? "ALL")}
+        >
+          <SelectTrigger className="w-44">
+            <SelectValue placeholder="타입">
+              {(v: string | null) =>
+                !v || v === "ALL" ? "타입 (전체)" : v
+              }
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">타입 (전체)</SelectItem>
+            {typeOptions.map((t) => (
+              <SelectItem key={t} value={t}>
+                {t}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {filtersApplied && (
+          <Button size="sm" variant="ghost" onClick={resetFilters}>
+            초기화
+          </Button>
+        )}
+        <span className="ml-auto text-xs text-muted-foreground">
+          총 {campaigns.length.toLocaleString()}건
+          {visibleCampaigns.length !== campaigns.length && (
+            <> (필터 후 {visibleCampaigns.length.toLocaleString()}건)</>
+          )}
+        </span>
+      </div>
 
       {/* 일괄 액션 바 */}
       <div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
@@ -294,19 +410,25 @@ export function CampaignsTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {campaigns.length === 0 ? (
+            {visibleCampaigns.length === 0 ? (
               <TableRow>
                 <TableCell
                   colSpan={6}
                   className="py-8 text-center text-muted-foreground"
                 >
-                  표시할 캠페인이 없습니다. 우측 상단{" "}
-                  <span className="font-medium">광고주에서 동기화</span>{" "}
-                  버튼으로 SA에서 가져오세요.
+                  {campaigns.length === 0 ? (
+                    <>
+                      표시할 캠페인이 없습니다. 우측 상단{" "}
+                      <span className="font-medium">동기화</span>{" "}
+                      버튼으로 SA에서 가져오세요.
+                    </>
+                  ) : (
+                    <>현재 필터에 일치하는 캠페인이 없습니다.</>
+                  )}
                 </TableCell>
               </TableRow>
             ) : (
-              campaigns.map((c) => {
+              visibleCampaigns.map((c) => {
                 const checked = selected.has(c.id)
                 return (
                   <TableRow

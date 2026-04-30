@@ -92,7 +92,6 @@ import {
 import { AdExtensionStatusBadge } from "@/components/dashboard/ad-extension-status-badge"
 import { ExtensionTypeBadge } from "@/components/dashboard/extension-type-badge"
 import { InspectStatusBadge } from "@/components/dashboard/inspect-status-badge"
-import { SyncExtensionsButton } from "@/components/dashboard/sync-extensions-button"
 import {
   ExtensionsAddModal,
   type ExtensionAdgroupOption,
@@ -125,6 +124,26 @@ import type {
 
 // 상한 — bulkActionExtensionsSchema 의 .max(500) 와 일치.
 const BULK_ACTION_MAX = 500
+
+// Base UI Select.Value 가 raw value 를 그대로 표시하는 문제 — 한글 라벨 매핑.
+const TYPE_LABELS: Record<string, string> = {
+  ALL: "타입 (전체)",
+  headline: "추가제목",
+  description: "추가설명",
+  image: "이미지",
+}
+const STATUS_LABELS: Record<string, string> = {
+  ALL: "상태 (전체)",
+  on: "ON",
+  off: "OFF",
+  deleted: "삭제됨",
+}
+const INSPECT_LABELS: Record<string, string> = {
+  ALL: "검수 (전체)",
+  pending: "검수중",
+  approved: "승인",
+  rejected: "거절",
+}
 
 // =============================================================================
 // 타입
@@ -196,10 +215,22 @@ function extractExtensionText(
 }
 
 /**
- * payload(JSON)에서 image type 의 url 추출.
- * actions.ts 의 createAdExtensionsBatch / syncAdExtensions 가 저장하는 shape:
+ * 네이버 SA 확장소재 이미지 호스트 (path-only 응답 보정용).
+ *
+ * SA 응답은 `imagePath` 가 절대 URL 이 아닌 path 만 반환:
+ *   "/MjAy.../...png"
+ * 표시용 절대 URL 은 `https://searchad-phinf.pstatic.net{path}?type=THUMBNAIL`.
+ *
+ * 데이터는 path 그대로 보존(정합성), 표시 시점에만 prefix + 썸네일 옵션 부착.
+ */
+const SA_IMAGE_HOST = "https://searchad-phinf.pstatic.net"
+
+/**
+ * payload(JSON)에서 image type 의 url 추출 + 절대 URL 보정.
+ * actions.ts 의 syncAdExtensions / createAdExtensionsBatch 가 저장하는 shape:
  *   - { image: { url: string, storagePath?: string } }
- * 누락 / 비정상 → null.
+ * url 이 path-only(`/...`) 이면 SA 호스트 prefix + ?type=THUMBNAIL.
+ * 이미 절대 URL 이면 그대로 반환. 누락 / 비정상 → null.
  */
 function extractImageUrl(payload: unknown): string | null {
   if (payload === null || payload === undefined) return null
@@ -208,8 +239,12 @@ function extractImageUrl(payload: unknown): string | null {
   const img = obj.image
   if (!img || typeof img !== "object") return null
   const url = (img as Record<string, unknown>).url
-  if (typeof url === "string" && url.length > 0) return url
-  return null
+  if (typeof url !== "string" || url.length === 0) return null
+  // 절대 URL 이면 그대로
+  if (/^https?:\/\//i.test(url)) return url
+  // path-only → SA 호스트 prefix + 썸네일 옵션
+  const path = url.startsWith("/") ? url : `/${url}`
+  return `${SA_IMAGE_HOST}${path}?type=THUMBNAIL`
 }
 
 // =============================================================================
@@ -648,74 +683,62 @@ export function ExtensionsTable({
   }
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            확장소재
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄
-            변경 가능. (인라인 편집은 후속 PR)
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            size="sm"
-            onClick={() => {
-              if (!hasKeys) {
-                toast.error("키 미설정 — 확장소재 추가 비활성")
-                return
-              }
-              if (adgroups.length === 0) {
-                toast.error(
-                  "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
-                )
-                return
-              }
-              setAddOpen(true)
-            }}
-            disabled={!hasKeys || adgroups.length === 0}
-            title={
-              !hasKeys
-                ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
-                : adgroups.length === 0
-                  ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
-                  : "추가제목 / 추가설명 일괄 추가"
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <Button
+          size="sm"
+          onClick={() => {
+            if (!hasKeys) {
+              toast.error("키 미설정 — 확장소재 추가 비활성")
+              return
             }
-          >
-            텍스트 추가
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              if (!hasKeys) {
-                toast.error("키 미설정 — 확장소재 추가 비활성")
-                return
-              }
-              if (adgroups.length === 0) {
-                toast.error(
-                  "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
-                )
-                return
-              }
-              setImageAddOpen(true)
-            }}
-            disabled={!hasKeys || adgroups.length === 0}
-            title={
-              !hasKeys
-                ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
-                : adgroups.length === 0
-                  ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
-                  : "이미지 확장소재 일괄 추가 (광고그룹 N × 이미지 M)"
+            if (adgroups.length === 0) {
+              toast.error(
+                "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
+              )
+              return
             }
-          >
-            이미지 추가
-          </Button>
-          <SyncExtensionsButton advertiserId={advertiserId} hasKeys={hasKeys} />
-        </div>
-      </header>
+            setAddOpen(true)
+          }}
+          disabled={!hasKeys || adgroups.length === 0}
+          title={
+            !hasKeys
+              ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
+              : adgroups.length === 0
+                ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
+                : "추가제목 / 추가설명 일괄 추가"
+          }
+        >
+          텍스트 추가
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            if (!hasKeys) {
+              toast.error("키 미설정 — 확장소재 추가 비활성")
+              return
+            }
+            if (adgroups.length === 0) {
+              toast.error(
+                "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
+              )
+              return
+            }
+            setImageAddOpen(true)
+          }}
+          disabled={!hasKeys || adgroups.length === 0}
+          title={
+            !hasKeys
+              ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
+              : adgroups.length === 0
+                ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
+                : "이미지 확장소재 일괄 추가 (광고그룹 N × 이미지 M)"
+          }
+        >
+          이미지 추가
+        </Button>
+      </div>
 
       {!hasKeys && (
         <Card>
@@ -745,7 +768,9 @@ export function ExtensionsTable({
           onValueChange={(v) => setTypeFilter(v ?? "ALL")}
         >
           <SelectTrigger className="w-36">
-            <SelectValue placeholder="타입" />
+            <SelectValue placeholder="타입">
+              {(v: string | null) => TYPE_LABELS[v ?? "ALL"] ?? "타입 (전체)"}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">타입 (전체)</SelectItem>
@@ -759,7 +784,9 @@ export function ExtensionsTable({
           onValueChange={(v) => setStatusFilter(v ?? "ALL")}
         >
           <SelectTrigger className="w-32">
-            <SelectValue placeholder="상태" />
+            <SelectValue placeholder="상태">
+              {(v: string | null) => STATUS_LABELS[v ?? "ALL"] ?? "상태 (전체)"}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">상태 (전체)</SelectItem>
@@ -773,7 +800,11 @@ export function ExtensionsTable({
           onValueChange={(v) => setInspectFilter(v ?? "ALL")}
         >
           <SelectTrigger className="w-32">
-            <SelectValue placeholder="검수" />
+            <SelectValue placeholder="검수">
+              {(v: string | null) =>
+                INSPECT_LABELS[v ?? "ALL"] ?? "검수 (전체)"
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">검수 (전체)</SelectItem>
@@ -787,7 +818,13 @@ export function ExtensionsTable({
           onValueChange={(v) => setAdgroupFilter(v ?? "ALL")}
         >
           <SelectTrigger className="w-56">
-            <SelectValue placeholder="광고그룹" />
+            <SelectValue placeholder="광고그룹">
+              {(v: string | null) =>
+                !v || v === "ALL"
+                  ? "광고그룹 (전체)"
+                  : (adgroupOptions.find((g) => g.id === v)?.name ?? v)
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">광고그룹 (전체)</SelectItem>
@@ -887,7 +924,7 @@ export function ExtensionsTable({
         {extensions.length === 0 ? (
           <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
             표시할 확장소재가 없습니다. 우측 상단{" "}
-            <span className="mx-1 font-medium">광고주에서 동기화</span> 버튼을
+            <span className="mx-1 font-medium">동기화</span> 버튼을
             눌러 SA 에서 가져오세요. (광고그룹을 먼저 동기화해야 합니다.)
           </div>
         ) : rows.length === 0 ? (

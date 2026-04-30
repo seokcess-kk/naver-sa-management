@@ -451,15 +451,18 @@ function EditForm({ id, defaultValues }: EditMode) {
     }
   }
 
+  // 단일 form 안에서 카드 4개로 시각 분리. submit 버튼은 form 끝에 1개.
+  // (기능 분할 X — 같은 react-hook-form 인스턴스를 공유하여 atomic 저장.)
   return (
-    <Card>
-      <CardHeader className="border-b">
-        <CardTitle>광고주 수정</CardTitle>
-        <CardDescription>
-          customerId 는 변경할 수 없습니다. 시크릿은 빈 값이면 변경되지 않습니다.
-        </CardDescription>
-      </CardHeader>
-      <form onSubmit={form.handleSubmit(onSubmit)}>
+    <form onSubmit={form.handleSubmit(onSubmit)} className="flex flex-col gap-4">
+      {/* ----------------------- 1) 기본 정보 ----------------------- */}
+      <Card>
+        <CardHeader className="border-b">
+          <CardTitle>기본 정보</CardTitle>
+          <CardDescription>
+            customerId 는 변경할 수 없습니다. 표시명·카테고리·담당자·태그는 운영 메타.
+          </CardDescription>
+        </CardHeader>
         <CardContent className="flex flex-col gap-4 py-4">
           <Field
             label="표시명"
@@ -471,34 +474,6 @@ function EditForm({ id, defaultValues }: EditMode) {
 
           <Field label="customerId" hint="변경 불가">
             <Input value={defaultValues.customerId} disabled readOnly />
-          </Field>
-
-          <Field
-            label="API 키 (변경 시에만 입력)"
-            error={form.formState.errors.apiKey?.message}
-            hint="비워두면 기존 키 유지"
-          >
-            <Input
-              {...form.register("apiKey")}
-              type="password"
-              autoComplete="new-password"
-              spellCheck={false}
-              placeholder="(변경 안 함)"
-            />
-          </Field>
-
-          <Field
-            label="Secret 키 (변경 시에만 입력)"
-            error={form.formState.errors.secretKey?.message}
-            hint="비워두면 기존 키 유지"
-          >
-            <Input
-              {...form.register("secretKey")}
-              type="password"
-              autoComplete="new-password"
-              spellCheck={false}
-              placeholder="(변경 안 함)"
-            />
           </Field>
 
           <Field
@@ -530,12 +505,6 @@ function EditForm({ id, defaultValues }: EditMode) {
             <Input {...form.register("tags")} autoComplete="off" />
           </Field>
 
-          <MemoField
-            registerProps={form.register("memo")}
-            currentValue={memoValue}
-            error={form.formState.errors.memo?.message}
-          />
-
           <Field
             label="상태"
             error={form.formState.errors.status?.message}
@@ -552,7 +521,16 @@ function EditForm({ id, defaultValues }: EditMode) {
                   }
                 >
                   <SelectTrigger className="w-48">
-                    <SelectValue placeholder="상태 선택" />
+                    <SelectValue placeholder="상태 선택">
+                      {(v: string | null) => {
+                        const labels: Record<string, string> = {
+                          active: "활성",
+                          paused: "일시중지",
+                          archived: "아카이브",
+                        }
+                        return v ? (labels[v] ?? v) : "상태 선택"
+                      }}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="active">활성</SelectItem>
@@ -563,27 +541,98 @@ function EditForm({ id, defaultValues }: EditMode) {
               )}
             />
           </Field>
-
-          {/* ============================================================ */}
-          {/* F-11.5 Guardrail (자동 비딩 폭주 방지) */}
-          {/* ============================================================ */}
-          <GuardrailSection control={form.control} errors={form.formState.errors} />
         </CardContent>
-        <CardFooter className="justify-end gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => router.push("/admin/advertisers")}
-            disabled={submitting}
+      </Card>
+
+      {/* ----------------------- 2) API 키 (시크릿) ----------------------- */}
+      <Card>
+        <CardHeader className="border-b">
+          <CardTitle>API 키 (시크릿)</CardTitle>
+          <CardDescription>
+            비워두면 기존 키 유지. 입력 시에만 AES-256-GCM 으로 재암호화 저장됩니다.
+            저장 후에는 화면에 다시 표시되지 않습니다.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4 py-4">
+          <Field
+            label="API 키 (변경 시에만 입력)"
+            error={form.formState.errors.apiKey?.message}
+            hint="비워두면 기존 키 유지"
           >
-            목록으로
-          </Button>
-          <Button type="submit" disabled={submitting}>
-            {submitting ? "저장 중..." : "저장"}
-          </Button>
-        </CardFooter>
-      </form>
-    </Card>
+            <Input
+              {...form.register("apiKey")}
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              placeholder="(변경 안 함)"
+            />
+          </Field>
+
+          <Field
+            label="Secret 키 (변경 시에만 입력)"
+            error={form.formState.errors.secretKey?.message}
+            hint="비워두면 기존 키 유지"
+          >
+            <Input
+              {...form.register("secretKey")}
+              type="password"
+              autoComplete="new-password"
+              spellCheck={false}
+              placeholder="(변경 안 함)"
+            />
+          </Field>
+        </CardContent>
+      </Card>
+
+      {/* ----------------------- 3) Guardrail (P2) ----------------------- */}
+      <Card>
+        <CardHeader className="border-b">
+          <CardTitle>자동 비딩 Guardrail (P2)</CardTitle>
+          <CardDescription>
+            자동 비딩 cron 이 입찰가를 조정할 때 폭주를 방지하는 한도. 운영 사고
+            격리를 위해 보수적으로 설정하세요.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="py-4">
+          <GuardrailSection
+            control={form.control}
+            errors={form.formState.errors}
+          />
+        </CardContent>
+      </Card>
+
+      {/* ----------------------- 4) 메모 ----------------------- */}
+      <Card>
+        <CardHeader className="border-b">
+          <CardTitle>메모</CardTitle>
+          <CardDescription>
+            내부 메모. 운영 메모 / 협력사 코멘트 등.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="py-4">
+          <MemoField
+            registerProps={form.register("memo")}
+            currentValue={memoValue}
+            error={form.formState.errors.memo?.message}
+          />
+        </CardContent>
+      </Card>
+
+      {/* ----------------------- Submit ----------------------- */}
+      <div className="flex items-center justify-end gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => router.push("/admin/advertisers")}
+          disabled={submitting}
+        >
+          목록으로
+        </Button>
+        <Button type="submit" disabled={submitting}>
+          {submitting ? "저장 중..." : "저장"}
+        </Button>
+      </div>
+    </form>
   )
 }
 
@@ -677,18 +726,10 @@ type GuardrailSectionProps = {
 }
 
 function GuardrailSection({ control, errors }: GuardrailSectionProps) {
+  // 호출부 Card 가 이미 헤더 + 패딩을 가지므로 중첩 border / 배경 제거.
+  // Switch 와 한도 input 4개만 노출.
   return (
-    <div className="flex flex-col gap-4 rounded-md border border-border bg-muted/30 p-4">
-      <div className="flex flex-col gap-1">
-        <h3 className="font-heading text-sm font-medium">
-          자동 비딩 Guardrail (P2)
-        </h3>
-        <p className="text-xs text-muted-foreground">
-          자동 비딩 cron 이 입찰가를 조정할 때 폭주를 방지하는 한도. 운영 사고
-          격리를 위해 보수적으로 설정하세요.
-        </p>
-      </div>
-
+    <div className="flex flex-col gap-4">
       {/* 1) 활성 토글 */}
       <Controller
         control={control}

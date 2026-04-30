@@ -477,7 +477,13 @@ function AlertRuleFormModalInner({
               }
             >
               <SelectTrigger className="w-full">
-                <SelectValue placeholder="광고주 선택" />
+                <SelectValue placeholder="광고주 선택">
+                  {(v: string | null) => {
+                    if (!v) return "광고주 선택"
+                    const a = advertisers.find((x) => x.id === v)
+                    return a ? `${a.name} (${a.customerId})` : v
+                  }}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {advertisers.length === 0 ? (

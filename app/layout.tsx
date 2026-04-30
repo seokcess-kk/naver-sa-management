@@ -30,7 +30,14 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col">
         {children}
-        <Toaster richColors position="top-right" />
+        {/* GNB 헤더(h-12 = 48px) 아래로 토스트가 떨어지도록 offset.
+            top: 헤더 + 여유 8px. mobileOffset: 모바일에서도 동일 적용. */}
+        <Toaster
+          richColors
+          position="top-right"
+          offset={{ top: "56px", right: "16px" }}
+          mobileOffset={{ top: "56px", right: "8px" }}
+        />
       </body>
     </html>
   );

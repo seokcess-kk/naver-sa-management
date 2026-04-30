@@ -11,7 +11,6 @@
  */
 
 import { notFound, redirect } from "next/navigation"
-import Link from "next/link"
 
 import {
   AuthorizationError,
@@ -22,7 +21,7 @@ import {
   type ChangeBatchDetail as TChangeBatchDetail,
 } from "@/app/admin/change-batches/actions"
 import { ChangeBatchDetail } from "@/components/admin/change-batch-detail"
-import { Button } from "@/components/ui/button"
+import { PageHeader } from "@/components/navigation/page-header"
 
 export default async function ChangeBatchDetailPage({
   params,
@@ -44,21 +43,17 @@ export default async function ChangeBatchDetailPage({
 
   return (
     <div className="flex flex-col gap-6 max-w-5xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            ChangeBatch 상세
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            <span className="font-mono text-xs">{batch.id}</span>
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" render={<Link href="/admin/change-batches" />}>
-            목록
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        backHref="/admin/change-batches"
+        backLabel="변경 이력"
+        breadcrumbs={[
+          { label: "관리" },
+          { label: "변경 이력", href: "/admin/change-batches" },
+          { label: "ChangeBatch 상세" },
+        ]}
+        title="ChangeBatch 상세"
+        description={<span className="font-mono text-xs">{batch.id}</span>}
+      />
 
       <ChangeBatchDetail batch={batch} />
     </div>

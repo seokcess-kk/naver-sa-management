@@ -83,9 +83,18 @@ export type AdExtensionType =
  * 응답마다 shape 가 다르므로 passthrough 로 raw 보존.
  * 호출부가 type 분기로 안전하게 해석.
  */
+// 네이버 SA 실제 응답은 `nccAdExtensionId` 필드를 사용. 본 모듈은 호환성 유지를 위해
+// `nccExtId` 라는 alias 도 동시에 노출 (transform). 응답 구조 확인된 필드:
+//   {
+//     nccAdExtensionId, ownerId, customerId, type ("HEADLINE"|"DESCRIPTION"|"POWER_LINK_IMAGE"),
+//     adExtension: { headline | description | imagePath, ... },
+//     userLock, status ("ELIGIBLE"|...), inspectStatus, ...
+//   }
 export const AdExtensionSchema = z
   .object({
-    nccExtId: z.string(),
+    // 호환성: 응답 본명(nccAdExtensionId) 기준으로 받고 nccExtId alias 도 허용.
+    nccAdExtensionId: z.string().optional(),
+    nccExtId: z.string().optional(),
     ownerId: z.string(),
     ownerType: z.string().optional(),
     type: z.string(),
@@ -96,6 +105,14 @@ export const AdExtensionSchema = z
     inspectMemo: z.string().optional(),
   })
   .passthrough()
+  .transform((v) => {
+    // 둘 다 비면 zod fail (한쪽은 반드시 있음).
+    const id = v.nccAdExtensionId ?? v.nccExtId
+    if (!id) {
+      throw new Error("AdExtension response missing both nccAdExtensionId and nccExtId")
+    }
+    return { ...v, nccExtId: id, nccAdExtensionId: id }
+  })
 
 export type AdExtension = z.infer<typeof AdExtensionSchema>
 
@@ -174,7 +191,12 @@ export async function listAdExtensions(
   customerId: string,
   opts: { nccAdgroupId: string; type?: AdExtensionType },
 ): Promise<AdExtension[]> {
-  const params = new URLSearchParams({ ownerId: opts.nccAdgroupId })
+  // ownerType=ADGROUP 명시 — 일부 광고그룹 type 에서 ownerType 누락 시
+  // 네이버 SA 가 "Cannot handle the request" 로 거절하는 케이스 회피.
+  const params = new URLSearchParams({
+    ownerId: opts.nccAdgroupId,
+    ownerType: "ADGROUP",
+  })
   if (opts.type) params.set("type", opts.type)
   const path = `/ncc/ad-extensions?${params.toString()}`
   const res = await naverSaClient.request({

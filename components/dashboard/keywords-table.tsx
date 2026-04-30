@@ -66,7 +66,7 @@
  */
 
 import * as React from "react"
-import { useRouter } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 import Papa from "papaparse"
 import {
@@ -118,7 +118,6 @@ import {
 } from "@/components/ui/table"
 import { KeywordStatusBadge } from "@/components/dashboard/keyword-status-badge"
 import { InspectStatusBadge } from "@/components/dashboard/inspect-status-badge"
-import { SyncKeywordsButton } from "@/components/dashboard/sync-keywords-button"
 import { KeywordsCsvImportModal } from "@/components/dashboard/keywords-csv-import-modal"
 import {
   KeywordsAddModal,
@@ -153,6 +152,39 @@ import type {
 
 // 상한 — bulkActionKeywordsSchema 의 .max(500) 와 일치.
 const BULK_ACTION_MAX = 500
+
+// Base UI Select.Value 는 children 에 (value) => ReactNode 를 전달하지 않으면
+// raw value (예: "on", "pending", "EXACT") 를 그대로 표시한다. 한글 라벨 매핑.
+const MATCH_LABELS: Record<string, string> = {
+  ALL: "매치 (전체)",
+  EXACT: "EXACT",
+  PHRASE: "PHRASE",
+  BROAD: "BROAD",
+}
+const STATUS_LABELS: Record<string, string> = {
+  ALL: "상태 (전체)",
+  on: "ON",
+  off: "OFF",
+  deleted: "삭제됨",
+}
+const INSPECT_LABELS: Record<string, string> = {
+  ALL: "검수 (전체)",
+  pending: "검수중",
+  approved: "승인",
+  rejected: "거절",
+}
+const USERLOCK_LABELS: Record<string, string> = {
+  ALL: "잠금 (전체)",
+  locked: "잠금",
+  unlocked: "해제",
+}
+const RNK_LABELS: Record<string, string> = {
+  ALL: "노출 (전체)",
+  top: "1-5위",
+  mid: "6-10위",
+  low: "11위 이상",
+  none: "데이터 없음",
+}
 
 // =============================================================================
 // 타입
@@ -421,6 +453,32 @@ const exactMatchFilter: FilterFn<KeywordRow> = (row, columnId, value) => {
   return v === value
 }
 
+/**
+ * userLock boolean 필터 — "locked" / "unlocked" / "ALL" 문자열 입력.
+ * boolean 자체는 select value 로 다루기 어려워 string token 사용.
+ */
+const userLockFilter: FilterFn<KeywordRow> = (row, _columnId, value) => {
+  if (value === "ALL" || value === undefined || value === null || value === "")
+    return true
+  return value === "locked" ? row.original.userLock : !row.original.userLock
+}
+
+/**
+ * recentAvgRnk 범위 필터 — top(1-5) / mid(6-10) / low(11+) / none(null) / ALL.
+ * Decimal(5,2) → number 직렬화된 row.original.recentAvgRnk 사용.
+ */
+const rnkRangeFilter: FilterFn<KeywordRow> = (row, _columnId, value) => {
+  if (value === "ALL" || value === undefined || value === null || value === "")
+    return true
+  const v = row.original.recentAvgRnk
+  if (value === "none") return v === null
+  if (v === null) return false
+  if (value === "top") return v >= 1 && v <= 5
+  if (value === "mid") return v > 5 && v <= 10
+  if (value === "low") return v > 10
+  return true
+}
+
 // =============================================================================
 // 컬럼 정의
 // =============================================================================
@@ -554,6 +612,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       cell: (info: CellContext<KeywordRow, unknown>) => (
         <UserLockCell row={info.row.original} ctx={ctx} />
       ),
+      filterFn: userLockFilter,
       enableSorting: true,
     },
     {
@@ -582,6 +641,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
             : "—"}
         </div>
       ),
+      filterFn: rnkRangeFilter,
       enableSorting: true,
       sortingFn: (a, b) => {
         const av = a.original.recentAvgRnk
@@ -948,7 +1008,26 @@ export function KeywordsTable({
   userRole: "admin" | "operator" | "viewer"
 }) {
   const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
   const isAdmin = userRole === "admin"
+
+  // 필터를 URL query 로 동기화 (이동 후 복귀해도 맥락 보존).
+  // - default 값(빈 문자열 / "ALL") 은 query 에서 제거하여 URL 을 깔끔하게 유지.
+  // - replace 사용 — 히스토리 누적 방지.
+  // - scroll: false — 가상 스크롤 위치 유지.
+  const updateQuery = React.useCallback(
+    (patch: Record<string, string>) => {
+      const next = new URLSearchParams(searchParams.toString())
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === "" || v === "ALL") next.delete(k)
+        else next.set(k, v)
+      }
+      const qs = next.toString()
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
+    },
+    [router, pathname, searchParams],
+  )
 
   // -- staging state (F-3.2 인라인 편집) --------------------------------------
   const [staging, setStaging] = React.useState<StagingMap>(() => new Map())
@@ -1030,21 +1109,44 @@ export function KeywordsTable({
   const columns = React.useMemo(() => makeColumns(ctx), [ctx])
 
   // -- 필터 state -------------------------------------------------------------
-  const [searchInput, setSearchInput] = React.useState("")
-  const [debouncedSearch, setDebouncedSearch] = React.useState("")
-  const [matchTypeFilter, setMatchTypeFilter] = React.useState<string>("ALL")
-  const [statusFilter, setStatusFilter] = React.useState<string>("ALL")
-  const [inspectFilter, setInspectFilter] = React.useState<string>("ALL")
-  const [adgroupFilter, setAdgroupFilter] = React.useState<string>("ALL")
+  // 초기값은 URL query 에서 읽음 (F-3.8 — 이동 후 복귀해도 맥락 보존).
+  // useSearchParams 가 client 에서만 동작하므로 SSR 단계에선 기본값으로 hydrate.
+  const [searchInput, setSearchInput] = React.useState(
+    () => searchParams.get("q") ?? "",
+  )
+  const [debouncedSearch, setDebouncedSearch] = React.useState(
+    () => searchParams.get("q") ?? "",
+  )
+  const [matchTypeFilter, setMatchTypeFilter] = React.useState<string>(
+    () => searchParams.get("match") ?? "ALL",
+  )
+  const [statusFilter, setStatusFilter] = React.useState<string>(
+    () => searchParams.get("status") ?? "ALL",
+  )
+  const [inspectFilter, setInspectFilter] = React.useState<string>(
+    () => searchParams.get("inspect") ?? "ALL",
+  )
+  const [adgroupFilter, setAdgroupFilter] = React.useState<string>(
+    () => searchParams.get("adgroup") ?? "ALL",
+  )
+  const [userLockFilterValue, setUserLockFilterValue] = React.useState<string>(
+    () => searchParams.get("lock") ?? "ALL",
+  )
+  const [rnkFilter, setRnkFilter] = React.useState<string>(
+    () => searchParams.get("rnk") ?? "ALL",
+  )
   const [sorting, setSorting] = React.useState<SortingState>([
     { id: "updatedAt", desc: true },
   ])
 
-  // 검색 input debounce 200ms
+  // 검색 input debounce 200ms — URL query 도 함께 갱신.
   React.useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(searchInput), 200)
+    const t = setTimeout(() => {
+      setDebouncedSearch(searchInput)
+      updateQuery({ q: searchInput })
+    }, 200)
     return () => clearTimeout(t)
-  }, [searchInput])
+  }, [searchInput, updateQuery])
 
   // 광고그룹 셀렉트 옵션 — props 데이터에서 unique 추출
   const adgroupOptions = React.useMemo(() => {
@@ -1075,6 +1177,12 @@ export function KeywordsTable({
     if (adgroupFilter !== "ALL") {
       f.push({ id: "adgroupId", value: adgroupFilter })
     }
+    if (userLockFilterValue !== "ALL") {
+      f.push({ id: "userLock", value: userLockFilterValue })
+    }
+    if (rnkFilter !== "ALL") {
+      f.push({ id: "recentAvgRnk", value: rnkFilter })
+    }
     return f
   }, [
     debouncedSearch,
@@ -1082,6 +1190,8 @@ export function KeywordsTable({
     statusFilter,
     inspectFilter,
     adgroupFilter,
+    userLockFilterValue,
+    rnkFilter,
   ])
 
   const table = useReactTable<KeywordRow>({
@@ -1124,6 +1234,17 @@ export function KeywordsTable({
     setStatusFilter("ALL")
     setInspectFilter("ALL")
     setAdgroupFilter("ALL")
+    setUserLockFilterValue("ALL")
+    setRnkFilter("ALL")
+    updateQuery({
+      q: "",
+      match: "ALL",
+      status: "ALL",
+      inspect: "ALL",
+      adgroup: "ALL",
+      lock: "ALL",
+      rnk: "ALL",
+    })
   }
 
   // -- staging 적용된 row 배열 (모달 / 미리보기) -----------------------------
@@ -1227,87 +1348,75 @@ export function KeywordsTable({
   }
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            키워드
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            셀을 클릭해 인라인 편집하거나, 체크박스로 다중 선택 후 ON/OFF ·
-            입찰가 일괄 변경. CSV 가져오기로 일괄 생성·수정·OFF 가능.
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              // F-3.5 — 현재 필터 / 정렬 적용된 rows 만 직렬화 (table.getRowModel())
-              const filtered = rows.map((r) => r.original)
-              if (filtered.length === 0) return
-              exportKeywordsCsv(filtered, advertiserId)
-              toast.success(`키워드 ${filtered.length.toLocaleString()}건 내보내기 완료`)
-            }}
-            disabled={rows.length === 0}
-            title={
-              rows.length === 0
-                ? "내보낼 키워드가 없습니다 (필터 결과 0건)"
-                : "현재 필터 / 정렬된 키워드를 CSV 로 다운로드"
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            // F-3.5 — 현재 필터 / 정렬 적용된 rows 만 직렬화 (table.getRowModel())
+            const filtered = rows.map((r) => r.original)
+            if (filtered.length === 0) return
+            exportKeywordsCsv(filtered, advertiserId)
+            toast.success(`키워드 ${filtered.length.toLocaleString()}건 내보내기 완료`)
+          }}
+          disabled={rows.length === 0}
+          title={
+            rows.length === 0
+              ? "내보낼 키워드가 없습니다 (필터 결과 0건)"
+              : "현재 필터 / 정렬된 키워드를 CSV 로 다운로드"
+          }
+        >
+          <DownloadIcon />
+          CSV 내보내기
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            if (!hasKeys) {
+              toast.error("키 미설정 — CSV 가져오기 비활성")
+              return
             }
-          >
-            <DownloadIcon />
-            CSV 내보내기
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              if (!hasKeys) {
-                toast.error("키 미설정 — CSV 가져오기 비활성")
-                return
-              }
-              setCsvOpen(true)
-            }}
-            disabled={!hasKeys}
-            title={
-              !hasKeys
-                ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
-                : undefined
+            setCsvOpen(true)
+          }}
+          disabled={!hasKeys}
+          title={
+            !hasKeys
+              ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
+              : undefined
+          }
+        >
+          CSV 가져오기
+        </Button>
+        {/* F-3.6 키워드 추가 — hasKeys=false / 광고그룹 0개 일 때 disabled */}
+        <Button
+          size="sm"
+          onClick={() => {
+            if (!hasKeys) {
+              toast.error("키 미설정 — 키워드 추가 비활성")
+              return
             }
-          >
-            CSV 가져오기
-          </Button>
-          {/* F-3.6 키워드 추가 — hasKeys=false / 광고그룹 0개 일 때 disabled */}
-          <Button
-            size="sm"
-            onClick={() => {
-              if (!hasKeys) {
-                toast.error("키 미설정 — 키워드 추가 비활성")
-                return
-              }
-              if (adgroups.length === 0) {
-                toast.error(
-                  "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
-                )
-                return
-              }
-              setAddOpen(true)
-            }}
-            disabled={!hasKeys || adgroups.length === 0}
-            title={
-              !hasKeys
-                ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
-                : adgroups.length === 0
-                  ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
-                  : "단건·다건 키워드 추가"
+            if (adgroups.length === 0) {
+              toast.error(
+                "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
+              )
+              return
             }
-          >
-            키워드 추가
-          </Button>
-          <SyncKeywordsButton advertiserId={advertiserId} hasKeys={hasKeys} />
-        </div>
-      </header>
+            setAddOpen(true)
+          }}
+          disabled={!hasKeys || adgroups.length === 0}
+          title={
+            !hasKeys
+              ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
+              : adgroups.length === 0
+                ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
+                : "단건·다건 키워드 추가"
+          }
+        >
+          키워드 추가
+        </Button>
+      </div>
 
       {!hasKeys && (
         <Card>
@@ -1334,10 +1443,16 @@ export function KeywordsTable({
         />
         <Select
           value={matchTypeFilter}
-          onValueChange={(v) => setMatchTypeFilter(v ?? "ALL")}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setMatchTypeFilter(next)
+            updateQuery({ match: next })
+          }}
         >
           <SelectTrigger className="w-32">
-            <SelectValue placeholder="매치타입" />
+            <SelectValue placeholder="매치타입">
+              {(v: string | null) => MATCH_LABELS[v ?? "ALL"] ?? "매치 (전체)"}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">매치 (전체)</SelectItem>
@@ -1348,10 +1463,16 @@ export function KeywordsTable({
         </Select>
         <Select
           value={statusFilter}
-          onValueChange={(v) => setStatusFilter(v ?? "ALL")}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setStatusFilter(next)
+            updateQuery({ status: next })
+          }}
         >
           <SelectTrigger className="w-32">
-            <SelectValue placeholder="상태" />
+            <SelectValue placeholder="상태">
+              {(v: string | null) => STATUS_LABELS[v ?? "ALL"] ?? "상태 (전체)"}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">상태 (전체)</SelectItem>
@@ -1362,10 +1483,18 @@ export function KeywordsTable({
         </Select>
         <Select
           value={inspectFilter}
-          onValueChange={(v) => setInspectFilter(v ?? "ALL")}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setInspectFilter(next)
+            updateQuery({ inspect: next })
+          }}
         >
           <SelectTrigger className="w-32">
-            <SelectValue placeholder="검수" />
+            <SelectValue placeholder="검수">
+              {(v: string | null) =>
+                INSPECT_LABELS[v ?? "ALL"] ?? "검수 (전체)"
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">검수 (전체)</SelectItem>
@@ -1376,10 +1505,20 @@ export function KeywordsTable({
         </Select>
         <Select
           value={adgroupFilter}
-          onValueChange={(v) => setAdgroupFilter(v ?? "ALL")}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setAdgroupFilter(next)
+            updateQuery({ adgroup: next })
+          }}
         >
           <SelectTrigger className="w-56">
-            <SelectValue placeholder="광고그룹" />
+            <SelectValue placeholder="광고그룹">
+              {(v: string | null) =>
+                !v || v === "ALL"
+                  ? "광고그룹 (전체)"
+                  : (adgroupOptions.find((g) => g.id === v)?.name ?? v)
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">광고그룹 (전체)</SelectItem>
@@ -1388,6 +1527,48 @@ export function KeywordsTable({
                 {g.name}
               </SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={userLockFilterValue}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setUserLockFilterValue(next)
+            updateQuery({ lock: next })
+          }}
+        >
+          <SelectTrigger className="w-32">
+            <SelectValue placeholder="잠금">
+              {(v: string | null) =>
+                USERLOCK_LABELS[v ?? "ALL"] ?? "잠금 (전체)"
+              }
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">잠금 (전체)</SelectItem>
+            <SelectItem value="locked">잠금</SelectItem>
+            <SelectItem value="unlocked">해제</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select
+          value={rnkFilter}
+          onValueChange={(v) => {
+            const next = v ?? "ALL"
+            setRnkFilter(next)
+            updateQuery({ rnk: next })
+          }}
+        >
+          <SelectTrigger className="w-36">
+            <SelectValue placeholder="평균 노출">
+              {(v: string | null) => RNK_LABELS[v ?? "ALL"] ?? "노출 (전체)"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">노출 (전체)</SelectItem>
+            <SelectItem value="top">1-5위</SelectItem>
+            <SelectItem value="mid">6-10위</SelectItem>
+            <SelectItem value="low">11위 이상</SelectItem>
+            <SelectItem value="none">데이터 없음</SelectItem>
           </SelectContent>
         </Select>
         <Button
@@ -1399,7 +1580,9 @@ export function KeywordsTable({
             matchTypeFilter === "ALL" &&
             statusFilter === "ALL" &&
             inspectFilter === "ALL" &&
-            adgroupFilter === "ALL"
+            adgroupFilter === "ALL" &&
+            userLockFilterValue === "ALL" &&
+            rnkFilter === "ALL"
           }
         >
           초기화
@@ -1526,7 +1709,7 @@ export function KeywordsTable({
         {keywords.length === 0 ? (
           <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
             표시할 키워드가 없습니다. 우측 상단{" "}
-            <span className="mx-1 font-medium">광고주에서 동기화</span> 버튼을
+            <span className="mx-1 font-medium">동기화</span> 버튼을
             눌러 SA 에서 가져오세요. (광고그룹을 먼저 동기화해야 합니다.)
           </div>
         ) : rows.length === 0 ? (

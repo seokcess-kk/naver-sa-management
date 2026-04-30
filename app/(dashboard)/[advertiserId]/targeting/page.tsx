@@ -29,6 +29,7 @@ import {
 } from "@/components/ui/card"
 import { TargetingClient } from "@/components/bidding/targeting-client"
 import { getTargetingRule } from "@/app/(dashboard)/[advertiserId]/targeting/actions"
+import { PageHeader } from "@/components/navigation/page-header"
 
 export default async function TargetingPage({
   params,
@@ -62,12 +63,13 @@ export default async function TargetingPage({
   if (!ruleRes.ok) {
     return (
       <div className="flex flex-col gap-6 p-6">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            시간대·지역 타게팅
-          </h1>
-          <p className="text-sm text-muted-foreground">{advertiser.name}</p>
-        </div>
+        <PageHeader
+          title="시간대·지역 타게팅"
+          breadcrumbs={[
+            { label: advertiser.name, href: `/${advertiserId}` },
+            { label: "타게팅" },
+          ]}
+        />
         <Card>
           <CardHeader className="border-b">
             <CardTitle className="text-amber-700 dark:text-amber-400">
@@ -82,15 +84,14 @@ export default async function TargetingPage({
 
   return (
     <div className="flex flex-col gap-6 p-6">
-      <div>
-        <h1 className="font-heading text-xl font-medium leading-snug">
-          시간대·지역 타게팅
-        </h1>
-        <p className="text-sm text-muted-foreground">
-          {advertiser.name} · 7×24 시간 가중 + 디바이스 가중 + 지역 가중 (자동
-          비딩 미적용)
-        </p>
-      </div>
+      <PageHeader
+        title="시간대·지역 타게팅"
+        description="7×24 시간 가중 + 디바이스 가중 + 지역 가중 (자동 비딩 미적용)"
+        breadcrumbs={[
+          { label: advertiser.name, href: `/${advertiserId}` },
+          { label: "타게팅" },
+        ]}
+      />
 
       <Card size="sm">
         <CardHeader className="border-b">

@@ -49,6 +49,7 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser, assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import {
   createAds,
   deleteAd,
@@ -77,6 +78,18 @@ export type SyncAdsResult =
   | { ok: false; error: string }
 
 /**
+ * `syncAds` 옵션 — 두 번째 인자.
+ *
+ * - `campaignIds` : 광고그룹 query 시 캠페인 화이트리스트(앱 DB Campaign.id). 미지정 시 광고주 전체.
+ *                   UI에서 "선택한 캠페인만 동기화" 시 사용 (extensions 패턴 동일).
+ *
+ * SA `listAds` 는 광고그룹 단위 호출. → 광고그룹 query 단계에서 캠페인 필터 적용.
+ */
+export type SyncAdsOptions = {
+  campaignIds?: string[]
+}
+
+/**
  * 소재 동기화 (광고주 단위 — 모든 광고그룹 순회).
  *
  *   1. getCurrentAdvertiser — 권한 검증 + 광고주 객체
@@ -96,17 +109,29 @@ export type SyncAdsResult =
  * TODO: 광고그룹 200개 + 다수 소재 동기화 시 Vercel 함수 시간 한계 부딪힐 수 있음.
  *       현 시점은 단순 동기 처리. 측정 후 ChangeBatch + Chunk Executor (SPEC 3.5) 이관.
  */
-export async function syncAds(advertiserId: string): Promise<SyncAdsResult> {
+export async function syncAds(
+  advertiserId: string,
+  options: SyncAdsOptions = {},
+): Promise<SyncAdsResult> {
   const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
   if (!advertiser.hasKeys) {
     return { ok: false, error: "API 키/시크릿 미입력" }
   }
 
+  const { campaignIds } = options
+  const hasCampaignFilter =
+    Array.isArray(campaignIds) && campaignIds.length > 0
+
   const start = Date.now()
 
-  // -- DB 광고그룹 매핑 테이블 (광고주 한정) -----------------------------------
+  // -- DB 광고그룹 매핑 테이블 (광고주 한정 + 선택한 캠페인 한정) ---------------
   const adgroups = await prisma.adGroup.findMany({
-    where: { campaign: { advertiserId } },
+    where: {
+      campaign: {
+        advertiserId,
+        ...(hasCampaignFilter ? { id: { in: campaignIds } } : {}),
+      },
+    },
     select: { id: true, nccAdgroupId: true },
   })
 
@@ -123,9 +148,15 @@ export async function syncAds(advertiserId: string): Promise<SyncAdsResult> {
         scannedAdgroups: 0,
         skipped: 0,
         customerId: advertiser.customerId,
+        campaignIds: hasCampaignFilter ? campaignIds : undefined,
         note: "no-adgroups",
       },
     })
+    // lastSyncAt 갱신 — 광고그룹 0개도 "동기화 시도 완료" 로 기록 (UI 표시 일관성).
+    // 단, 캠페인 필터 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
+    if (!hasCampaignFilter) {
+      await recordSyncAt(advertiserId, "ads")
+    }
     revalidatePath(`/${advertiserId}/ads`)
     return {
       ok: true,
@@ -142,117 +173,135 @@ export async function syncAds(advertiserId: string): Promise<SyncAdsResult> {
 
   // -- 광고그룹 단위 listAds 반복 ---------------------------------------------
   // SA 소재 조회는 광고그룹 단위만 제공. 광고그룹 N개 → 호출 N번.
-  // 부분 실패 허용: 단일 광고그룹 실패는 다른 광고그룹 동기화에 영향 X.
+  // 부분 실패 허용 (Promise.allSettled): 단일 광고그룹 실패는 다른 광고그룹 동기화에 영향 X.
+  //
+  // 성능: 광고그룹 chunk 5 병렬 호출 (Rate Limit 토큰 버킷이 광고주별 큐잉 → 자동 wait).
+  //   - N=50 기준 기존 순차 ~15초 → chunk 5 병렬 ~3초 수준 (약 5배 단축).
+  //   - DB upsert 는 chunk 결과 매핑 후 sequential — connection pool 보호.
   let syncedAds = 0
   let skipped = 0
   let scannedAdgroups = 0
 
-  try {
-    for (const ag of adgroups) {
-      let remote: SaAd[]
-      try {
-        remote = await listAds(advertiser.customerId, {
-          nccAdgroupId: ag.nccAdgroupId,
-        })
-      } catch (e) {
-        // 단일 광고그룹 실패는 로그만 남기고 다음으로 (부분 동기화).
-        if (e instanceof NaverSaError) {
-          console.warn(
-            `[syncAds] listAds failed for nccAdgroupId=${ag.nccAdgroupId}: ${e.message}`,
-          )
-        } else {
-          console.warn(
-            `[syncAds] listAds unknown error for nccAdgroupId=${ag.nccAdgroupId}:`,
-            e,
-          )
-        }
-        scannedAdgroups++
-        continue
-      }
+  const CHUNK_SIZE = 5
 
-      // -- upsert 루프 ------------------------------------------------------
-      for (const a of remote) {
-        const dbAdgroupId = adgroupIdMap.get(a.nccAdgroupId)
-        if (!dbAdgroupId) {
-          // 광고그룹이 DB 에 없음 (광고그룹 미동기화 또는 삭제됨) → skip + 카운트.
-          skipped++
-          console.warn(
-            `[syncAds] skip nccAdId=${a.nccAdId}: ` +
-              `parent nccAdgroupId=${a.nccAdgroupId} not found in DB`,
-          )
+  try {
+    for (let i = 0; i < adgroups.length; i += CHUNK_SIZE) {
+      const slice = adgroups.slice(i, i + CHUNK_SIZE)
+      const settled = await Promise.allSettled(
+        slice.map((ag) =>
+          listAds(advertiser.customerId, { nccAdgroupId: ag.nccAdgroupId }),
+        ),
+      )
+
+      for (let j = 0; j < slice.length; j++) {
+        const ag = slice[j]
+        const r = settled[j]
+        if (r.status === "rejected") {
+          // 단일 광고그룹 실패는 로그만 남기고 다음으로 (부분 동기화).
+          const e = r.reason
+          if (e instanceof NaverSaError) {
+            console.warn(
+              `[syncAds] listAds failed for nccAdgroupId=${ag.nccAdgroupId}: ${e.message}`,
+            )
+          } else {
+            console.warn(
+              `[syncAds] listAds unknown error for nccAdgroupId=${ag.nccAdgroupId}:`,
+              e,
+            )
+          }
+          scannedAdgroups++
           continue
         }
+        const remote: SaAd[] = r.value
 
-        const mappedStatus = mapAdStatus(a)
-        const mappedInspect = mapAdInspectStatus(a)
+        // -- upsert 루프 ------------------------------------------------------
+        for (const a of remote) {
+          const dbAdgroupId = adgroupIdMap.get(a.nccAdgroupId)
+          if (!dbAdgroupId) {
+            // 광고그룹이 DB 에 없음 (광고그룹 미동기화 또는 삭제됨) → skip + 카운트.
+            skipped++
+            console.warn(
+              `[syncAds] skip nccAdId=${a.nccAdId}: ` +
+                `parent nccAdgroupId=${a.nccAdgroupId} not found in DB`,
+            )
+            continue
+          }
 
-        // adType / fields / inspectMemo 는 응답에 있을 때만 반영 (없으면 기존값 유지).
-        // AdSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
-        const adTypeVal =
-          typeof a.adType === "string" && a.adType.length > 0 ? a.adType : null
-        const fieldsVal =
-          a.ad && typeof a.ad === "object"
-            ? (a.ad as unknown as Prisma.InputJsonValue)
-            : null
-        const inspectMemoVal =
-          typeof a.inspectMemo === "string" && a.inspectMemo.length > 0
-            ? a.inspectMemo
-            : null
+          const mappedStatus = mapAdStatus(a)
+          const mappedInspect = mapAdInspectStatus(a)
 
-        const rawJson = a as unknown as Prisma.InputJsonValue
+          // adType / fields / inspectMemo 는 응답에 있을 때만 반영 (없으면 기존값 유지).
+          // AdSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
+          const adTypeVal =
+            typeof a.adType === "string" && a.adType.length > 0
+              ? a.adType
+              : null
+          const fieldsVal =
+            a.ad && typeof a.ad === "object"
+              ? (a.ad as unknown as Prisma.InputJsonValue)
+              : null
+          const inspectMemoVal =
+            typeof a.inspectMemo === "string" && a.inspectMemo.length > 0
+              ? a.inspectMemo
+              : null
 
-        // create / update 페이로드: 응답에 없는 nullable 필드는 키 자체를 제외하여
-        // 기존값 유지 + Prisma Json optional 타입 호환 (null 대신 undefined).
-        // adType: String? — null 그대로 OK
-        // fields: Json? / inspectMemo: String? — Prisma Optional Json/String 의 update 입력 타입은
-        //   null 을 허용하지 않으므로 키 자체를 제외 (응답에 있을 때만 반영).
-        const baseCreateData: {
-          adgroupId: string
-          nccAdId: string
-          inspectStatus: InspectStatus
-          status: AdStatus
-          raw: Prisma.InputJsonValue
-          adType?: string | null
-          fields?: Prisma.InputJsonValue
-          inspectMemo?: string
-        } = {
-          adgroupId: dbAdgroupId,
-          nccAdId: a.nccAdId,
-          adType: adTypeVal,
-          inspectStatus: mappedInspect,
-          status: mappedStatus,
-          raw: rawJson,
+          const rawJson = a as unknown as Prisma.InputJsonValue
+
+          // create / update 페이로드: 응답에 없는 nullable 필드는 키 자체를 제외하여
+          // 기존값 유지 + Prisma Json optional 타입 호환 (null 대신 undefined).
+          // adType: String? — null 그대로 OK
+          // fields: Json? / inspectMemo: String? — Prisma Optional Json/String 의 update 입력 타입은
+          //   null 을 허용하지 않으므로 키 자체를 제외 (응답에 있을 때만 반영).
+          const baseCreateData: {
+            adgroupId: string
+            nccAdId: string
+            inspectStatus: InspectStatus
+            status: AdStatus
+            raw: Prisma.InputJsonValue
+            adType?: string | null
+            fields?: Prisma.InputJsonValue
+            inspectMemo?: string
+          } = {
+            adgroupId: dbAdgroupId,
+            nccAdId: a.nccAdId,
+            adType: adTypeVal,
+            inspectStatus: mappedInspect,
+            status: mappedStatus,
+            raw: rawJson,
+          }
+          if (fieldsVal !== null) baseCreateData.fields = fieldsVal
+          if (inspectMemoVal !== null)
+            baseCreateData.inspectMemo = inspectMemoVal
+
+          const baseUpdateData: {
+            adgroupId: string
+            inspectStatus: InspectStatus
+            status: AdStatus
+            raw: Prisma.InputJsonValue
+            adType?: string
+            fields?: Prisma.InputJsonValue
+            inspectMemo?: string
+          } = {
+            adgroupId: dbAdgroupId,
+            inspectStatus: mappedInspect,
+            status: mappedStatus,
+            raw: rawJson,
+          }
+          if (adTypeVal !== null) baseUpdateData.adType = adTypeVal
+          if (fieldsVal !== null) baseUpdateData.fields = fieldsVal
+          if (inspectMemoVal !== null)
+            baseUpdateData.inspectMemo = inspectMemoVal
+
+          await prisma.ad.upsert({
+            where: { nccAdId: a.nccAdId },
+            create: baseCreateData,
+            update: baseUpdateData,
+          })
+          syncedAds++
         }
-        if (fieldsVal !== null) baseCreateData.fields = fieldsVal
-        if (inspectMemoVal !== null) baseCreateData.inspectMemo = inspectMemoVal
 
-        const baseUpdateData: {
-          adgroupId: string
-          inspectStatus: InspectStatus
-          status: AdStatus
-          raw: Prisma.InputJsonValue
-          adType?: string
-          fields?: Prisma.InputJsonValue
-          inspectMemo?: string
-        } = {
-          adgroupId: dbAdgroupId,
-          inspectStatus: mappedInspect,
-          status: mappedStatus,
-          raw: rawJson,
-        }
-        if (adTypeVal !== null) baseUpdateData.adType = adTypeVal
-        if (fieldsVal !== null) baseUpdateData.fields = fieldsVal
-        if (inspectMemoVal !== null) baseUpdateData.inspectMemo = inspectMemoVal
-
-        await prisma.ad.upsert({
-          where: { nccAdId: a.nccAdId },
-          create: baseCreateData,
-          update: baseUpdateData,
-        })
-        syncedAds++
+        scannedAdgroups++
       }
-
-      scannedAdgroups++
     }
   } catch (e) {
     // upsert 단계 자체 실패 (DB 연결 등 치명 오류).
@@ -271,8 +320,15 @@ export async function syncAds(advertiserId: string): Promise<SyncAdsResult> {
       scannedAdgroups,
       skipped,
       customerId: advertiser.customerId,
+      campaignIds: hasCampaignFilter ? campaignIds : undefined,
     },
   })
+
+  // lastSyncAt 갱신 (UI 헤더 "마지막 동기화" 배지). 실패해도 sync 결과는 정상 반환.
+  // 캠페인 필터 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
+  if (!hasCampaignFilter) {
+    await recordSyncAt(advertiserId, "ads")
+  }
 
   revalidatePath(`/${advertiserId}/ads`)
 

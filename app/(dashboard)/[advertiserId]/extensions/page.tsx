@@ -34,11 +34,13 @@ import {
   UnauthenticatedError,
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
+import { PageHeader } from "@/components/navigation/page-header"
 import { ExtensionsTable } from "@/components/dashboard/extensions-table"
 import type {
   ExtensionRow,
   ExtensionAdgroupOption,
 } from "@/components/dashboard/extensions-table"
+import { SyncExtensionsWithFilter } from "@/components/dashboard/sync-extensions-with-filter"
 
 export default async function ExtensionsPage({
   params,
@@ -121,6 +123,21 @@ export default async function ExtensionsPage({
     campaign: { id: a.campaign.id, name: a.campaign.name },
   }))
 
+  // F-5.1 / F-5.2 동기화 캠페인 필터 — 광고주 산하 캠페인 prefetch.
+  // status='deleted' 는 옵션에서 제외 (인라인 동기화 의미 없음).
+  const syncCampaignRows = await prisma.campaign.findMany({
+    where: { advertiserId, status: { not: "deleted" } },
+    select: { id: true, name: true, nccCampaignId: true, status: true },
+    orderBy: { name: "asc" },
+  })
+  const syncCampaigns = syncCampaignRows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    nccCampaignId: c.nccCampaignId,
+    // status 는 prisma enum (on/off/deleted). 컴포넌트와 동일 union.
+    status: c.status as "on" | "off" | "deleted",
+  }))
+
   // RSC → 클라이언트 직렬화. Date → ISO 문자열. ExtensionRow shape 매핑.
   // adgroup 은 항상 동반 (where 에서 ownerType=adgroup + adgroup join 필수 통과).
   // 그럼에도 prisma 가 relation 을 nullable 로 추론하면 fallback 처리.
@@ -148,12 +165,29 @@ export default async function ExtensionsPage({
     }))
 
   return (
-    <ExtensionsTable
-      advertiserId={advertiserId}
-      hasKeys={advertiser.hasKeys}
-      extensions={extensions}
-      adgroups={adgroups}
-      userRole={userRole}
-    />
+    <div className="flex flex-col gap-4 p-6">
+      <PageHeader
+        title="확장소재"
+        description="추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집은 후속 PR)"
+        breadcrumbs={[
+          { label: advertiser.name, href: `/${advertiserId}` },
+          { label: "확장소재" },
+        ]}
+        actions={
+          <SyncExtensionsWithFilter
+            advertiserId={advertiser.id}
+            hasKeys={advertiser.hasKeys}
+            campaigns={syncCampaigns}
+          />
+        }
+      />
+      <ExtensionsTable
+        advertiserId={advertiserId}
+        hasKeys={advertiser.hasKeys}
+        extensions={extensions}
+        adgroups={adgroups}
+        userRole={userRole}
+      />
+    </div>
   )
 }

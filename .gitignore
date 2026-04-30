@@ -44,3 +44,6 @@ next-env.d.ts
 
 # Harness 워크스페이스 (오케스트레이터 중간 산출물, 감사 추적용 로컬 보관)
 _workspace/
+
+# Claude Code 런타임 (락파일·예약 작업 등)
+.claude/scheduled_tasks.lock

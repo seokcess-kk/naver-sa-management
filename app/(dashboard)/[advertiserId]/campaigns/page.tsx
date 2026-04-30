@@ -24,8 +24,10 @@ import {
   UnauthenticatedError,
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
+import { PageHeader } from "@/components/navigation/page-header"
 import { CampaignsTable } from "@/components/dashboard/campaigns-table"
 import type { CampaignRow } from "@/components/dashboard/campaigns-table"
+import { SyncCampaignsButton } from "@/components/dashboard/sync-campaigns-button"
 
 export default async function CampaignsPage({
   params,
@@ -85,10 +87,26 @@ export default async function CampaignsPage({
   }))
 
   return (
-    <CampaignsTable
-      advertiserId={advertiserId}
-      hasKeys={advertiser.hasKeys}
-      campaigns={campaigns}
-    />
+    <div className="flex flex-col gap-4 p-6">
+      <PageHeader
+        title="캠페인"
+        description="ON/OFF · 일 예산을 다중 선택 후 일괄 변경할 수 있습니다."
+        breadcrumbs={[
+          { label: advertiser.name, href: `/${advertiserId}` },
+          { label: "캠페인" },
+        ]}
+        actions={
+          <SyncCampaignsButton
+            advertiserId={advertiserId}
+            hasKeys={advertiser.hasKeys}
+          />
+        }
+      />
+      <CampaignsTable
+        advertiserId={advertiserId}
+        hasKeys={advertiser.hasKeys}
+        campaigns={campaigns}
+      />
+    </div>
   )
 }

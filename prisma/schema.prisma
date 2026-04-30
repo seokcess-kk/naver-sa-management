@@ -209,6 +209,16 @@ model Advertiser {
   guardrailMaxBidChangePct      Int              @default(20)
   guardrailMaxChangesPerKeyword Int              @default(3)
   guardrailMaxChangesPerDay     Int              @default(50)
+  // 동기화 마지막 시각 (sync 종류별 ISO 문자열 맵).
+  //   key:   "campaigns" | "adgroups" | "keywords" | "ads" | "extensions"
+  //   value: ISO timestamp string (Date.toISOString())
+  //   예) { "campaigns": "2026-04-29T05:00:00.000Z", "keywords": "2026-04-29T05:01:23.456Z" }
+  //   - 점진 채움 (실행된 sync 만 키 등장).
+  //   - dev 환경 단일 사용자 가정으로 race condition 무시 — sync 시작 시점에 read,
+  //     sync 끝나고 spread merge 로 write. 동시 다중 sync 가 발생해도 마지막 write
+  //     가 다른 키를 덮을 수 있으나 운영 단계에서 재검토 (UI 표시용 메타이므로 위험 낮음).
+  //   - JSON passthrough — schema 강제 X. 호출부(헬퍼)에서 키 일관성 책임.
+  lastSyncAt                    Json             @default("{}")
   createdAt                     DateTime         @default(now())
   updatedAt                     DateTime         @updatedAt
 

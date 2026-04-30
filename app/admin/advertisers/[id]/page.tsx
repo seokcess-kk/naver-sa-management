@@ -6,34 +6,54 @@
  *   "키 설정 여부" 판정용 boolean(hasApiKey/hasSecretKey) 만 RSC 에서 파생.
  * - 수정 시에만 새 값 입력. 빈 값은 변경 안 함.
  * - 테스트 연결 / 삭제 버튼 포함
+ *
+ * 레이아웃:
+ *   - HERO: PageHeader (브레드크럼 + 표시명 + cid + 액션 [테스트 연결] [광고주 진입])
+ *   - lg+ 2-col 그리드:
+ *     · 좌(2/3): AdvertiserForm 4개 카드
+ *     · 우(1/3): AdvertiserDetailMeta — 연결/구조/동기화/위험
+ *
+ * RSC 사전 호출 (병렬):
+ *   - prisma.advertiser.findUnique (단건 메타)
+ *   - getAdvertiserStructureStat(id)
+ *   - getLastSyncAt(id)
+ *   - checkConnection(id)  — hasKeys=true && status='active' 일 때만. archived 면 SKIP (Auth Error 회피).
  */
 
-import Link from "next/link"
 import { notFound } from "next/navigation"
+import Link from "next/link"
+import { ExternalLinkIcon } from "lucide-react"
 
 import { prisma } from "@/lib/db/prisma"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { PageHeader } from "@/components/navigation/page-header"
 import { AdvertiserForm } from "@/components/admin/advertiser-form"
 import { TestConnectionButton } from "@/components/admin/test-connection-button"
-import { DeleteAdvertiserButton } from "@/components/admin/delete-advertiser-button"
-import { KeyStatusBadge } from "@/components/admin/key-status-badge"
+import { AdvertiserDetailMeta } from "@/components/admin/advertiser-detail-meta"
+import { getAdvertiserStructureStat } from "@/lib/admin/advertiser-stats"
+import { getLastSyncAt } from "@/lib/sync/last-sync-at"
+import { checkConnection } from "@/app/(dashboard)/[advertiserId]/actions"
 
-function formatDate(d: Date) {
-  return new Intl.DateTimeFormat("ko-KR", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(d)
+function StatusBadge({ status }: { status: "active" | "paused" | "archived" }) {
+  const tone =
+    status === "active"
+      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300"
+      : status === "paused"
+        ? "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+        : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+  const label =
+    status === "active"
+      ? "활성"
+      : status === "paused"
+        ? "일시중지"
+        : "아카이브"
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}
+    >
+      {label}
+    </span>
+  )
 }
 
 export default async function AdvertiserDetailPage({
@@ -92,108 +112,110 @@ export default async function AdvertiserDetailPage({
     guardrailMaxChangesPerDay: row.guardrailMaxChangesPerDay,
   }
   const hasKeys = advertiser.hasApiKey && advertiser.hasSecretKey
+  const canCheckConnection = hasKeys && advertiser.status === "active"
+
+  // 메타 사이드용 사전 호출 — Promise.all 병렬.
+  // - getAdvertiserStructureStat: DB only (광고주 무관)
+  // - getLastSyncAt: DB only
+  // - checkConnection: SA API 호출 — 키 + active 광고주만. archived/paused 는 SKIP.
+  //
+  // archived 광고주: getCurrentAdvertiser 가 AuthorizationError throw → catch 로 null 폴백.
+  //                  paused: 광고주 객체는 가져오지만 SA 호출은 했었음. 안전상 active 만 호출.
+  const [stats, lastSyncAt, connection] = await Promise.all([
+    getAdvertiserStructureStat(id),
+    getLastSyncAt(id),
+    canCheckConnection
+      ? checkConnection(id).catch(() => null)
+      : Promise.resolve(null),
+  ])
 
   return (
-    <div className="flex flex-col gap-6 max-w-2xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            {advertiser.name}
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            customerId{" "}
-            <span className="font-mono">{advertiser.customerId}</span> · 상태{" "}
-            {advertiser.status} · 등록 {formatDate(advertiser.createdAt)}
-          </p>
-          <div className="mt-2">
-            <KeyStatusBadge
-              hasApiKey={advertiser.hasApiKey}
-              hasSecretKey={advertiser.hasSecretKey}
+    <div className="flex flex-col gap-6">
+      <PageHeader
+        backHref="/admin/advertisers"
+        backLabel="광고주 목록"
+        breadcrumbs={[
+          { label: "관리" },
+          { label: "광고주", href: "/admin/advertisers" },
+          { label: advertiser.name },
+        ]}
+        title={advertiser.name}
+        description={
+          <span className="inline-flex flex-wrap items-center gap-2">
+            <span>
+              customerId{" "}
+              <span className="font-mono">{advertiser.customerId}</span>
+            </span>
+            <span className="text-muted-foreground">·</span>
+            <StatusBadge status={advertiser.status} />
+            <span className="text-muted-foreground">
+              · 등록 {advertiser.createdAt.toLocaleString("ko-KR")}
+            </span>
+          </span>
+        }
+        actions={
+          <>
+            <TestConnectionButton
+              id={advertiser.id}
+              variant="outline"
+              size="default"
+              hasKeys={hasKeys}
             />
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            render={<Link href="/admin/advertisers" />}
-          >
-            목록
-          </Button>
-          <TestConnectionButton
-            id={advertiser.id}
-            variant="outline"
-            size="default"
-            hasKeys={hasKeys}
-          />
-        </div>
-      </div>
-
-      {!hasKeys && (
-        <Card>
-          <CardHeader className="border-b">
-            <CardTitle className="text-amber-700 dark:text-amber-400">
-              키 미설정
-            </CardTitle>
-            <CardDescription>
-              API 키 / Secret 키를 입력하면 SA API 호출(테스트 연결, 동기화 등)이
-              활성화됩니다. 아래 폼의 “API 키” / “Secret 키” 필드에 입력 후
-              저장하세요.
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      )}
-
-      {advertiser.memo ? (
-        <Card>
-          <CardHeader className="border-b">
-            <CardTitle>메모</CardTitle>
-            <CardDescription>
-              내부 메모. 수정은 아래 폼의 “메모” 필드에서 진행.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="py-4">
-            <p className="whitespace-pre-wrap text-sm text-foreground">
-              {advertiser.memo}
-            </p>
-          </CardContent>
-        </Card>
-      ) : null}
-
-      <AdvertiserForm
-        mode="edit"
-        id={advertiser.id}
-        defaultValues={{
-          name: advertiser.name,
-          customerId: advertiser.customerId,
-          bizNo: advertiser.bizNo,
-          category: advertiser.category,
-          manager: advertiser.manager,
-          memo: advertiser.memo,
-          tags: advertiser.tags,
-          status: advertiser.status,
-          // F-11.5 Guardrail
-          guardrailEnabled: advertiser.guardrailEnabled,
-          guardrailMaxBidChangePct: advertiser.guardrailMaxBidChangePct,
-          guardrailMaxChangesPerKeyword: advertiser.guardrailMaxChangesPerKeyword,
-          guardrailMaxChangesPerDay: advertiser.guardrailMaxChangesPerDay,
-        }}
+            <Button
+              variant="outline"
+              render={
+                <Link
+                  href={`/${advertiser.id}`}
+                  aria-label={`${advertiser.name} 광고주 컨텍스트 진입`}
+                />
+              }
+            >
+              <ExternalLinkIcon className="size-3.5" />
+              광고주 진입
+            </Button>
+          </>
+        }
       />
 
-      <Card>
-        <CardHeader className="border-b">
-          <CardTitle className="text-destructive">위험 영역</CardTitle>
-          <CardDescription>
-            광고주 삭제는 soft delete (status=archived) 로 처리됩니다.
-            연결된 캠페인 / 그룹 / 키워드 동기화가 중단됩니다. 이전 변경 이력 / 감사 로그는 보존됩니다.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="py-4">
-          <DeleteAdvertiserButton
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className="flex flex-col gap-6 lg:col-span-2">
+          <AdvertiserForm
+            mode="edit"
             id={advertiser.id}
-            name={advertiser.name}
+            defaultValues={{
+              name: advertiser.name,
+              customerId: advertiser.customerId,
+              bizNo: advertiser.bizNo,
+              category: advertiser.category,
+              manager: advertiser.manager,
+              memo: advertiser.memo,
+              tags: advertiser.tags,
+              status: advertiser.status,
+              // F-11.5 Guardrail
+              guardrailEnabled: advertiser.guardrailEnabled,
+              guardrailMaxBidChangePct: advertiser.guardrailMaxBidChangePct,
+              guardrailMaxChangesPerKeyword:
+                advertiser.guardrailMaxChangesPerKeyword,
+              guardrailMaxChangesPerDay: advertiser.guardrailMaxChangesPerDay,
+            }}
           />
-        </CardContent>
-      </Card>
+        </div>
+
+        <aside className="lg:col-span-1">
+          <AdvertiserDetailMeta
+            advertiser={{
+              id: advertiser.id,
+              name: advertiser.name,
+              customerId: advertiser.customerId,
+              status: advertiser.status,
+              hasKeys,
+            }}
+            initialConnection={connection}
+            stats={stats}
+            lastSyncAt={lastSyncAt}
+          />
+        </aside>
+      </div>
     </div>
   )
 }

@@ -460,7 +460,7 @@ export type CpcSurgeParams = {
  * 캠페인별 7일 평균 CPC 와 오늘 CPC 비교 — 임계 이상 상승 시 candidate.
  *
  * - status='deleted' 제외. dailyBudget 무관 (CPC 는 비용/클릭 비율이라 예산과 별개)
- * - getStats 두 번: recent7d 캐시 1h, today 캐시 5m. 같은 ids 라 SA 호출 단가 동일.
+ * - getStats 두 번: last7days 캐시 1h, today 캐시 5m. 같은 ids 라 SA 호출 단가 동일.
  * - 표본 부족: clk7 < minClicks 인 캠페인 skip. 오늘은 minClicks/7 의 floor (최소 1) 로 컷.
  * - cpc7 / cpcToday <= 0 이면 skip (NaN/Infinity 방어)
  * - severity: delta >= 2*thresholdPct 면 critical, 아니면 warn
@@ -509,7 +509,7 @@ export async function evaluateCpcSurge(
     getStats(ctx.customerId, {
       ids,
       fields: ["clkCnt", "salesAmt"],
-      datePreset: "recent7d",
+      datePreset: "last7days",
     }),
     getStats(ctx.customerId, {
       ids,
@@ -655,7 +655,7 @@ export async function evaluateImpressionsDrop(
     getStats(ctx.customerId, {
       ids,
       fields: ["impCnt"],
-      datePreset: "recent7d",
+      datePreset: "last7days",
     }),
     getStats(ctx.customerId, {
       ids,

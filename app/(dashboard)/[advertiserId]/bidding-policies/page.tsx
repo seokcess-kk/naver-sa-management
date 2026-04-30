@@ -28,6 +28,7 @@ import { prisma } from "@/lib/db/prisma"
 import { listBiddingPolicies } from "@/app/(dashboard)/[advertiserId]/bidding-policies/actions"
 import { PolicyTableClient } from "@/components/bidding/policy-table-client"
 import { KillSwitchBanner } from "@/components/bidding/kill-switch-banner"
+import { PageHeader } from "@/components/navigation/page-header"
 
 export default async function BiddingPoliciesPage({
   params,
@@ -88,17 +89,14 @@ export default async function BiddingPoliciesPage({
 
   return (
     <div className="flex flex-col gap-6 p-6">
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            비딩 정책
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            {advertiser.name} · 키워드 단위 목표 노출 순위 정책 (F-11.1) — 자동
-            조정 cron 은 후속 PR(F-11.2)
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="비딩 정책"
+        description="키워드 단위 목표 노출 순위 정책 (F-11.1) — 자동 조정 cron(F-11.2)이 매시간 입찰가를 조정합니다."
+        breadcrumbs={[
+          { label: advertiser.name, href: `/${advertiserId}` },
+          { label: "비딩 정책" },
+        ]}
+      />
 
       <KillSwitchBanner
         advertiserId={advertiserId}

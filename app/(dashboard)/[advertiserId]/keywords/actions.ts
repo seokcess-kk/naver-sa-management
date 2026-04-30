@@ -49,6 +49,7 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser, assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import {
   createKeywords,
   deleteKeyword,
@@ -80,6 +81,18 @@ export type SyncKeywordsResult =
   | { ok: false; error: string }
 
 /**
+ * `syncKeywords` 옵션 — 두 번째 인자.
+ *
+ * - `campaignIds` : 광고그룹 query 시 캠페인 화이트리스트(앱 DB Campaign.id). 미지정 시 광고주 전체.
+ *                   UI에서 "선택한 캠페인만 동기화" 시 사용 (extensions 패턴 동일).
+ *
+ * SA `listKeywords` 는 광고그룹 단위 호출. → 광고그룹 query 단계에서 캠페인 필터 적용.
+ */
+export type SyncKeywordsOptions = {
+  campaignIds?: string[]
+}
+
+/**
  * 키워드 동기화 (광고주 단위 — 모든 광고그룹 순회).
  *
  *   1. getCurrentAdvertiser — 권한 검증 + 광고주 객체
@@ -101,18 +114,29 @@ export type SyncKeywordsResult =
  */
 export async function syncKeywords(
   advertiserId: string,
+  options: SyncKeywordsOptions = {},
 ): Promise<SyncKeywordsResult> {
   const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
   if (!advertiser.hasKeys) {
     return { ok: false, error: "API 키/시크릿 미입력" }
   }
 
+  const { campaignIds } = options
+  const hasCampaignFilter =
+    Array.isArray(campaignIds) && campaignIds.length > 0
+
   const start = Date.now()
 
-  // -- DB 광고그룹 매핑 테이블 (광고주 한정) -----------------------------------
+  // -- DB 광고그룹 매핑 테이블 (광고주 한정 + 선택한 캠페인 한정) ---------------
   // 응답의 nccAdgroupId → DB AdGroup.id 룩업용. Keyword.adgroupId 는 AdGroup.id (cuid).
+  // campaignIds 미지정 → 광고주 전체 광고그룹. 지정 → 화이트리스트 캠페인 산하 광고그룹만.
   const adgroups = await prisma.adGroup.findMany({
-    where: { campaign: { advertiserId } },
+    where: {
+      campaign: {
+        advertiserId,
+        ...(hasCampaignFilter ? { id: { in: campaignIds } } : {}),
+      },
+    },
     select: { id: true, nccAdgroupId: true },
   })
 
@@ -129,9 +153,15 @@ export async function syncKeywords(
         scannedAdgroups: 0,
         skipped: 0,
         customerId: advertiser.customerId,
+        campaignIds: hasCampaignFilter ? campaignIds : undefined,
         note: "no-adgroups",
       },
     })
+    // lastSyncAt 갱신 — 광고그룹 0개도 "동기화 시도 완료" 로 기록 (UI 표시 일관성).
+    // 단, 캠페인 필터 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
+    if (!hasCampaignFilter) {
+      await recordSyncAt(advertiserId, "keywords")
+    }
     revalidatePath(`/${advertiserId}/keywords`)
     return {
       ok: true,
@@ -148,117 +178,131 @@ export async function syncKeywords(
 
   // -- 광고그룹 단위 listKeywords 반복 ----------------------------------------
   // SA 키워드 조회는 광고그룹 단위만 제공. 광고그룹 N개 → 호출 N번.
-  // 부분 실패 허용: 단일 광고그룹 실패는 다른 광고그룹 동기화에 영향 X.
+  // 부분 실패 허용 (Promise.allSettled): 단일 광고그룹 실패는 다른 광고그룹 동기화에 영향 X.
+  //
+  // 성능: 광고그룹 chunk 5 병렬 호출 (Rate Limit 토큰 버킷이 광고주별 큐잉 → 자동 wait).
+  //   - N=50 기준 기존 순차 ~15초 → chunk 5 병렬 ~3초 수준 (약 5배 단축).
+  //   - DB upsert 는 chunk 결과 매핑 후 sequential — connection pool 보호.
   let syncedKeywords = 0
   let skipped = 0
   let scannedAdgroups = 0
 
-  try {
-    for (const ag of adgroups) {
-      let remote: SaKeyword[]
-      try {
-        remote = await listKeywords(advertiser.customerId, {
-          nccAdgroupId: ag.nccAdgroupId,
-        })
-      } catch (e) {
-        // 단일 광고그룹 실패는 로그만 남기고 다음으로 (부분 동기화).
-        if (e instanceof NaverSaError) {
-          console.warn(
-            `[syncKeywords] listKeywords failed for nccAdgroupId=${ag.nccAdgroupId}: ${e.message}`,
-          )
-        } else {
-          console.warn(
-            `[syncKeywords] listKeywords unknown error for nccAdgroupId=${ag.nccAdgroupId}:`,
-            e,
-          )
-        }
-        scannedAdgroups++
-        continue
-      }
+  const CHUNK_SIZE = 5
 
-      // -- upsert 루프 ------------------------------------------------------
-      for (const k of remote) {
-        const dbAdgroupId = adgroupIdMap.get(k.nccAdgroupId)
-        if (!dbAdgroupId) {
-          // 광고그룹이 DB 에 없음 (광고그룹 미동기화 또는 삭제됨) → skip + 카운트.
-          skipped++
-          console.warn(
-            `[syncKeywords] skip nccKeywordId=${k.nccKeywordId}: ` +
-              `parent nccAdgroupId=${k.nccAdgroupId} not found in DB`,
-          )
+  try {
+    for (let i = 0; i < adgroups.length; i += CHUNK_SIZE) {
+      const slice = adgroups.slice(i, i + CHUNK_SIZE)
+      const settled = await Promise.allSettled(
+        slice.map((ag) =>
+          listKeywords(advertiser.customerId, { nccAdgroupId: ag.nccAdgroupId }),
+        ),
+      )
+
+      for (let j = 0; j < slice.length; j++) {
+        const ag = slice[j]
+        const r = settled[j]
+        if (r.status === "rejected") {
+          // 단일 광고그룹 실패는 로그만 남기고 다음으로 (부분 동기화).
+          const e = r.reason
+          if (e instanceof NaverSaError) {
+            console.warn(
+              `[syncKeywords] listKeywords failed for nccAdgroupId=${ag.nccAdgroupId}: ${e.message}`,
+            )
+          } else {
+            console.warn(
+              `[syncKeywords] listKeywords unknown error for nccAdgroupId=${ag.nccAdgroupId}:`,
+              e,
+            )
+          }
+          scannedAdgroups++
           continue
         }
+        const remote: SaKeyword[] = r.value
 
-        const mappedStatus = mapKeywordStatus(k)
-        const mappedInspect = mapInspectStatus(k)
-        const bidAmtVal = typeof k.bidAmt === "number" ? k.bidAmt : null
-        const useGroupBidAmtVal =
-          typeof k.useGroupBidAmt === "boolean" ? k.useGroupBidAmt : true
-        const userLockVal =
-          typeof k.userLock === "boolean" ? k.userLock : false
+        // -- upsert 루프 ------------------------------------------------------
+        for (const k of remote) {
+          const dbAdgroupId = adgroupIdMap.get(k.nccAdgroupId)
+          if (!dbAdgroupId) {
+            // 광고그룹이 DB 에 없음 (광고그룹 미동기화 또는 삭제됨) → skip + 카운트.
+            skipped++
+            console.warn(
+              `[syncKeywords] skip nccKeywordId=${k.nccKeywordId}: ` +
+                `parent nccAdgroupId=${k.nccAdgroupId} not found in DB`,
+            )
+            continue
+          }
 
-        // matchType / recentAvgRnk 는 응답에 있을 때만 반영 (없으면 기존값 유지).
-        // KeywordSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
-        const anyK = k as unknown as {
-          matchType?: string
-          recentAvgRnk?: number | string | null
+          const mappedStatus = mapKeywordStatus(k)
+          const mappedInspect = mapInspectStatus(k)
+          const bidAmtVal = typeof k.bidAmt === "number" ? k.bidAmt : null
+          const useGroupBidAmtVal =
+            typeof k.useGroupBidAmt === "boolean" ? k.useGroupBidAmt : true
+          const userLockVal =
+            typeof k.userLock === "boolean" ? k.userLock : false
+
+          // matchType / recentAvgRnk 는 응답에 있을 때만 반영 (없으면 기존값 유지).
+          // KeywordSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
+          const anyK = k as unknown as {
+            matchType?: string
+            recentAvgRnk?: number | string | null
+          }
+          const matchTypeVal =
+            typeof anyK.matchType === "string" && anyK.matchType.length > 0
+              ? anyK.matchType.toUpperCase()
+              : null
+
+          const rawJson = k as unknown as Prisma.InputJsonValue
+
+          // upsert: matchType / recentAvgRnk 는 update 시점엔 값이 있을 때만 덮어쓰기.
+          // create 시에는 응답에 없으면 null 로 둠 (P1 표시 OK).
+          const baseCreateData = {
+            adgroupId: dbAdgroupId,
+            nccKeywordId: k.nccKeywordId,
+            keyword: k.keyword,
+            matchType: matchTypeVal,
+            bidAmt: bidAmtVal,
+            useGroupBidAmt: useGroupBidAmtVal,
+            userLock: userLockVal,
+            status: mappedStatus,
+            inspectStatus: mappedInspect,
+            raw: rawJson,
+          }
+
+          // update 페이로드: 응답에 없는 필드(matchType / recentAvgRnk)는 빼서 기존값 유지.
+          const baseUpdateData: {
+            adgroupId: string
+            keyword: string
+            bidAmt: number | null
+            useGroupBidAmt: boolean
+            userLock: boolean
+            status: KeywordStatus
+            inspectStatus: InspectStatus
+            raw: Prisma.InputJsonValue
+            matchType?: string
+          } = {
+            adgroupId: dbAdgroupId,
+            keyword: k.keyword,
+            bidAmt: bidAmtVal,
+            useGroupBidAmt: useGroupBidAmtVal,
+            userLock: userLockVal,
+            status: mappedStatus,
+            inspectStatus: mappedInspect,
+            raw: rawJson,
+          }
+          if (matchTypeVal !== null) {
+            baseUpdateData.matchType = matchTypeVal
+          }
+
+          await prisma.keyword.upsert({
+            where: { nccKeywordId: k.nccKeywordId },
+            create: baseCreateData,
+            update: baseUpdateData,
+          })
+          syncedKeywords++
         }
-        const matchTypeVal =
-          typeof anyK.matchType === "string" && anyK.matchType.length > 0
-            ? anyK.matchType.toUpperCase()
-            : null
 
-        const rawJson = k as unknown as Prisma.InputJsonValue
-
-        // upsert: matchType / recentAvgRnk 는 update 시점엔 값이 있을 때만 덮어쓰기.
-        // create 시에는 응답에 없으면 null 로 둠 (P1 표시 OK).
-        const baseCreateData = {
-          adgroupId: dbAdgroupId,
-          nccKeywordId: k.nccKeywordId,
-          keyword: k.keyword,
-          matchType: matchTypeVal,
-          bidAmt: bidAmtVal,
-          useGroupBidAmt: useGroupBidAmtVal,
-          userLock: userLockVal,
-          status: mappedStatus,
-          inspectStatus: mappedInspect,
-          raw: rawJson,
-        }
-
-        // update 페이로드: 응답에 없는 필드(matchType / recentAvgRnk)는 빼서 기존값 유지.
-        const baseUpdateData: {
-          adgroupId: string
-          keyword: string
-          bidAmt: number | null
-          useGroupBidAmt: boolean
-          userLock: boolean
-          status: KeywordStatus
-          inspectStatus: InspectStatus
-          raw: Prisma.InputJsonValue
-          matchType?: string
-        } = {
-          adgroupId: dbAdgroupId,
-          keyword: k.keyword,
-          bidAmt: bidAmtVal,
-          useGroupBidAmt: useGroupBidAmtVal,
-          userLock: userLockVal,
-          status: mappedStatus,
-          inspectStatus: mappedInspect,
-          raw: rawJson,
-        }
-        if (matchTypeVal !== null) {
-          baseUpdateData.matchType = matchTypeVal
-        }
-
-        await prisma.keyword.upsert({
-          where: { nccKeywordId: k.nccKeywordId },
-          create: baseCreateData,
-          update: baseUpdateData,
-        })
-        syncedKeywords++
+        scannedAdgroups++
       }
-
-      scannedAdgroups++
     }
   } catch (e) {
     // upsert 단계 자체 실패 (DB 연결 등 치명 오류).
@@ -277,8 +321,15 @@ export async function syncKeywords(
       scannedAdgroups,
       skipped,
       customerId: advertiser.customerId,
+      campaignIds: hasCampaignFilter ? campaignIds : undefined,
     },
   })
+
+  // lastSyncAt 갱신 (UI 헤더 "마지막 동기화" 배지). 실패해도 sync 결과는 정상 반환.
+  // 캠페인 필터 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
+  if (!hasCampaignFilter) {
+    await recordSyncAt(advertiserId, "keywords")
+  }
 
   revalidatePath(`/${advertiserId}/keywords`)
 

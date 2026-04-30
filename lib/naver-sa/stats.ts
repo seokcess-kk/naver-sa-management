@@ -79,7 +79,7 @@ export type StatsField =
  * 네이버 SA datePreset 화이트리스트.
  * timeRange 와 함께 지정 시 timeRange 가 우선 (본 모듈에서 timeRange 분기 시 datePreset 무시).
  */
-export type StatsDatePreset = "today" | "yesterday" | "recent7d" | "recent30d"
+export type StatsDatePreset = "today" | "yesterday" | "last7days" | "last30days"
 
 /**
  * Stats 호출 요청.
@@ -205,9 +205,9 @@ function todayDateString(): string {
  *
  * - datePreset === "today" → true
  * - timeRange.until >= 오늘 (YYYY-MM-DD 사전식 비교) → true
- * - 그 외 (yesterday / recent7d / recent30d / 과거 timeRange) → false
+ * - 그 외 (yesterday / last7days / last30days / 과거 timeRange) → false
  *
- * recent7d / recent30d 는 일반적으로 어제까지 기준이라 false 처리 (네이버 SA 관행).
+ * last7days / last30days 는 일반적으로 어제까지 기준이라 false 처리 (네이버 SA 관행).
  * 만약 오늘 포함 시멘틱이 필요하면 호출부가 timeRange 로 명시.
  */
 function includesToday(req: StatsRequest): boolean {
@@ -281,7 +281,7 @@ function buildStatsPath(req: StatsRequest): string {
  *   const rows = await getStats(customerId, {
  *     ids: campaignIds,
  *     fields: ["impCnt", "clkCnt", "salesAmt", "ctr", "cpc"],
- *     datePreset: "recent7d",
+ *     datePreset: "last7days",
  *   })
  *
  * 사용 예 (광고주 전체 오늘 합산):

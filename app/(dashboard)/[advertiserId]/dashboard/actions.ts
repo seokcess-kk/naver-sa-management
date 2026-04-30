@@ -34,6 +34,7 @@ import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import {
   getStats,
+  getStatsChunked,
   type StatsField,
   type StatsRow,
 } from "@/lib/naver-sa/stats"
@@ -44,7 +45,7 @@ import { NaverSaError } from "@/lib/naver-sa/errors"
 // =============================================================================
 
 /** F-7.1 KPI 4개 기간. */
-export type KpiPeriod = "today" | "yesterday" | "recent7d" | "recent30d"
+export type KpiPeriod = "today" | "yesterday" | "last7days" | "last30days"
 
 /**
  * 단일 기간 KPI 요약.
@@ -132,7 +133,7 @@ const topInputSchema = z.object({
     .max(TOP_INPUT_LIMIT_MAX)
     .optional()
     .default(TOP_INPUT_LIMIT_DEFAULT),
-  period: z.enum(["recent7d", "recent30d"]).optional().default("recent7d"),
+  period: z.enum(["last7days", "last30days"]).optional().default("last7days"),
   order: z.enum(["desc", "asc"]).optional().default("desc"),
 })
 
@@ -291,6 +292,31 @@ function errorMessage(e: unknown, prefix: string): string {
   return `${prefix} 중 알 수 없는 오류`
 }
 
+/**
+ * 광고주의 활성 캠페인 nccCampaignId 목록.
+ *
+ * 네이버 SA Stats API 는 ids 미지정 호출을 거부 (code 11001 — 잘못된 파라미터).
+ * 광고주 합산 KPI / 시계열도 캠페인 ids 를 명시해야 함 → 본 헬퍼로 통합.
+ *
+ * status='deleted' 제외 (UX 상 일치 — TOP 카드와 동일 집합).
+ * ids 0 개면 호출자가 빈 결과 반환 (동기화 전 상태).
+ */
+async function loadActiveCampaignIds(advertiserId: string): Promise<string[]> {
+  const rows = await prisma.campaign.findMany({
+    where: { advertiserId, status: { not: "deleted" } },
+    select: { nccCampaignId: true },
+  })
+  return rows.map((r) => r.nccCampaignId)
+}
+
+const EMPTY_KPI_SUMMARY: KpiSummary = {
+  impCnt: 0,
+  clkCnt: 0,
+  salesAmt: 0,
+  ctr: 0,
+  cpc: 0,
+}
+
 // =============================================================================
 // 1. getDashboardKpi (F-7.1)
 // =============================================================================
@@ -303,14 +329,29 @@ export async function getDashboardKpi(
     return { ok: false, error: "API 키/시크릿 미입력" }
   }
 
-  const periods: KpiPeriod[] = ["today", "yesterday", "recent7d", "recent30d"]
+  const periods: KpiPeriod[] = ["today", "yesterday", "last7days", "last30days"]
+
+  // SA Stats 는 ids 명시 필수 (미지정 시 11001 거부). 광고주 캠페인 0 개 = 동기화 전 상태.
+  const ids = await loadActiveCampaignIds(advertiserId)
+  if (ids.length === 0) {
+    return {
+      ok: true,
+      kpi: {
+        today: { ...EMPTY_KPI_SUMMARY },
+        yesterday: { ...EMPTY_KPI_SUMMARY },
+        last7days: { ...EMPTY_KPI_SUMMARY },
+        last30days: { ...EMPTY_KPI_SUMMARY },
+      },
+    }
+  }
 
   try {
     // 4개 기간 병렬 조회 — stats.ts 가 자체 캐시 (오늘 5분 / 과거 1시간) 처리.
-    // ids 미지정 → 광고주 전체 합산 row (네이버 SA 응답은 보통 1 row, 다중 가능성 방어).
+    // ids = 광고주의 활성 캠페인 전체. 응답 다중 row → aggregateRows 합산.
     const responses = await Promise.all(
       periods.map((p) =>
         getStats(advertiser.customerId, {
+          ids,
           fields: DEFAULT_STATS_FIELDS,
           datePreset: p,
         }),
@@ -320,8 +361,8 @@ export async function getDashboardKpi(
     const kpi: DashboardKpi = {
       today: aggregateRows(responses[0]),
       yesterday: aggregateRows(responses[1]),
-      recent7d: aggregateRows(responses[2]),
-      recent30d: aggregateRows(responses[3]),
+      last7days: aggregateRows(responses[2]),
+      last30days: aggregateRows(responses[3]),
     }
     return { ok: true, kpi }
   } catch (e) {
@@ -459,7 +500,9 @@ export async function getTopKeywords(
 
   let rows: StatsRow[]
   try {
-    rows = await getStats(advertiser.customerId, {
+    // 1000개 ID 를 1번의 query 로 보내면 URL 길이 한계(414 URI Too Long) 도달 →
+    // getStatsChunked 로 자동 분할 호출 (chunkSize 기본 100).
+    rows = await getStatsChunked(advertiser.customerId, {
       ids,
       fields: DEFAULT_STATS_FIELDS,
       datePreset: parsed.period,
@@ -557,16 +600,49 @@ export async function getStatsTimeSeries(
 
   const parsed = timeSeriesInputSchema.parse(input)
 
+  // ids 명시 필수 (KPI 와 동일 — 11001 회피). 캠페인 0 → 빈 시계열 반환.
+  const ids = await loadActiveCampaignIds(advertiserId)
+  if (ids.length === 0) {
+    if (parsed.grain === "daily") {
+      const days = parsed.days ?? TIME_SERIES_DAYS_DEFAULT
+      const dates = recentDays(days)
+      return {
+        ok: true,
+        points: dates.map((ts) => ({
+          ts,
+          impCnt: 0,
+          clkCnt: 0,
+          salesAmt: 0,
+          ctr: 0,
+          cpc: 0,
+        })),
+      }
+    }
+    const today = todayYmd()
+    return {
+      ok: true,
+      points: Array.from({ length: 24 }, (_, h) => ({
+        ts: `${today} ${String(h).padStart(2, "0")}`,
+        impCnt: 0,
+        clkCnt: 0,
+        salesAmt: 0,
+        ctr: 0,
+        cpc: 0,
+      })),
+    }
+  }
+
   try {
     if (parsed.grain === "daily") {
       const days = parsed.days ?? TIME_SERIES_DAYS_DEFAULT
       const dates = recentDays(days)
 
       // N일 병렬 호출. timeRange 로 단일 날짜 (since=until).
-      // ids 미지정 → 광고주 전체 합산 row 반환.
+      // ids 명시 — 응답 다중 row 가능 → aggregateRows 합산.
       const responses = await Promise.all(
         dates.map((d) =>
           getStats(advertiser.customerId, {
+            ids,
             fields: DEFAULT_STATS_FIELDS,
             timeRange: { since: d, until: d },
           }),
@@ -590,6 +666,7 @@ export async function getStatsTimeSeries(
 
     // hourly — datePreset=today + breakdown=hh24
     const rows = await getStats(advertiser.customerId, {
+      ids,
       fields: DEFAULT_STATS_FIELDS,
       datePreset: "today",
       breakdown: "hh24",

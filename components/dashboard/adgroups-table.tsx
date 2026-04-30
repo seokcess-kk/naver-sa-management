@@ -46,6 +46,13 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
+import {
   Table,
   TableBody,
   TableCell,
@@ -54,13 +61,32 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { AdgroupStatusBadge } from "@/components/dashboard/adgroup-status-badge"
-import { SyncAdgroupsButton } from "@/components/dashboard/sync-adgroups-button"
 import {
   BulkActionModal,
   type BulkActionResult,
 } from "@/components/forms/bulk-action-modal"
 import { bulkUpdateAdgroups } from "@/app/(dashboard)/[advertiserId]/adgroups/actions"
 import type { AdGroupStatus } from "@/lib/generated/prisma/client"
+
+// shadcn Select 한글 라벨 매핑 (Base UI Select.Value 가 raw value 를 표시하지 않도록)
+const STATUS_LABELS: Record<string, string> = {
+  ALL: "상태 (전체)",
+  on: "ON",
+  off: "OFF",
+  deleted: "삭제됨",
+}
+const CHANNEL_LABELS: Record<string, string> = {
+  ALL: "채널 (전체)",
+  pcOnly: "PC만",
+  mblOnly: "Mobile만",
+  both: "PC+Mobile",
+  none: "둘 다 OFF",
+}
+const BIDMODE_LABELS: Record<string, string> = {
+  ALL: "입찰 (전체)",
+  group: "그룹 입찰가 사용",
+  custom: "직접 입찰가",
+}
 
 // =============================================================================
 // 타입
@@ -122,14 +148,82 @@ export function AdgroupsTable({
   const [selected, setSelected] = React.useState<Set<string>>(new Set())
   const [modalAction, setModalAction] = React.useState<Action | null>(null)
 
-  const allSelected = adgroups.length > 0 && selected.size === adgroups.length
-  const someSelected = selected.size > 0 && !allSelected
+  // -- 필터 state -----------------------------------------------------------
+  const [searchInput, setSearchInput] = React.useState("")
+  const [debouncedSearch, setDebouncedSearch] = React.useState("")
+  const [statusFilter, setStatusFilter] = React.useState<string>("ALL")
+  const [channelFilter, setChannelFilter] = React.useState<string>("ALL")
+  const [bidModeFilter, setBidModeFilter] = React.useState<string>("ALL")
+
+  // 검색 input debounce 200ms
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchInput), 200)
+    return () => clearTimeout(t)
+  }, [searchInput])
+
+  // 클라이언트 필터링 — adgroups 는 수십~수백 row 라 가상 스크롤 X
+  const visibleAdgroups = React.useMemo(() => {
+    const q = debouncedSearch.trim().toLowerCase()
+    return adgroups.filter((g) => {
+      if (q !== "" && !g.name.toLowerCase().includes(q)) return false
+      if (statusFilter !== "ALL" && g.status !== statusFilter) return false
+      if (channelFilter !== "ALL") {
+        const pc = g.pcChannelOn
+        const mbl = g.mblChannelOn
+        if (channelFilter === "pcOnly" && !(pc && !mbl)) return false
+        if (channelFilter === "mblOnly" && !(!pc && mbl)) return false
+        if (channelFilter === "both" && !(pc && mbl)) return false
+        if (channelFilter === "none" && !(!pc && !mbl)) return false
+      }
+      if (bidModeFilter !== "ALL") {
+        // bidAmt null = 그룹 입찰가 사용 (그룹 자체 기본값에 의존)
+        // bidAmt 값 있음 = 직접 그룹 기본 입찰가 설정
+        const isCustom = g.bidAmt !== null
+        if (bidModeFilter === "group" && isCustom) return false
+        if (bidModeFilter === "custom" && !isCustom) return false
+      }
+      return true
+    })
+  }, [adgroups, debouncedSearch, statusFilter, channelFilter, bidModeFilter])
+
+  // 가시 행 기준 전체 선택
+  const visibleSelectedCount = React.useMemo(
+    () => visibleAdgroups.filter((g) => selected.has(g.id)).length,
+    [visibleAdgroups, selected],
+  )
+  const allSelected =
+    visibleAdgroups.length > 0 &&
+    visibleSelectedCount === visibleAdgroups.length
+  const someSelected = visibleSelectedCount > 0 && !allSelected
+
+  const filtersApplied =
+    searchInput !== "" ||
+    statusFilter !== "ALL" ||
+    channelFilter !== "ALL" ||
+    bidModeFilter !== "ALL"
+
+  function resetFilters() {
+    setSearchInput("")
+    setDebouncedSearch("")
+    setStatusFilter("ALL")
+    setChannelFilter("ALL")
+    setBidModeFilter("ALL")
+  }
 
   function toggleAll() {
     if (allSelected) {
-      setSelected(new Set())
+      // 가시 행만 해제 (선택 set 에 가시 외 항목 보존)
+      setSelected((prev) => {
+        const next = new Set(prev)
+        for (const g of visibleAdgroups) next.delete(g.id)
+        return next
+      })
     } else {
-      setSelected(new Set(adgroups.map((g) => g.id)))
+      setSelected((prev) => {
+        const next = new Set(prev)
+        for (const g of visibleAdgroups) next.add(g.id)
+        return next
+      })
     }
   }
 
@@ -257,20 +351,7 @@ export function AdgroupsTable({
   }, [modalAction, selectedRows, advertiserId])
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            광고그룹
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            ON/OFF · 입찰가 · 예산 · 기본 매체를 다중 선택 후 일괄 변경할 수
-            있습니다.
-          </p>
-        </div>
-        <SyncAdgroupsButton advertiserId={advertiserId} hasKeys={hasKeys} />
-      </header>
-
+    <div className="flex flex-col gap-4">
       {!hasKeys && (
         <Card>
           <CardHeader className="border-b">
@@ -285,6 +366,75 @@ export function AdgroupsTable({
           </CardHeader>
         </Card>
       )}
+
+      {/* 필터 / 검색 toolbar */}
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
+        <Input
+          placeholder="광고그룹명 검색..."
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          className="h-8 w-56"
+        />
+        <Select
+          value={statusFilter}
+          onValueChange={(v) => setStatusFilter(v ?? "ALL")}
+        >
+          <SelectTrigger className="w-32">
+            <SelectValue placeholder="상태">
+              {(v: string | null) => STATUS_LABELS[v ?? "ALL"] ?? "상태 (전체)"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">상태 (전체)</SelectItem>
+            <SelectItem value="on">ON</SelectItem>
+            <SelectItem value="off">OFF</SelectItem>
+            <SelectItem value="deleted">삭제됨</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select
+          value={channelFilter}
+          onValueChange={(v) => setChannelFilter(v ?? "ALL")}
+        >
+          <SelectTrigger className="w-36">
+            <SelectValue placeholder="채널">
+              {(v: string | null) => CHANNEL_LABELS[v ?? "ALL"] ?? "채널 (전체)"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">채널 (전체)</SelectItem>
+            <SelectItem value="both">PC+Mobile</SelectItem>
+            <SelectItem value="pcOnly">PC만</SelectItem>
+            <SelectItem value="mblOnly">Mobile만</SelectItem>
+            <SelectItem value="none">둘 다 OFF</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select
+          value={bidModeFilter}
+          onValueChange={(v) => setBidModeFilter(v ?? "ALL")}
+        >
+          <SelectTrigger className="w-44">
+            <SelectValue placeholder="입찰가">
+              {(v: string | null) => BIDMODE_LABELS[v ?? "ALL"] ?? "입찰 (전체)"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">입찰 (전체)</SelectItem>
+            <SelectItem value="custom">직접 입찰가</SelectItem>
+            <SelectItem value="group">그룹 입찰가 사용</SelectItem>
+          </SelectContent>
+        </Select>
+        {filtersApplied && (
+          <Button size="sm" variant="ghost" onClick={resetFilters}>
+            초기화
+          </Button>
+        )}
+        <span className="ml-auto text-xs text-muted-foreground">
+          총 {adgroups.length.toLocaleString()}건
+          {visibleAdgroups.length !== adgroups.length && (
+            <> (필터 후 {visibleAdgroups.length.toLocaleString()}건)</>
+          )}
+        </span>
+      </div>
 
       {/* 일괄 액션 바 */}
       <div className="flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
@@ -361,20 +511,26 @@ export function AdgroupsTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {adgroups.length === 0 ? (
+            {visibleAdgroups.length === 0 ? (
               <TableRow>
                 <TableCell
                   colSpan={9}
                   className="py-8 text-center text-muted-foreground"
                 >
-                  표시할 광고그룹이 없습니다. 우측 상단{" "}
-                  <span className="font-medium">광고주에서 동기화</span>{" "}
-                  버튼으로 SA 에서 가져오세요. (캠페인을 먼저 동기화해야
-                  합니다.)
+                  {adgroups.length === 0 ? (
+                    <>
+                      표시할 광고그룹이 없습니다. 우측 상단{" "}
+                      <span className="font-medium">동기화</span>{" "}
+                      버튼으로 SA 에서 가져오세요. (캠페인을 먼저 동기화해야
+                      합니다.)
+                    </>
+                  ) : (
+                    <>현재 필터에 일치하는 광고그룹이 없습니다.</>
+                  )}
                 </TableCell>
               </TableRow>
             ) : (
-              adgroups.map((g) => {
+              visibleAdgroups.map((g) => {
                 const checked = selected.has(g.id)
                 return (
                   <TableRow

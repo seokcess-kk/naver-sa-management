@@ -55,6 +55,7 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser, assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import { getAdminSupabase } from "@/lib/supabase/admin"
 import {
   createAdExtensions,
@@ -66,7 +67,7 @@ import {
   type AdExtensionCreateItem,
   type AdExtensionType as SaAdExtensionType,
 } from "@/lib/naver-sa/ad-extensions"
-import { NaverSaError } from "@/lib/naver-sa/errors"
+import { NaverSaError, NaverSaValidationError } from "@/lib/naver-sa/errors"
 import type {
   AdExtensionStatus,
   AdExtensionType,
@@ -122,19 +123,44 @@ export type SyncExtensionsResult =
       synced: number
       scannedAdgroups: number
       skipped: number
+      unsupportedAdgroupTypes: number
       durationMs: number
     }
   | { ok: false; error: string }
 
 /**
- * 확장소재 동기화 (광고주 단위 — 모든 광고그룹 순회).
+ * `syncAdExtensions` 옵션 — 두 번째 인자.
+ *
+ * - `type`         : 단일 type 만 동기화 (미지정 시 headline/description/image 모두)
+ * - `campaignIds`  : 광고그룹 query 시 캠페인 화이트리스트(앱 DB Campaign.id). 미지정 시 광고주 전체.
+ *                    UI에서 "선택한 캠페인만 동기화" 시 사용 (F-5.1 부분 동기화).
+ */
+export type SyncAdExtensionsOptions = {
+  type?: InputType
+  campaignIds?: string[]
+}
+
+/**
+ * 네이버 SA 가 "이 광고그룹은 이 확장소재 type 미지원" 을 알리는 응답 패턴 판별.
+ *
+ * 관찰된 메시지 예: "Cannot handle the request" — `mapHttpToDomainError` 가 title 그대로 둠.
+ * 부분 실패가 아니라 **정상 skip** 으로 취급 (errors 누적 X). 호출부에서 카운터로만 집계.
+ */
+function isUnsupportedExtensionTypeError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false
+  return e.message.includes("Cannot handle the request")
+}
+
+/**
+ * 확장소재 동기화 (광고주 단위 — 광고그룹 순회).
  *
  *   1. getCurrentAdvertiser — 권한 검증 + advertiser
  *   2. hasKeys 확인 (시크릿 미입력이면 즉시 차단)
- *   3. DB AdGroup 매핑 테이블 (광고주 한정)
- *   4. 각 광고그룹 × 각 type(headline/description) 마다 listAdExtensions 호출
- *      - type 미지정 시 둘 다 동기화
+ *   3. DB AdGroup 매핑 테이블 (광고주 한정 + options.campaignIds 화이트리스트 적용 시 캠페인 한정)
+ *   4. 각 광고그룹 × 각 type(headline/description/image) 마다 listAdExtensions 호출
+ *      - type 미지정 시 셋 다 동기화
  *      - 단일 광고그룹 / type 호출 실패는 부분 실패 (다른 호출은 계속)
+ *      - "Cannot handle the request" 응답은 silent skip (`unsupportedAdgroupTypes` 카운터)
  *      - 응답 type 은 입력 type 과 동일하다고 가정하나, 응답에 다른 type 섞여 있으면 입력 화이트리스트 외는 skip
  *   5. nccExtId unique upsert
  *      - ownerType = "adgroup" 고정 (P1)
@@ -150,18 +176,28 @@ export type SyncExtensionsResult =
  */
 export async function syncAdExtensions(
   advertiserId: string,
-  type?: InputType,
+  options: SyncAdExtensionsOptions = {},
 ): Promise<SyncExtensionsResult> {
   const { advertiser, user } = await getCurrentAdvertiser(advertiserId)
   if (!advertiser.hasKeys) {
     return { ok: false, error: "API 키/시크릿 미입력" }
   }
 
+  const { type, campaignIds } = options
+  const hasCampaignFilter =
+    Array.isArray(campaignIds) && campaignIds.length > 0
+
   const start = Date.now()
 
-  // -- DB 광고그룹 매핑 테이블 (광고주 한정) -----------------------------------
+  // -- DB 광고그룹 매핑 테이블 (광고주 한정 + 선택한 캠페인 한정) -------------
   const adgroups = await prisma.adGroup.findMany({
-    where: { campaign: { advertiserId } },
+    where: {
+      campaign: {
+        advertiserId,
+        ...(hasCampaignFilter ? { id: { in: campaignIds } } : {}),
+      },
+      status: { not: "deleted" },
+    },
     select: { id: true, nccAdgroupId: true },
   })
 
@@ -176,17 +212,25 @@ export async function syncAdExtensions(
         synced: 0,
         scannedAdgroups: 0,
         skipped: 0,
+        unsupportedAdgroupTypes: 0,
         customerId: advertiser.customerId,
         type: type ?? "all",
+        campaignIds: hasCampaignFilter ? campaignIds : undefined,
         note: "no-adgroups",
       },
     })
+    // lastSyncAt 갱신 — 광고그룹 0개도 "동기화 시도 완료" 로 기록 (UI 표시 일관성).
+    // 단, 캠페인 필터가 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
+    if (!hasCampaignFilter) {
+      await recordSyncAt(advertiserId, "extensions")
+    }
     revalidatePath(`/${advertiserId}/extensions`)
     return {
       ok: true,
       synced: 0,
       scannedAdgroups: 0,
       skipped: 0,
+      unsupportedAdgroupTypes: 0,
       durationMs: Date.now() - start,
     }
   }
@@ -203,41 +247,82 @@ export async function syncAdExtensions(
   let synced = 0
   let skipped = 0
   let scannedAdgroups = 0
+  let unsupportedAdgroupTypes = 0
 
   try {
     for (const ag of adgroups) {
       // 광고그룹 1개 = type 별 호출 합계 1번 ("scannedAdgroups" 의미는 "광고그룹 1개 단위로 진행됨").
-      // 부분 실패 허용: 단일 광고그룹의 type 1개 실패해도 다른 type / 광고그룹은 계속.
+      // 부분 실패 허용 (Promise.allSettled): 단일 광고그룹의 type 1개 실패해도 다른 type 차단 X.
+      //
+      // 성능: 광고그룹별 3 type (headline/description/image) 병렬 호출.
+      //   - Rate Limit 토큰 버킷이 광고주별 큐잉(client.ts) → 200/분 burst 안에서 자동 wait.
+      //   - 광고그룹 N=50 기준 기존 순차 N×3 = ~30초 → 병렬 N×1 ≈ 10초 수준 (약 3배 단축).
+      // type 파라미터 미지정 — 그룹의 모든 확장소재를 1번 호출로 가져옴.
+      // (이전: type 명시 3회 병렬 호출 시 그룹별로 모든 type 이 "Cannot handle the request"
+      //  로 거절되어 synced=0 발생. 코드 주석 159 권장 패턴으로 변경.)
       let touched = false
-      for (const t of targetTypes) {
-        const sa = TYPE_TO_SA[t]
-        let remote: SaAdExtension[]
-        try {
-          remote = await listAdExtensions(advertiser.customerId, {
-            nccAdgroupId: ag.nccAdgroupId,
-            type: sa,
-          })
-        } catch (e) {
-          if (e instanceof NaverSaError) {
+      let remote: SaAdExtension[] = []
+      try {
+        remote = await listAdExtensions(advertiser.customerId, {
+          nccAdgroupId: ag.nccAdgroupId,
+        })
+        touched = true
+      } catch (err) {
+        if (isUnsupportedExtensionTypeError(err)) {
+          unsupportedAdgroupTypes++
+          touched = true
+        } else if (err instanceof NaverSaValidationError) {
+          // 응답 형식 미스매치 — raw 응답을 1번 출력해 실제 필드 구조 확인.
+          // 처음 1건만 출력 (반복 로그 폭주 방지).
+          if (synced === 0 && skipped === 0) {
             console.warn(
-              `[syncAdExtensions] listAdExtensions failed for nccAdgroupId=${ag.nccAdgroupId} type=${sa}: ${e.message}`,
+              `[syncAdExtensions] zod validation failed nccAdgroupId=${ag.nccAdgroupId} raw=`,
+              JSON.stringify(err.context.raw, null, 2)?.slice(0, 3000),
             )
           } else {
             console.warn(
-              `[syncAdExtensions] listAdExtensions unknown error for nccAdgroupId=${ag.nccAdgroupId} type=${sa}:`,
-              e,
+              `[syncAdExtensions] zod validation failed nccAdgroupId=${ag.nccAdgroupId}: ${err.message}`,
             )
           }
-          continue
+        } else if (err instanceof NaverSaError) {
+          console.warn(
+            `[syncAdExtensions] listAdExtensions failed for nccAdgroupId=${ag.nccAdgroupId}: ${err.message}`,
+          )
+        } else {
+          console.warn(
+            `[syncAdExtensions] listAdExtensions unknown error for nccAdgroupId=${ag.nccAdgroupId}:`,
+            err,
+          )
         }
+      }
 
+      // 디버깅: 응답에 어떤 type 코드가 오는지 확인 (P1 화이트리스트 외 확인용).
+      if (remote.length > 0) {
+        const types = Array.from(new Set(remote.map((e) => e.type)))
+        console.log(
+          `[syncAdExtensions] nccAdgroupId=${ag.nccAdgroupId} count=${remote.length} types=${types.join(",")}`,
+        )
+      }
+
+      {
         for (const e of remote) {
-          // 응답 type 검증 (응답에 다른 type 이 섞여 오는 경우 화이트리스트 외는 skip).
-          const respTypeLc = e.type?.toString().toLowerCase()
-          if (respTypeLc !== t) {
+          // 응답 type → 앱 enum 매핑.
+          //   HEADLINE          → headline
+          //   DESCRIPTION       → description
+          //   IMAGE / POWER_LINK_IMAGE → image
+          // P1 화이트리스트 외(예: SUBLINK / LOCATION 등)는 skip.
+          const rawType = e.type?.toString().toUpperCase()
+          let t: InputType | null
+          if (rawType === "HEADLINE") t = "headline"
+          else if (rawType === "DESCRIPTION") t = "description"
+          else if (rawType === "IMAGE" || rawType === "POWER_LINK_IMAGE")
+            t = "image"
+          else t = null
+
+          if (!t) {
             skipped++
             console.warn(
-              `[syncAdExtensions] skip nccExtId=${e.nccExtId}: response.type=${e.type} != requested=${sa}`,
+              `[syncAdExtensions] skip nccExtId=${e.nccExtId}: unsupported type=${e.type}`,
             )
             continue
           }
@@ -340,10 +425,18 @@ export async function syncAdExtensions(
       synced,
       scannedAdgroups,
       skipped,
+      unsupportedAdgroupTypes,
       customerId: advertiser.customerId,
       type: type ?? "all",
+      campaignIds: hasCampaignFilter ? campaignIds : undefined,
     },
   })
+
+  // lastSyncAt 갱신 (UI 헤더 "마지막 동기화" 배지). 실패해도 sync 결과는 정상 반환.
+  // 캠페인 필터 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
+  if (!hasCampaignFilter) {
+    await recordSyncAt(advertiserId, "extensions")
+  }
 
   revalidatePath(`/${advertiserId}/extensions`)
 
@@ -352,6 +445,7 @@ export async function syncAdExtensions(
     synced,
     scannedAdgroups,
     skipped,
+    unsupportedAdgroupTypes,
     durationMs: Date.now() - start,
   }
 }
@@ -419,38 +513,44 @@ function mapInspectStatus(e: SaAdExtension): InspectStatus {
 /**
  * 응답 페이로드에서 type 별 텍스트 추출.
  *
- * 네이버 SA 응답은 type 별 다른 필드를 가진다 (passthrough 보존):
- *   - HEADLINE    → e.headline (string)
- *   - DESCRIPTION → e.description (string)
+ * 네이버 SA 실제 응답 (확인됨):
+ *   { type: "HEADLINE", adExtension: { headline: "..." } }
+ *   { type: "DESCRIPTION", adExtension: { description: "..." } }
  *
+ * 호환성: 일부 응답은 e.headline / e.description 으로 직접 노출되는 경우도 대비.
  * 누락 시 빈 문자열 반환 (호출부가 payload 비우기 처리).
  */
 function extractText(e: SaAdExtension, t: TextInputType): string {
   const anyE = e as unknown as Record<string, unknown>
-  const v = anyE[t]
-  return typeof v === "string" ? v : ""
+  const wrapper = anyE.adExtension as Record<string, unknown> | undefined
+  const fromWrapper = wrapper?.[t]
+  if (typeof fromWrapper === "string") return fromWrapper
+  const direct = anyE[t]
+  return typeof direct === "string" ? direct : ""
 }
 
 /**
  * 응답 페이로드에서 image 타입 정보 추출.
  *
- * 네이버 SA 응답 image type passthrough shape (sample 기준):
- *   - e.image: { url: string, ... } 또는 e.image (string url)
- * 둘 다 허용. 누락 시 null.
+ * 네이버 SA 실제 응답 (확인됨, type=POWER_LINK_IMAGE 또는 IMAGE):
+ *   { adExtension: { imagePath: "/Mj.../...png", imageWidth: 640, imageHeight: 640 } }
  *
- * 본 PR 단순화: { url } 만 추출 보존. 후속 PR에서 size/dimension 등 추가 가능.
+ * imagePath 는 절대 URL 이 아닌 path 형태. 그대로 url 필드에 저장 (후속 PR에서
+ * 호스트 prefix 처리 가능). 누락 시 null.
  */
 function extractImage(e: SaAdExtension): { url: string } | null {
   const anyE = e as unknown as Record<string, unknown>
-  const img = anyE.image
-  if (typeof img === "string" && img.length > 0) {
-    return { url: img }
+  const wrapper = anyE.adExtension as Record<string, unknown> | undefined
+  const path = wrapper?.imagePath
+  if (typeof path === "string" && path.length > 0) {
+    return { url: path }
   }
+  // 호환성: 일부 응답은 e.image 직접 노출 가능 (구 sample shape 보존)
+  const img = anyE.image
+  if (typeof img === "string" && img.length > 0) return { url: img }
   if (img && typeof img === "object") {
     const url = (img as Record<string, unknown>).url
-    if (typeof url === "string" && url.length > 0) {
-      return { url }
-    }
+    if (typeof url === "string" && url.length > 0) return { url }
   }
   return null
 }

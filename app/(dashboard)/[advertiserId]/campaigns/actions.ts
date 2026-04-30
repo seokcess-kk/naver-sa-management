@@ -30,6 +30,7 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import {
   listCampaigns,
   updateCampaignsBulk,
@@ -122,6 +123,9 @@ export async function syncCampaigns(
     before: null,
     after: { synced: remote.length, customerId: advertiser.customerId },
   })
+
+  // lastSyncAt 갱신 (UI 헤더 "마지막 동기화" 배지). 실패해도 sync 결과는 정상 반환.
+  await recordSyncAt(advertiserId, "campaigns")
 
   revalidatePath(`/${advertiserId}/campaigns`)
 

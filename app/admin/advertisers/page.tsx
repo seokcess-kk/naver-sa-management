@@ -8,41 +8,27 @@
  *   · DB의 apiKeyEnc / secretKeyEnc (Bytes) 자체는 클라이언트로 직렬화 X
  *   · 단, "키 미설정 배지" 표시·testConnection 비활성 결정에 null 여부가 필요
  *   → RSC 단계에서 select 후 즉시 boolean(hasApiKey/hasSecretKey)으로 매핑.
+ *
+ * RSC 사전 호출:
+ *   1. prisma.advertiser.findMany (메타)
+ *   2. getAdvertiserStructureStats(ids) — 광고 구조 카운트 5종 (캠페인 컬럼 표시용)
+ *   3. getLastSyncAt(id) — 5종 sync 시각 (광고주별 병렬 Promise.all)
+ *
+ * 광고주 100개 가정. 그 이상이면 페이지네이션 후속.
  */
 
 import Link from "next/link"
 
 import { prisma } from "@/lib/db/prisma"
 import { Button } from "@/components/ui/button"
+import { PageHeader } from "@/components/navigation/page-header"
+import { AdvertisersStatsSummary } from "@/components/admin/advertisers-stats-summary"
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import { TestConnectionButton } from "@/components/admin/test-connection-button"
-import { KeyStatusBadge } from "@/components/admin/key-status-badge"
-
-function formatDate(d: Date) {
-  // YYYY-MM-DD HH:mm (KST) 표기
-  return new Intl.DateTimeFormat("ko-KR", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(d)
-}
+  AdvertisersListClient,
+  type AdvertiserListRow,
+} from "@/components/admin/advertisers-list-client"
+import { getAdvertiserStructureStats } from "@/lib/admin/advertiser-stats"
+import { getLastSyncAt } from "@/lib/sync/last-sync-at"
 
 export default async function AdvertisersPage() {
   // status='archived' 는 soft delete 대상이라 목록에서 제외.
@@ -67,154 +53,77 @@ export default async function AdvertisersPage() {
     },
   })
 
-  // RSC 단계에서 Bytes → boolean 변환. JSX 로 시크릿이 직렬화되어 내려가지 않도록 방어.
-  const advertisers = rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    customerId: r.customerId,
-    category: r.category,
-    manager: r.manager,
-    status: r.status,
-    createdAt: r.createdAt,
-    hasApiKey: r.apiKeyEnc !== null,
-    hasSecretKey: r.secretKeyEnc !== null,
-  }))
+  const ids = rows.map((r) => r.id)
+
+  // 광고 구조 카운트(5종 한 번에) + 광고주별 lastSyncAt 병렬.
+  // getLastSyncAt 은 광고주 1건당 1 select — Promise.all 로 광고주 N개를 묶어 RTT 단축.
+  const [statsMap, lastSyncList] = await Promise.all([
+    getAdvertiserStructureStats(ids),
+    Promise.all(rows.map((r) => getLastSyncAt(r.id))),
+  ])
+
+  const tableRows: AdvertiserListRow[] = rows.map((r, idx) => {
+    const stat = statsMap.get(r.id)
+    return {
+      id: r.id,
+      name: r.name,
+      customerId: r.customerId,
+      category: r.category,
+      manager: r.manager,
+      status: r.status,
+      createdAt: r.createdAt.toISOString(),
+      hasApiKey: r.apiKeyEnc !== null,
+      hasSecretKey: r.secretKeyEnc !== null,
+      lastSyncAt: lastSyncList[idx] ?? {},
+      campaignCount: stat?.campaigns ?? 0,
+    }
+  })
+
+  // 통계 hero 집계
+  const summary = {
+    total: tableRows.length,
+    active: tableRows.filter((r) => r.status === "active").length,
+    paused: tableRows.filter((r) => r.status === "paused").length,
+    missingKey: tableRows.filter((r) => !r.hasApiKey || !r.hasSecretKey).length,
+  }
+
+  // 카테고리 distinct (null 제외) — 셀렉트 옵션
+  const categories = Array.from(
+    new Set(
+      tableRows
+        .map((r) => r.category)
+        .filter((c): c is string => typeof c === "string" && c.length > 0),
+    ),
+  ).sort((a, b) => a.localeCompare(b, "ko"))
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            광고주
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            네이버 검색광고 광고주 (customerId + API/Secret 키)
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            render={<Link href="/admin/advertisers/import" />}
-          >
-            CSV 일괄 등록
-          </Button>
-          <Button render={<Link href="/admin/advertisers/new" />}>
-            새 광고주 등록
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        title="광고주"
+        description="네이버 검색광고 광고주 (customerId + API/Secret 키)"
+        actions={
+          <>
+            <Button
+              variant="outline"
+              render={<Link href="/admin/advertisers/import" />}
+            >
+              CSV 일괄 등록
+            </Button>
+            <Button render={<Link href="/admin/advertisers/new" />}>
+              + 새 광고주
+            </Button>
+          </>
+        }
+      />
 
-      <Card>
-        <CardHeader className="border-b">
-          <CardTitle>등록된 광고주</CardTitle>
-          <CardDescription>
-            총 {advertisers.length}개. 시크릿 키는 화면에 노출되지 않습니다.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="px-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="px-4">표시명</TableHead>
-                <TableHead>customerId</TableHead>
-                <TableHead>카테고리</TableHead>
-                <TableHead>담당자</TableHead>
-                <TableHead>상태</TableHead>
-                <TableHead>키 상태</TableHead>
-                <TableHead>등록일</TableHead>
-                <TableHead className="px-4 text-right">액션</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {advertisers.length === 0 && (
-                <TableRow>
-                  <TableCell
-                    colSpan={8}
-                    className="px-4 py-10 text-center text-sm text-muted-foreground"
-                  >
-                    등록된 광고주가 없습니다. 우측 상단 “새 광고주 등록” 또는
-                    “CSV 일괄 등록” 버튼으로 등록하세요.
-                  </TableCell>
-                </TableRow>
-              )}
-              {advertisers.map((a) => (
-                <TableRow key={a.id}>
-                  <TableCell className="px-4 font-medium">
-                    <Link
-                      href={`/admin/advertisers/${a.id}`}
-                      className="hover:underline"
-                    >
-                      {a.name}
-                    </Link>
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {a.customerId}
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {a.category ?? "-"}
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {a.manager ?? "-"}
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={a.status} />
-                  </TableCell>
-                  <TableCell>
-                    <KeyStatusBadge
-                      hasApiKey={a.hasApiKey}
-                      hasSecretKey={a.hasSecretKey}
-                    />
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {formatDate(a.createdAt)}
-                  </TableCell>
-                  <TableCell className="px-4">
-                    <div className="flex items-center justify-end gap-2">
-                      <TestConnectionButton
-                        id={a.id}
-                        hasKeys={a.hasApiKey && a.hasSecretKey}
-                      />
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        render={
-                          <Link href={`/admin/advertisers/${a.id}`} />
-                        }
-                      >
-                        상세
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+      <AdvertisersStatsSummary
+        total={summary.total}
+        active={summary.active}
+        paused={summary.paused}
+        missingKey={summary.missingKey}
+      />
+
+      <AdvertisersListClient rows={tableRows} categories={categories} />
     </div>
-  )
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const tone =
-    status === "active"
-      ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300"
-      : status === "paused"
-        ? "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
-        : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
-  const label =
-    status === "active"
-      ? "활성"
-      : status === "paused"
-        ? "일시중지"
-        : status === "archived"
-          ? "아카이브"
-          : status
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}
-    >
-      {label}
-    </span>
   )
 }

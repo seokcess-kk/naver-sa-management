@@ -67,7 +67,8 @@ export const KeywordSchema = z
     statusReason: z.string().optional(),
     inspectStatus: z.string().optional(),
     links: z.object({}).passthrough().optional(),
-    nccQi: z.string().optional(),
+    // nccQi: SA 응답이 object ({ qiGrade: number, ... }) — 과거 string 가정은 잘못. shape 변동 대비 unknown.
+    nccQi: z.unknown().optional(),
   })
   .passthrough()
 
@@ -107,8 +108,32 @@ function parseKeywordArray(
   res: unknown,
   ctx: { method: "GET" | "PUT" | "POST"; path: string; customerId: string },
 ): Keyword[] {
-  const parsed = z.array(KeywordSchema).safeParse(res)
+  // 1) 직접 배열
+  let arrayLike: unknown = res
+  // 2) 일반적 envelope { data: [...] } / { items: [...] } / { keywords: [...] }
+  if (
+    res !== null &&
+    typeof res === "object" &&
+    !Array.isArray(res)
+  ) {
+    const obj = res as Record<string, unknown>
+    if (Array.isArray(obj.data)) arrayLike = obj.data
+    else if (Array.isArray(obj.items)) arrayLike = obj.items
+    else if (Array.isArray(obj.keywords)) arrayLike = obj.keywords
+    else if (Array.isArray(obj.content)) arrayLike = obj.content
+  }
+  if (arrayLike === null || arrayLike === undefined) {
+    return []
+  }
+  const parsed = z.array(KeywordSchema).safeParse(arrayLike)
   if (!parsed.success) {
+    // 임시 진단 로깅 — raw 응답과 zod issues 출력 (스키마 보강 후 제거).
+    console.error(
+      `[listKeywords zod fail] path=${ctx.path}\n` +
+        `  rawType=${typeof res}, isArray=${Array.isArray(res)}\n` +
+        `  rawSample=${JSON.stringify(res).slice(0, 800)}\n` +
+        `  issues=${JSON.stringify(parsed.error.issues.slice(0, 5))}`,
+    )
     throw new NaverSaValidationError(`${ctx.method} ${ctx.path}: zod validation failed`, {
       method: ctx.method,
       path: ctx.path,

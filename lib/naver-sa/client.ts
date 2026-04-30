@@ -62,18 +62,28 @@ export type NaverSaCredentials = {
  */
 export type CredentialsResolver = (customerId: string) => Promise<NaverSaCredentials>
 
-let _credentialsResolver: CredentialsResolver = async () => {
-  // resolver 미등록 시 차단. 정상 흐름: lib/naver-sa/credentials.ts import.
-  throw new NaverSaError(
-    "getCredentials not configured: import '@/lib/naver-sa/credentials' to register resolver",
-  )
-}
+let _credentialsResolver: CredentialsResolver | null = null
 
 export function setCredentialsResolver(resolver: CredentialsResolver): void {
   _credentialsResolver = resolver
 }
 
+/**
+ * 자격증명 조회 — resolver 미등록 시 credentials 모듈을 lazy import 후 재시도.
+ *
+ * 호출자(actions.ts 등)가 매번 `import "@/lib/naver-sa/credentials"` 를 명시적으로
+ * 추가하지 않아도 작동. 첫 호출에서만 dynamic import 비용 발생, 이후 cached.
+ */
 export async function getCredentials(customerId: string): Promise<NaverSaCredentials> {
+  if (_credentialsResolver === null) {
+    // side-effect: credentials.ts 가 setCredentialsResolver(resolve) 호출.
+    await import("@/lib/naver-sa/credentials")
+  }
+  if (_credentialsResolver === null) {
+    throw new NaverSaError(
+      "getCredentials not configured: credentials.ts side-effect did not register resolver",
+    )
+  }
   return _credentialsResolver(customerId)
 }
 

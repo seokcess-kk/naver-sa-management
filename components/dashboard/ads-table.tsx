@@ -90,7 +90,6 @@ import {
 } from "@/components/ui/table"
 import { AdStatusBadge } from "@/components/dashboard/ad-status-badge"
 import { InspectStatusBadge } from "@/components/dashboard/inspect-status-badge"
-import { SyncAdsButton } from "@/components/dashboard/sync-ads-button"
 import {
   AdsAddModal,
   type AdAdgroupOption,
@@ -118,6 +117,20 @@ import type { AdStatus, InspectStatus } from "@/lib/generated/prisma/client"
 
 // 상한 — bulkActionAdsSchema 의 .max(500) 와 일치.
 const BULK_ACTION_MAX = 500
+
+// Base UI Select.Value 가 raw value 를 그대로 표시하는 문제 — 한글 라벨 매핑.
+const STATUS_LABELS: Record<string, string> = {
+  ALL: "상태 (전체)",
+  on: "ON",
+  off: "OFF",
+  deleted: "삭제됨",
+}
+const INSPECT_LABELS: Record<string, string> = {
+  ALL: "검수 (전체)",
+  pending: "검수중",
+  approved: "승인",
+  rejected: "거절",
+}
 
 // =============================================================================
 // 타입
@@ -645,48 +658,36 @@ export function AdsTable({
   }
 
   return (
-    <div className="flex flex-col gap-4 p-6">
-      <header className="flex items-end justify-between gap-4">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            소재
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            광고그룹별 소재 목록. 체크박스로 다중 선택 후 ON/OFF 일괄 변경
-            가능. (인라인 편집·CSV 는 후속 PR)
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* F-4.6 소재 추가 — hasKeys=false / 광고그룹 0개 일 때 disabled */}
-          <Button
-            size="sm"
-            onClick={() => {
-              if (!hasKeys) {
-                toast.error("키 미설정 — 소재 추가 비활성")
-                return
-              }
-              if (adgroups.length === 0) {
-                toast.error(
-                  "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
-                )
-                return
-              }
-              setAddOpen(true)
-            }}
-            disabled={!hasKeys || adgroups.length === 0}
-            title={
-              !hasKeys
-                ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
-                : adgroups.length === 0
-                  ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
-                  : "TEXT_45 단일 소재 추가"
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {/* F-4.6 소재 추가 — hasKeys=false / 광고그룹 0개 일 때 disabled */}
+        <Button
+          size="sm"
+          onClick={() => {
+            if (!hasKeys) {
+              toast.error("키 미설정 — 소재 추가 비활성")
+              return
             }
-          >
-            소재 추가
-          </Button>
-          <SyncAdsButton advertiserId={advertiserId} hasKeys={hasKeys} />
-        </div>
-      </header>
+            if (adgroups.length === 0) {
+              toast.error(
+                "광고그룹이 없습니다. 먼저 광고그룹을 동기화하세요.",
+              )
+              return
+            }
+            setAddOpen(true)
+          }}
+          disabled={!hasKeys || adgroups.length === 0}
+          title={
+            !hasKeys
+              ? "키 미설정 — 먼저 API 키 / Secret 키 입력"
+              : adgroups.length === 0
+                ? "광고그룹이 없습니다. 광고그룹을 먼저 동기화하세요."
+                : "TEXT_45 단일 소재 추가"
+          }
+        >
+          소재 추가
+        </Button>
+      </div>
 
       {!hasKeys && (
         <Card>
@@ -716,7 +717,11 @@ export function AdsTable({
           onValueChange={(v) => setAdTypeFilter(v ?? "ALL")}
         >
           <SelectTrigger className="w-32">
-            <SelectValue placeholder="타입" />
+            <SelectValue placeholder="타입">
+              {(v: string | null) =>
+                !v || v === "ALL" ? "타입 (전체)" : v
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">타입 (전체)</SelectItem>
@@ -732,7 +737,9 @@ export function AdsTable({
           onValueChange={(v) => setStatusFilter(v ?? "ALL")}
         >
           <SelectTrigger className="w-32">
-            <SelectValue placeholder="상태" />
+            <SelectValue placeholder="상태">
+              {(v: string | null) => STATUS_LABELS[v ?? "ALL"] ?? "상태 (전체)"}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">상태 (전체)</SelectItem>
@@ -746,7 +753,11 @@ export function AdsTable({
           onValueChange={(v) => setInspectFilter(v ?? "ALL")}
         >
           <SelectTrigger className="w-32">
-            <SelectValue placeholder="검수" />
+            <SelectValue placeholder="검수">
+              {(v: string | null) =>
+                INSPECT_LABELS[v ?? "ALL"] ?? "검수 (전체)"
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">검수 (전체)</SelectItem>
@@ -760,7 +771,13 @@ export function AdsTable({
           onValueChange={(v) => setAdgroupFilter(v ?? "ALL")}
         >
           <SelectTrigger className="w-56">
-            <SelectValue placeholder="광고그룹" />
+            <SelectValue placeholder="광고그룹">
+              {(v: string | null) =>
+                !v || v === "ALL"
+                  ? "광고그룹 (전체)"
+                  : (adgroupOptions.find((g) => g.id === v)?.name ?? v)
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="ALL">광고그룹 (전체)</SelectItem>
@@ -860,7 +877,7 @@ export function AdsTable({
         {ads.length === 0 ? (
           <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
             표시할 소재가 없습니다. 우측 상단{" "}
-            <span className="mx-1 font-medium">광고주에서 동기화</span> 버튼을
+            <span className="mx-1 font-medium">동기화</span> 버튼을
             눌러 SA 에서 가져오세요. (광고그룹을 먼저 동기화해야 합니다.)
           </div>
         ) : rows.length === 0 ? (

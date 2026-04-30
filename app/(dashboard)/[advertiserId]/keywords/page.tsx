@@ -28,11 +28,15 @@ import {
   UnauthenticatedError,
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
+import { PageHeader } from "@/components/navigation/page-header"
 import { KeywordsTable } from "@/components/dashboard/keywords-table"
 import type {
   KeywordRow,
   AdgroupOption,
 } from "@/components/dashboard/keywords-table"
+import { SyncKeywordsWithFilter } from "@/components/dashboard/sync-keywords-with-filter"
+import { LastSyncBadge } from "@/components/dashboard/last-sync-badge"
+import { getLastSyncAt } from "@/lib/sync/last-sync-at"
 
 export default async function KeywordsPage({
   params,
@@ -60,6 +64,10 @@ export default async function KeywordsPage({
     }
     throw e
   }
+
+  // 마지막 동기화 시각 — UI 배지 표시용. 헬퍼는 read-only / 광고주 권한 검증은 위 getCurrentAdvertiser 가 담당.
+  const lastSync = await getLastSyncAt(advertiserId)
+  const keywordsLastSync = lastSync.keywords
 
   // raw 컬럼 select 안 함. Keyword 는 advertiserId 직접 외래키 X
   //   → adgroup.campaign.advertiserId join 으로 한정.
@@ -120,6 +128,20 @@ export default async function KeywordsPage({
     campaign: { id: a.campaign.id, name: a.campaign.name },
   }))
 
+  // F-3.1 동기화 캠페인 필터 — 광고주 산하 캠페인 prefetch.
+  // status='deleted' 는 옵션에서 제외 (인라인 동기화 의미 없음).
+  const syncCampaignRows = await prisma.campaign.findMany({
+    where: { advertiserId, status: { not: "deleted" } },
+    select: { id: true, name: true, nccCampaignId: true, status: true },
+    orderBy: { name: "asc" },
+  })
+  const syncCampaigns = syncCampaignRows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    nccCampaignId: c.nccCampaignId,
+    status: c.status as "on" | "off" | "deleted",
+  }))
+
   // Decimal / Date → JSON-friendly 직렬화. KeywordRow shape 으로 매핑.
   const keywords: KeywordRow[] = rows.map((k) => ({
     id: k.id,
@@ -147,12 +169,32 @@ export default async function KeywordsPage({
   }))
 
   return (
-    <KeywordsTable
-      advertiserId={advertiserId}
-      hasKeys={advertiser.hasKeys}
-      keywords={keywords}
-      adgroups={adgroups}
-      userRole={userRole}
-    />
+    <div className="flex flex-col gap-4 p-6">
+      <PageHeader
+        title="키워드"
+        description="셀을 클릭해 인라인 편집하거나, 체크박스로 다중 선택 후 ON/OFF · 입찰가 일괄 변경. CSV 가져오기로 일괄 생성·수정·OFF 가능."
+        breadcrumbs={[
+          { label: advertiser.name, href: `/${advertiserId}` },
+          { label: "키워드" },
+        ]}
+        actions={
+          <>
+            <LastSyncBadge syncedAt={keywordsLastSync} />
+            <SyncKeywordsWithFilter
+              advertiserId={advertiserId}
+              hasKeys={advertiser.hasKeys}
+              campaigns={syncCampaigns}
+            />
+          </>
+        }
+      />
+      <KeywordsTable
+        advertiserId={advertiserId}
+        hasKeys={advertiser.hasKeys}
+        keywords={keywords}
+        adgroups={adgroups}
+        userRole={userRole}
+      />
+    </div>
   )
 }
