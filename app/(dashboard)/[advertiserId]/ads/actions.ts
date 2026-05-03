@@ -62,6 +62,7 @@ import {
 import { NaverSaError } from "@/lib/naver-sa/errors"
 import type { AdStatus, InspectStatus } from "@/lib/generated/prisma/client"
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
+import { buildAdFields, extractAdType } from "@/lib/sync/ad-fields"
 
 // =============================================================================
 // 1. syncAds — NAVER → DB upsert
@@ -232,13 +233,16 @@ export async function syncAds(
 
           // adType / fields / inspectMemo 는 응답에 있을 때만 반영 (없으면 기존값 유지).
           // AdSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
-          const adTypeVal =
-            typeof a.adType === "string" && a.adType.length > 0
-              ? a.adType
-              : null
+          // RSA_AD 본문은 a.ad 가 아닌 a.assets 배열에 있어 buildAdFields 가 추출.
+          const adTypeVal = extractAdType(
+            a as unknown as { adType?: string | null; type?: string | null },
+          )
+          const fieldsRaw = buildAdFields(
+            a as unknown as { ad?: unknown; assets?: unknown },
+          )
           const fieldsVal =
-            a.ad && typeof a.ad === "object"
-              ? (a.ad as unknown as Prisma.InputJsonValue)
+            fieldsRaw !== null
+              ? (fieldsRaw as unknown as Prisma.InputJsonValue)
               : null
           const inspectMemoVal =
             typeof a.inspectMemo === "string" && a.inspectMemo.length > 0
@@ -1059,13 +1063,18 @@ export async function createAdsBatch(
         })
 
         // DB upsert (nccAdId unique)
-        const adTypeVal =
-          typeof u.adType === "string" && u.adType.length > 0
-            ? u.adType
-            : parsed.adType
+        // RSA_AD 본문은 u.ad 가 아닌 u.assets 배열에 있어 buildAdFields 가 추출.
+        // 응답에 type 으로 오는 광고 타입 폴백.
+        const adTypeFromResp = extractAdType(
+          u as unknown as { adType?: string | null; type?: string | null },
+        )
+        const adTypeVal = adTypeFromResp ?? parsed.adType
+        const fieldsFromResp = buildAdFields(
+          u as unknown as { ad?: unknown; assets?: unknown },
+        )
         const fieldsVal =
-          u.ad && typeof u.ad === "object"
-            ? (u.ad as unknown as Prisma.InputJsonValue)
+          fieldsFromResp !== null
+            ? (fieldsFromResp as unknown as Prisma.InputJsonValue)
             : (parsed.ads[idx].ad as unknown as Prisma.InputJsonValue)
         const inspectMemoVal =
           typeof u.inspectMemo === "string" && u.inspectMemo.length > 0

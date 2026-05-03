@@ -58,6 +58,7 @@ import type {
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 
 import { recordSyncAt } from "@/lib/sync/last-sync-at"
+import { buildAdFields, extractAdType } from "@/lib/sync/ad-fields"
 import {
   mapAdGroupStatus,
   mapAdStatus,
@@ -534,13 +535,17 @@ async function runAdsSync(
         const mappedStatus = mapAdStatus(a)
         const mappedInspect = mapInspectStatus(a)
 
-        const adTypeVal =
-          typeof a.adType === "string" && a.adType.length > 0
-            ? a.adType
-            : null
+        // RSA_AD 본문은 a.ad 가 아닌 a.assets 배열에 있어 buildAdFields 가 추출.
+        // adType 은 SA 가 type 으로 보낼 수도 있어 extractAdType 폴백.
+        const adTypeVal = extractAdType(
+          a as unknown as { adType?: string | null; type?: string | null },
+        )
+        const fieldsRaw = buildAdFields(
+          a as unknown as { ad?: unknown; assets?: unknown },
+        )
         const fieldsVal =
-          a.ad && typeof a.ad === "object"
-            ? (a.ad as unknown as Prisma.InputJsonValue)
+          fieldsRaw !== null
+            ? (fieldsRaw as unknown as Prisma.InputJsonValue)
             : null
         const inspectMemoVal =
           typeof a.inspectMemo === "string" && a.inspectMemo.length > 0
