@@ -42,6 +42,23 @@ import {
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
+import { getStatsChunked, type StatsDatePreset } from "@/lib/naver-sa/stats"
+import { NaverSaError } from "@/lib/naver-sa/errors"
+
+// 소재 페이지 stats 기간 화이트리스트.
+// SA 콘솔과 동일 — last7days 기본, 토글로 today / yesterday / last30days.
+const PERIOD_WHITELIST = ["today", "yesterday", "last7days", "last30days"] as const
+type AdsPeriod = (typeof PERIOD_WHITELIST)[number]
+const DEFAULT_PERIOD: AdsPeriod = "last7days"
+
+function parsePeriod(raw: string | string[] | undefined): AdsPeriod {
+  const v = Array.isArray(raw) ? raw[0] : raw
+  return PERIOD_WHITELIST.includes(v as AdsPeriod) ? (v as AdsPeriod) : DEFAULT_PERIOD
+}
+
+type AdsSearchParams = CampaignScopeSearchParams & {
+  period?: string | string[]
+}
 
 // Server Action 단기 timeout fix — syncAds 가 광고그룹 N회 listAds 호출.
 // 장기: ChangeBatch + Chunk Executor (SPEC 3.5) 이관 후 제거.
@@ -52,12 +69,13 @@ export default async function AdsPage({
   searchParams,
 }: {
   params: Promise<{ advertiserId: string }>
-  searchParams: Promise<CampaignScopeSearchParams>
+  searchParams: Promise<AdsSearchParams>
 }) {
   const { advertiserId } = await params
   const scopeSearchParams = await searchParams
   const campaignScopeIds = parseCampaignScopeIds(scopeSearchParams)
   const adgroupScopeIds = parseAdgroupScopeIds(scopeSearchParams)
+  const period = parsePeriod(scopeSearchParams.period)
   const campaignWhere =
     campaignScopeIds.length > 0
       ? { advertiserId, id: { in: campaignScopeIds } }
@@ -153,6 +171,42 @@ export default async function AdsPage({
     status: c.status as "on" | "off" | "deleted",
   }))
 
+  // 소재별 stats 조회 (P1 — getStats 동기 호출 + Redis 캐시).
+  //   - hasKeys=false 또는 광고가 0건이면 호출 X.
+  //   - chunk 분할은 getStatsChunked 책임 (NAVER_SA_STATS_CHUNK env, 기본 100).
+  //   - 호출 실패는 graceful degrade — 빈 metrics 로 페이지는 정상 렌더 + 경고 로그.
+  //   - 광고주별 toggle ON/OFF/삭제 등 status 변경에 따라 stats 가 0 일 수 있음 (정상).
+  const nccAdIds = rows.map((a) => a.nccAdId)
+  const metricsMap = new Map<
+    string,
+    { impCnt: number; clkCnt: number; ctr: number; cpc: number; salesAmt: number }
+  >()
+  let statsError: string | null = null
+  if (advertiser.hasKeys && nccAdIds.length > 0) {
+    try {
+      const statsRows = await getStatsChunked(advertiser.customerId, {
+        ids: nccAdIds,
+        fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
+        datePreset: period satisfies StatsDatePreset,
+      })
+      for (const r of statsRows) {
+        if (typeof r.id !== "string") continue
+        metricsMap.set(r.id, {
+          impCnt: typeof r.impCnt === "number" ? r.impCnt : 0,
+          clkCnt: typeof r.clkCnt === "number" ? r.clkCnt : 0,
+          ctr: typeof r.ctr === "number" ? r.ctr : 0,
+          cpc: typeof r.cpc === "number" ? r.cpc : 0,
+          salesAmt: typeof r.salesAmt === "number" ? r.salesAmt : 0,
+        })
+      }
+    } catch (e) {
+      // graceful degrade — 페이지는 metrics 없이 표시, 사용자에게 안내 칩.
+      statsError =
+        e instanceof NaverSaError ? e.message : e instanceof Error ? e.message : "알 수 없는 오류"
+      console.warn("[ads/page] getStatsChunked failed:", e)
+    }
+  }
+
   // Date → ISO 직렬화. AdRow shape 으로 매핑.
   // fields 는 Prisma Json 그대로 통과 (클라이언트에서 extractAdPreview 가 휴리스틱 추출).
   const ads: AdRow[] = rows.map((a) => ({
@@ -172,6 +226,14 @@ export default async function AdsPage({
         id: a.adgroup.campaign.id,
         name: a.adgroup.campaign.name,
       },
+    },
+    // 매칭 없으면 0 으로 채움 (소재가 신규라 아직 노출 0 인 케이스 정상).
+    metrics: metricsMap.get(a.nccAdId) ?? {
+      impCnt: 0,
+      clkCnt: 0,
+      ctr: 0,
+      cpc: 0,
+      salesAmt: 0,
     },
   }))
 
@@ -211,6 +273,8 @@ export default async function AdsPage({
         ads={ads}
         adgroups={adgroups}
         userRole={userRole}
+        period={period}
+        statsError={statsError}
       />
     </div>
   )

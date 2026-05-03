@@ -54,6 +54,7 @@ import {
   type SortingState,
   type ColumnFiltersState,
   type FilterFn,
+  type Row,
 } from "@tanstack/react-table"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import {
@@ -139,6 +140,18 @@ const INSPECT_LABELS: Record<string, string> = {
 // AdsAddModal 의 광고그룹 옵션을 page.tsx 가 본 모듈만 import 하도록 re-export.
 export type { AdAdgroupOption }
 
+/** 소재 단위 stats (RSC 가 getStatsChunked 결과를 매핑). 매칭 없으면 0 채움. */
+export type AdMetrics = {
+  impCnt: number
+  clkCnt: number
+  /** 클릭률 % (예: 0.32) */
+  ctr: number
+  /** 평균 CPC (원) */
+  cpc: number
+  /** 총 비용 (원) */
+  salesAmt: number
+}
+
 /** RSC → 클라이언트 전달용 소재 행. raw 컬럼 / 시크릿 X. */
 export type AdRow = {
   id: string
@@ -162,6 +175,18 @@ export type AdRow = {
       name: string
     }
   }
+  /** P1 stats (광고주별 캐시 5분/1시간) — RSC 가 page.tsx 에서 batch 조회. */
+  metrics: AdMetrics
+}
+
+/** 페이지 stats 기간 (RSC 가 searchParams 에서 파싱 후 prop 으로 전달). */
+export type AdsPeriod = "today" | "yesterday" | "last7days" | "last30days"
+
+const PERIOD_LABELS: Record<AdsPeriod, string> = {
+  today: "오늘",
+  yesterday: "어제",
+  last7days: "지난 7일",
+  last30days: "지난 30일",
 }
 
 /**
@@ -241,6 +266,122 @@ function extractAdPreview(fields: unknown): string {
   return "본문 정보 없음"
 }
 
+/**
+ * 소재 본문 분리 추출 (셀 풍부화용).
+ *
+ * SA 콘솔 "소재" 컬럼과 동일 정보:
+ *   - headline (제목 1줄)
+ *   - description (설명 1~2줄)
+ *   - displayUrl (표시 URL)
+ *   - landingUrl (연결 URL)
+ *   - thumbnail (이미지 광고)
+ *
+ * adType 별 키 차이 (TEXT_45 / RSA_AD / GFA 이미지) 를 휴리스틱으로 흡수.
+ * 매칭 안 되는 키는 빈 문자열 / null.
+ */
+type AdPreviewParts = {
+  headline: string
+  description: string
+  displayUrl: string
+  landingUrl: string
+  thumbnail: string | null
+}
+
+function extractAdParts(fields: unknown): AdPreviewParts {
+  const empty: AdPreviewParts = {
+    headline: "",
+    description: "",
+    displayUrl: "",
+    landingUrl: "",
+    thumbnail: null,
+  }
+  if (fields === null || fields === undefined) return empty
+  if (typeof fields !== "object") return empty
+  const obj = fields as Record<string, unknown>
+
+  // headline 후보
+  const headline =
+    pickString(obj, ["headline", "title", "subject", "headline1", "subject1"]) ||
+    pickFirstFromArrayObj(obj, "headlines") ||
+    ""
+
+  // description 후보
+  const description =
+    pickString(obj, ["description", "body", "text", "description1"]) ||
+    pickFirstFromArrayObj(obj, "descriptions") ||
+    ""
+
+  // 표시 URL — 일반적으로 pc.display 또는 displayUrl
+  const displayUrl =
+    pickString(obj, ["displayUrl", "displayURL"]) ||
+    pickNestedString(obj, ["pc", "display"]) ||
+    pickNestedString(obj, ["mobile", "display"]) ||
+    ""
+
+  // 연결 URL — pc.final / mobile.final / landingUrl
+  const landingUrl =
+    pickString(obj, ["landingUrl", "finalUrl"]) ||
+    pickNestedString(obj, ["pc", "final"]) ||
+    pickNestedString(obj, ["mobile", "final"]) ||
+    ""
+
+  // 이미지 광고 thumbnail (GFA 이미지 광고 / 통합 캠페인)
+  const thumbnail =
+    pickString(obj, ["thumbnail", "imageUrl", "image"]) || null
+
+  return { headline, description, displayUrl, landingUrl, thumbnail }
+}
+
+function pickString(obj: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const v = obj[k]
+    if (typeof v === "string" && v.trim().length > 0) return v.trim()
+  }
+  return ""
+}
+
+function pickNestedString(
+  obj: Record<string, unknown>,
+  path: [string, string],
+): string {
+  const a = obj[path[0]]
+  if (a && typeof a === "object") {
+    const v = (a as Record<string, unknown>)[path[1]]
+    if (typeof v === "string" && v.trim().length > 0) return v.trim()
+  }
+  return ""
+}
+
+function pickFirstFromArrayObj(obj: Record<string, unknown>, key: string): string {
+  const arr = obj[key]
+  if (!Array.isArray(arr) || arr.length === 0) return ""
+  const first = arr[0]
+  if (typeof first === "string") return first
+  if (first && typeof first === "object" && "text" in first) {
+    const t = (first as Record<string, unknown>).text
+    if (typeof t === "string") return t
+  }
+  return ""
+}
+
+// =============================================================================
+// 숫자 포맷 — metric 셀 / footer 합계 공통
+// =============================================================================
+
+const NUMBER_FMT = new Intl.NumberFormat("ko-KR")
+
+function formatInt(n: number): string {
+  return NUMBER_FMT.format(Math.round(n))
+}
+
+function formatPct(n: number): string {
+  return `${n.toFixed(2)} %`
+}
+
+function formatWon(n: number): string {
+  return `${NUMBER_FMT.format(Math.round(n))}원`
+}
+
 // =============================================================================
 // 필터 정의 (클라이언트 측, 5천 행 메모리 충분)
 // =============================================================================
@@ -310,15 +451,46 @@ function makeColumns(ctx: RowCtx): ColumnDef<AdRow>[] {
       accessorFn: (row) => extractAdPreview(row.fields),
       header: "소재",
       cell: ({ row }) => {
-        const preview = extractAdPreview(row.original.fields)
+        const parts = extractAdParts(row.original.fields)
+        const fallback = !parts.headline && !parts.description && !parts.thumbnail
+          ? extractAdPreview(row.original.fields)
+          : ""
         return (
-          <div className="flex max-w-[280px] flex-col gap-0.5">
-            <span className="line-clamp-2 text-sm font-medium">
-              {preview || "(미리보기 없음)"}
-            </span>
-            <span className="font-mono text-[11px] text-muted-foreground">
-              {row.original.nccAdId}
-            </span>
+          <div className="flex max-w-[360px] items-start gap-3">
+            {parts.thumbnail ? (
+              // GFA 이미지 — 외부 호스트 next/image 도메인 미설정 가능성 → 단순 <img>
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={parts.thumbnail}
+                alt="이미지 광고 썸네일"
+                className="h-10 w-10 shrink-0 rounded border object-cover"
+                loading="lazy"
+              />
+            ) : null}
+            <div className="flex min-w-0 flex-col gap-0.5">
+              {parts.headline ? (
+                <span className="line-clamp-1 text-sm font-medium text-foreground">
+                  {parts.headline}
+                </span>
+              ) : (
+                <span className="line-clamp-1 text-sm font-medium text-muted-foreground">
+                  {fallback || (parts.thumbnail ? "이미지 광고" : "(미리보기 없음)")}
+                </span>
+              )}
+              {parts.description ? (
+                <span className="line-clamp-1 text-xs text-muted-foreground">
+                  {parts.description}
+                </span>
+              ) : null}
+              {parts.displayUrl || parts.landingUrl ? (
+                <span className="line-clamp-1 text-[11px] text-muted-foreground/80">
+                  {parts.displayUrl || parts.landingUrl}
+                </span>
+              ) : null}
+              <span className="font-mono text-[11px] text-muted-foreground/80">
+                {row.original.nccAdId}
+              </span>
+            </div>
           </div>
         )
       },
@@ -387,6 +559,66 @@ function makeColumns(ctx: RowCtx): ColumnDef<AdRow>[] {
       ),
       filterFn: exactMatchFilter,
       enableSorting: true,
+    },
+    {
+      id: "impCnt",
+      accessorFn: (row) => row.metrics.impCnt,
+      header: "노출수",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatInt(row.original.metrics.impCnt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.impCnt - b.original.metrics.impCnt,
+    },
+    {
+      id: "clkCnt",
+      accessorFn: (row) => row.metrics.clkCnt,
+      header: "클릭수",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatInt(row.original.metrics.clkCnt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.clkCnt - b.original.metrics.clkCnt,
+    },
+    {
+      id: "ctr",
+      accessorFn: (row) => row.metrics.ctr,
+      header: "클릭률",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatPct(row.original.metrics.ctr)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.ctr - b.original.metrics.ctr,
+    },
+    {
+      id: "cpc",
+      accessorFn: (row) => row.metrics.cpc,
+      header: "평균 CPC",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatWon(row.original.metrics.cpc)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.cpc - b.original.metrics.cpc,
+    },
+    {
+      id: "salesAmt",
+      accessorFn: (row) => row.metrics.salesAmt,
+      header: "총비용",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm font-medium">
+          {formatWon(row.original.metrics.salesAmt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.salesAmt - b.original.metrics.salesAmt,
     },
     {
       accessorKey: "updatedAt",
@@ -460,6 +692,69 @@ function AdRowActions({ row, ctx }: { row: AdRow; ctx: RowCtx }) {
   )
 }
 
+/**
+ * 필터 적용 후 행 metrics 합계 표시 (SA 콘솔 footer 와 동일).
+ *
+ * 합계 정의:
+ *   - impCnt / clkCnt / salesAmt: 단순 합산
+ *   - ctr: clkCnt / impCnt × 100 (가중평균 — 단순 ctr 평균이 아닌 실비율)
+ *   - cpc: salesAmt / clkCnt (가중평균)
+ *
+ * 컬럼 순서 (makeColumns 기준 13개): select / preview / adgroup / type / status / inspect /
+ *   impCnt / clkCnt / ctr / cpc / salesAmt / updatedAt / actions
+ */
+function MetricsFooter({
+  rows,
+  columnCount,
+}: {
+  rows: Row<AdRow>[]
+  columnCount: number
+}) {
+  const totals = React.useMemo(() => {
+    let impCnt = 0
+    let clkCnt = 0
+    let salesAmt = 0
+    for (const r of rows) {
+      impCnt += r.original.metrics.impCnt
+      clkCnt += r.original.metrics.clkCnt
+      salesAmt += r.original.metrics.salesAmt
+    }
+    const ctr = impCnt > 0 ? (clkCnt / impCnt) * 100 : 0
+    const cpc = clkCnt > 0 ? salesAmt / clkCnt : 0
+    return { impCnt, clkCnt, salesAmt, ctr, cpc }
+  }, [rows])
+
+  if (rows.length === 0 || columnCount === 0) return null
+
+  return (
+    <tfoot className="sticky bottom-0 z-10 border-t-2 bg-muted/40 text-sm font-medium">
+      <tr>
+        <td className="px-3 py-2.5" />
+        <td className="px-3 py-2.5 text-xs text-muted-foreground" colSpan={5}>
+          필터 결과 {rows.length.toLocaleString()}건 합계
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatInt(totals.impCnt)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatInt(totals.clkCnt)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatPct(totals.ctr)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatWon(totals.cpc)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono font-semibold">
+          {formatWon(totals.salesAmt)}
+        </td>
+        <td className="px-3 py-2.5" />
+        <td className="px-3 py-2.5" />
+      </tr>
+    </tfoot>
+  )
+}
+
 function AdTypeBadge({ value }: { value: string | null }) {
   if (!value) {
     return <span className="text-xs text-muted-foreground">—</span>
@@ -493,6 +788,8 @@ export function AdsTable({
   ads,
   adgroups,
   userRole,
+  period,
+  statsError,
 }: {
   advertiserId: string
   hasKeys: boolean
@@ -501,6 +798,10 @@ export function AdsTable({
   adgroups: AdAdgroupOption[]
   /** F-4.7 — admin 한정 단건 삭제 권한 (RSC 에서 ctx.user.role 전달). */
   userRole: "admin" | "operator" | "viewer"
+  /** RSC 가 searchParams.period 파싱 후 전달. */
+  period: AdsPeriod
+  /** stats 호출 실패 시 안내 (toolbar 우측 칩) */
+  statsError: string | null
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -886,12 +1187,44 @@ export function AdsTable({
         >
           초기화
         </Button>
-        <span className="ml-auto text-xs text-muted-foreground">
-          총 {ads.length.toLocaleString()}건
-          {rows.length !== ads.length && (
-            <> (필터 후 {rows.length.toLocaleString()}건)</>
-          )}
-        </span>
+        <div className="ml-auto flex items-center gap-2">
+          {/* stats 기간 select — 변경 시 RSC 재실행 (period query 갱신) */}
+          <Select
+            value={period}
+            onValueChange={(v) => {
+              const next = (v ?? "last7days") as AdsPeriod
+              updateQuery({ period: next === "last7days" ? "" : next })
+            }}
+          >
+            <SelectTrigger className="h-8 w-32">
+              <SelectValue placeholder="기간">
+                {(v: string | null) =>
+                  PERIOD_LABELS[(v as AdsPeriod) ?? "last7days"]
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="today">오늘</SelectItem>
+              <SelectItem value="yesterday">어제</SelectItem>
+              <SelectItem value="last7days">지난 7일</SelectItem>
+              <SelectItem value="last30days">지난 30일</SelectItem>
+            </SelectContent>
+          </Select>
+          {statsError ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900"
+              title={statsError}
+            >
+              지표 조회 실패 — 동기화 후 재시도
+            </span>
+          ) : null}
+          <span className="text-xs text-muted-foreground">
+            총 {ads.length.toLocaleString()}건
+            {rows.length !== ads.length && (
+              <> (필터 후 {rows.length.toLocaleString()}건)</>
+            )}
+          </span>
+        </div>
       </div>
 
       {/* 다중 선택 일괄 액션 바 (F-4.3) */}
@@ -1046,6 +1379,7 @@ export function AdsTable({
                 </tr>
               )}
             </tbody>
+            <MetricsFooter rows={rows} columnCount={columns.length} />
           </table>
         )}
       </div>
