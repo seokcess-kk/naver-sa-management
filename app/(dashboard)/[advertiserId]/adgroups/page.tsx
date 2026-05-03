@@ -39,6 +39,10 @@ import {
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
 
+// Server Action 단기 timeout fix — listAdgroups 1회지만 광고그룹 수가 많으면 SA 응답 자체가 김.
+// 장기: ChangeBatch + Chunk Executor (SPEC 3.5) 이관 후 제거.
+export const maxDuration = 300
+
 export default async function AdgroupsPage({
   params,
   searchParams,

@@ -44,6 +44,11 @@ import {
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
 
+// Server Action 단기 timeout fix — syncKeywords 가 광고그룹 N회 listKeywords 호출.
+// 광고그룹 100개+ 일 때 60s 기본값으로 504 발생 → 300s 로 상향.
+// 장기: ChangeBatch + Chunk Executor (SPEC 3.5) 이관 후 제거.
+export const maxDuration = 300
+
 export default async function KeywordsPage({
   params,
   searchParams,

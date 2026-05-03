@@ -43,6 +43,10 @@ import {
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
 
+// Server Action 단기 timeout fix — syncAds 가 광고그룹 N회 listAds 호출.
+// 장기: ChangeBatch + Chunk Executor (SPEC 3.5) 이관 후 제거.
+export const maxDuration = 300
+
 export default async function AdsPage({
   params,
   searchParams,

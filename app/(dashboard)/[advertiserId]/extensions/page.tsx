@@ -48,6 +48,11 @@ import {
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
 
+// Server Action 단기 timeout fix — syncExtensions 가 광고그룹 × type 3종 N×3회 listAdExtensions 호출.
+// 5종 sync 중 가장 호출량 많음 — 504 위험 가장 높음.
+// 장기: ChangeBatch + Chunk Executor (SPEC 3.5) 이관 후 제거.
+export const maxDuration = 300
+
 export default async function ExtensionsPage({
   params,
   searchParams,

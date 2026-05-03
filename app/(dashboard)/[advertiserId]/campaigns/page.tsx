@@ -35,6 +35,11 @@ import {
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
 
+// Server Action 단기 timeout fix — syncCampaigns 자체는 짧지만 일관성 위해 통일.
+// 광고그룹 단위 N회 호출하는 페이지(adgroups/keywords/ads/extensions)는 필수.
+// 장기: ChangeBatch + Chunk Executor (SPEC 3.5) 이관 후 제거.
+export const maxDuration = 300
+
 export default async function CampaignsPage({
   params,
   searchParams,
