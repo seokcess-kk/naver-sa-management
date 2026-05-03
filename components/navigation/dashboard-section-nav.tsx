@@ -36,6 +36,16 @@ export function DashboardSectionNav({
 }) {
   const pathname = usePathname().replace(/\/+$/, "")
   const rootHref = `/${advertiser.id}`
+  const pathnameSegments = pathname.split("/").filter(Boolean)
+  const advertiserSegmentIndex = pathnameSegments.findIndex(
+    (segment) => segment === advertiser.id,
+  )
+  const activeSectionHref =
+    advertiserSegmentIndex === -1
+      ? ""
+      : pathnameSegments[advertiserSegmentIndex + 1]
+        ? `/${pathnameSegments[advertiserSegmentIndex + 1]}`
+        : ""
 
   return (
     <div className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/80">
@@ -65,10 +75,7 @@ export function DashboardSectionNav({
         <div className="flex min-w-max items-center gap-1">
           {sections.map((section) => {
             const href = `${rootHref}${section.href}`
-            const active =
-              section.href === ""
-                ? pathname === rootHref
-                : pathname === href || pathname.startsWith(`${href}/`)
+            const active = section.href === activeSectionHref
             return (
               <Link
                 key={section.label}
