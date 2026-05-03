@@ -32,13 +32,24 @@ import { PageHeader } from "@/components/navigation/page-header"
 import { AdgroupsTable } from "@/components/dashboard/adgroups-table"
 import type { AdgroupRow } from "@/components/dashboard/adgroups-table"
 import { SyncAdgroupsWithFilter } from "@/components/dashboard/sync-adgroups-with-filter"
+import {
+  parseCampaignScopeIds,
+  type CampaignScopeSearchParams,
+} from "@/lib/navigation/campaign-scope"
 
 export default async function AdgroupsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ advertiserId: string }>
+  searchParams: Promise<CampaignScopeSearchParams>
 }) {
   const { advertiserId } = await params
+  const campaignScopeIds = parseCampaignScopeIds(await searchParams)
+  const campaignWhere =
+    campaignScopeIds.length > 0
+      ? { advertiserId, id: { in: campaignScopeIds } }
+      : { advertiserId }
 
   let advertiser
   try {
@@ -61,7 +72,7 @@ export default async function AdgroupsPage({
   // raw 컬럼 select 안 함. AdGroup 은 advertiserId 직접 외래키 X → campaign join 으로 한정.
   // dailyBudget 은 Phase 1 정책상 UI 비노출 — select 하지 않음 (DB 컬럼은 Phase 2 까지 보존).
   const rows = await prisma.adGroup.findMany({
-    where: { campaign: { advertiserId } },
+    where: { campaign: campaignWhere },
     select: {
       id: true,
       nccAdgroupId: true,
@@ -118,7 +129,11 @@ export default async function AdgroupsPage({
     <div className="flex flex-col gap-4 p-6">
       <PageHeader
         title="광고그룹"
-        description="ON/OFF · 입찰가 · 기본 매체를 다중 선택 후 일괄 변경할 수 있습니다."
+        description={
+          campaignScopeIds.length > 0
+            ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 광고그룹만 표시합니다.`
+            : "ON/OFF · 입찰가 · 기본 매체를 다중 선택 후 일괄 변경할 수 있습니다."
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "광고그룹" },

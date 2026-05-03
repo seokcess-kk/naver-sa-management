@@ -41,13 +41,24 @@ import type {
   ExtensionAdgroupOption,
 } from "@/components/dashboard/extensions-table"
 import { SyncExtensionsWithFilter } from "@/components/dashboard/sync-extensions-with-filter"
+import {
+  parseCampaignScopeIds,
+  type CampaignScopeSearchParams,
+} from "@/lib/navigation/campaign-scope"
 
 export default async function ExtensionsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ advertiserId: string }>
+  searchParams: Promise<CampaignScopeSearchParams>
 }) {
   const { advertiserId } = await params
+  const campaignScopeIds = parseCampaignScopeIds(await searchParams)
+  const campaignWhere =
+    campaignScopeIds.length > 0
+      ? { advertiserId, id: { in: campaignScopeIds } }
+      : { advertiserId }
 
   let advertiser
   let userRole: "admin" | "operator" | "viewer"
@@ -74,7 +85,7 @@ export default async function ExtensionsPage({
   const rows = await prisma.adExtension.findMany({
     where: {
       ownerType: "adgroup",
-      adgroup: { campaign: { advertiserId } },
+      adgroup: { campaign: campaignWhere },
       type: { in: ["headline", "description", "image"] },
     },
     select: {
@@ -104,7 +115,7 @@ export default async function ExtensionsPage({
   // 광고주 횡단 차단: where: { campaign: { advertiserId } }
   const adgroupRows = await prisma.adGroup.findMany({
     where: {
-      campaign: { advertiserId },
+      campaign: campaignWhere,
       status: { not: "deleted" },
     },
     select: {
@@ -168,7 +179,11 @@ export default async function ExtensionsPage({
     <div className="flex flex-col gap-4 p-6">
       <PageHeader
         title="확장소재"
-        description="추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집은 후속 PR)"
+        description={
+          campaignScopeIds.length > 0
+            ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 확장소재만 표시합니다.`
+            : "추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집은 후속 PR)"
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "확장소재" },

@@ -1,9 +1,13 @@
 "use client"
 
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useSearchParams } from "next/navigation"
 
 import { KeyStatusBadge } from "@/components/admin/key-status-badge"
+import {
+  getCampaignScopedHref,
+  parseCampaignScopeIds,
+} from "@/lib/navigation/campaign-scope"
 import { cn } from "@/lib/utils"
 
 type DashboardSection = {
@@ -35,7 +39,11 @@ export function DashboardSectionNav({
   }
 }) {
   const pathname = usePathname().replace(/\/+$/, "")
+  const searchParams = useSearchParams()
   const rootHref = `/${advertiser.id}`
+  const scopedCampaignIds = parseCampaignScopeIds({
+    campaignIds: searchParams.get("campaignIds") ?? undefined,
+  })
   const pathnameSegments = pathname.split("/").filter(Boolean)
   const advertiserSegmentIndex = pathnameSegments.findIndex(
     (segment) => segment === advertiser.id,
@@ -74,7 +82,11 @@ export function DashboardSectionNav({
       <nav aria-label="광고주 섹션" className="overflow-x-auto px-2 pb-2">
         <div className="flex min-w-max items-center gap-1">
           {sections.map((section) => {
-            const href = `${rootHref}${section.href}`
+            const baseHref = `${rootHref}${section.href}`
+            const href =
+              scopedCampaignIds.length > 0 && section.href !== ""
+                ? getCampaignScopedHref(baseHref, scopedCampaignIds)
+                : baseHref
             const active = section.href === activeSectionHref
             return (
               <Link

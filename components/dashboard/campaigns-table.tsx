@@ -25,6 +25,7 @@
  */
 
 import * as React from "react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 
@@ -59,6 +60,7 @@ import {
   type BulkActionResult,
 } from "@/components/forms/bulk-action-modal"
 import { bulkUpdateCampaigns } from "@/app/(dashboard)/[advertiserId]/campaigns/actions"
+import { getCampaignScopedHref } from "@/lib/navigation/campaign-scope"
 import type { CampaignStatus } from "@/lib/generated/prisma/client"
 
 // shadcn Select 한글 라벨 매핑 (Base UI Select.Value 가 raw value 를 표시하지 않도록)
@@ -198,6 +200,15 @@ export function CampaignsTable({
   const selectedRows = React.useMemo(
     () => campaigns.filter((c) => selected.has(c.id)),
     [campaigns, selected],
+  )
+  const selectedCampaignIds = React.useMemo(
+    () => selectedRows.map((c) => c.id),
+    [selectedRows],
+  )
+  const scopedHref = React.useCallback(
+    (path: string) =>
+      getCampaignScopedHref(`/${advertiserId}${path}`, selectedCampaignIds),
+    [advertiserId, selectedCampaignIds],
   )
 
   function openModal(action: Action) {
@@ -361,7 +372,31 @@ export function CampaignsTable({
             ? `${selected.size}개 선택됨`
             : "선택된 캠페인 없음"}
         </span>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <ScopedCampaignLink
+            href={scopedHref("/adgroups")}
+            disabled={selected.size === 0}
+          >
+            광고그룹 보기
+          </ScopedCampaignLink>
+          <ScopedCampaignLink
+            href={scopedHref("/keywords")}
+            disabled={selected.size === 0}
+          >
+            키워드 보기
+          </ScopedCampaignLink>
+          <ScopedCampaignLink
+            href={scopedHref("/ads")}
+            disabled={selected.size === 0}
+          >
+            소재 보기
+          </ScopedCampaignLink>
+          <ScopedCampaignLink
+            href={scopedHref("/extensions")}
+            disabled={selected.size === 0}
+          >
+            확장소재 보기
+          </ScopedCampaignLink>
           <Button
             size="sm"
             variant="outline"
@@ -499,6 +534,27 @@ export function CampaignsTable({
         />
       )}
     </div>
+  )
+}
+
+function ScopedCampaignLink({
+  href,
+  disabled,
+  children,
+}: {
+  href: string
+  disabled: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={disabled}
+      render={disabled ? undefined : <Link href={href} />}
+    >
+      {children}
+    </Button>
   )
 }
 

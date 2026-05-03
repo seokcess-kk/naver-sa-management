@@ -36,13 +36,24 @@ import type {
   AdAdgroupOption,
 } from "@/components/dashboard/ads-table"
 import { SyncAdsWithFilter } from "@/components/dashboard/sync-ads-with-filter"
+import {
+  parseCampaignScopeIds,
+  type CampaignScopeSearchParams,
+} from "@/lib/navigation/campaign-scope"
 
 export default async function AdsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ advertiserId: string }>
+  searchParams: Promise<CampaignScopeSearchParams>
 }) {
   const { advertiserId } = await params
+  const campaignScopeIds = parseCampaignScopeIds(await searchParams)
+  const campaignWhere =
+    campaignScopeIds.length > 0
+      ? { advertiserId, id: { in: campaignScopeIds } }
+      : { advertiserId }
 
   let advertiser
   let userRole: "admin" | "operator" | "viewer"
@@ -67,7 +78,7 @@ export default async function AdsPage({
   // raw 컬럼 select 안 함. Ad 는 advertiserId 직접 외래키 X
   //   → adgroup.campaign.advertiserId join 으로 한정.
   const rows = await prisma.ad.findMany({
-    where: { adgroup: { campaign: { advertiserId } } },
+    where: { adgroup: { campaign: campaignWhere } },
     select: {
       id: true,
       nccAdId: true,
@@ -97,7 +108,7 @@ export default async function AdsPage({
   // 광고주 횡단 차단: where: { campaign: { advertiserId } }
   const adgroupRows = await prisma.adGroup.findMany({
     where: {
-      campaign: { advertiserId },
+      campaign: campaignWhere,
       status: { not: "deleted" },
     },
     select: {
@@ -156,7 +167,11 @@ export default async function AdsPage({
     <div className="flex flex-col gap-4 p-6">
       <PageHeader
         title="소재"
-        description="광고그룹별 소재 목록. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집·CSV 는 후속 PR)"
+        description={
+          campaignScopeIds.length > 0
+            ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 소재만 표시합니다.`
+            : "광고그룹별 소재 목록. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집·CSV 는 후속 PR)"
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "소재" },
