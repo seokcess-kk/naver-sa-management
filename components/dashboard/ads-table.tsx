@@ -250,9 +250,34 @@ function extractAdPreview(fields: unknown): string {
     return "이미지 광고"
   }
 
+  // URL 만 있는 광고 (통합 광고그룹의 일부 형식) — pc.display / pc.final 폴백.
+  const urlFromPcMobile = pickUrlFromPcMobile(obj)
+  if (urlFromPcMobile) return urlFromPcMobile
+
   // 폴백 — raw JSON 직렬화 대신 친절 라벨.
   // (dittoId / thumbnail 같은 내부 키가 잘린 채 노출되는 UX 문제 회피)
   return "본문 정보 없음"
+}
+
+/**
+ * pc / mobile 객체에서 URL 추출 (display 우선 → final → punyCode).
+ *
+ * 본문 텍스트가 없는 광고 (통합광고그룹 일부) 의 식별자 폴백:
+ *   {"pc":{"final":"https://...","display":"https://..."},"mobile":{...}}
+ */
+function pickUrlFromPcMobile(obj: Record<string, unknown>): string {
+  const pc = obj["pc"]
+  const mobile = obj["mobile"]
+  for (const candidate of [pc, mobile]) {
+    if (candidate && typeof candidate === "object") {
+      const o = candidate as Record<string, unknown>
+      const url = o["display"] ?? o["final"] ?? o["punyCode"]
+      if (typeof url === "string" && url.trim().length > 0) {
+        return url.trim()
+      }
+    }
+  }
+  return ""
 }
 
 /**
@@ -289,7 +314,7 @@ function extractAdParts(fields: unknown): AdPreviewParts {
   const obj = fields as Record<string, unknown>
 
   // headline 후보
-  const headline =
+  let headline =
     pickString(obj, ["headline", "title", "subject", "headline1", "subject1"]) ||
     pickFirstFromArrayObj(obj, "headlines") ||
     ""
@@ -317,6 +342,13 @@ function extractAdParts(fields: unknown): AdPreviewParts {
   // 이미지 광고 thumbnail (GFA 이미지 광고 / 통합 캠페인)
   const thumbnail =
     pickString(obj, ["thumbnail", "imageUrl", "image"]) || null
+
+  // 본문 텍스트 모두 누락 + URL 있는 광고 (통합광고그룹의 일부 형식 — 본문 없이 URL 만)
+  // → URL 을 headline 자리에 표시해 식별 가능하도록.
+  // (cell render 의 displayUrl 라인은 headline 과 같으면 중복이라 숨김)
+  if (!headline && !description && !thumbnail && (displayUrl || landingUrl)) {
+    headline = displayUrl || landingUrl
+  }
 
   return { headline, description, displayUrl, landingUrl, thumbnail }
 }
@@ -454,11 +486,18 @@ function makeColumns(ctx: RowCtx): ColumnDef<AdRow>[] {
                   {parts.description}
                 </span>
               ) : null}
-              {parts.displayUrl || parts.landingUrl ? (
-                <span className="line-clamp-1 text-[11px] text-muted-foreground/80">
-                  {parts.displayUrl || parts.landingUrl}
-                </span>
-              ) : null}
+              {(() => {
+                // headline 폴백으로 URL 이 들어간 케이스(본문 없는 광고)는
+                // 같은 URL 을 두 번 보여주지 않도록 작은 URL 라인 숨김.
+                const url = parts.displayUrl || parts.landingUrl
+                if (!url) return null
+                if (parts.headline === url) return null
+                return (
+                  <span className="line-clamp-1 text-[11px] text-muted-foreground/80">
+                    {url}
+                  </span>
+                )
+              })()}
               <span className="font-mono text-[11px] text-muted-foreground/80">
                 {row.original.nccAdId}
               </span>
