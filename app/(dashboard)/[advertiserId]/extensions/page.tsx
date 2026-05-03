@@ -47,6 +47,13 @@ import {
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
+import { getStatsChunked } from "@/lib/naver-sa/stats"
+import { NaverSaError } from "@/lib/naver-sa/errors"
+import { EMPTY_METRICS, parsePeriod } from "@/lib/dashboard/metrics"
+
+type ExtensionsSearchParams = CampaignScopeSearchParams & {
+  period?: string | string[]
+}
 
 // Server Action 단기 timeout fix — syncExtensions 가 광고그룹 × type 3종 N×3회 listAdExtensions 호출.
 // 5종 sync 중 가장 호출량 많음 — 504 위험 가장 높음.
@@ -58,12 +65,13 @@ export default async function ExtensionsPage({
   searchParams,
 }: {
   params: Promise<{ advertiserId: string }>
-  searchParams: Promise<CampaignScopeSearchParams>
+  searchParams: Promise<ExtensionsSearchParams>
 }) {
   const { advertiserId } = await params
   const scopeSearchParams = await searchParams
   const campaignScopeIds = parseCampaignScopeIds(scopeSearchParams)
   const adgroupScopeIds = parseAdgroupScopeIds(scopeSearchParams)
+  const period = parsePeriod(scopeSearchParams.period)
   const campaignWhere =
     campaignScopeIds.length > 0
       ? { advertiserId, id: { in: campaignScopeIds } }
@@ -162,6 +170,40 @@ export default async function ExtensionsPage({
     status: c.status as "on" | "off" | "deleted",
   }))
 
+  // 확장소재별 stats 조회 — ads/keywords 와 동일 패턴.
+  // 단, 네이버 SA Stats 가 nccExtId 단위 조회 미지원일 가능성:
+  //   호출 자체는 성공해도 응답에 매칭 row 없음 → metrics 모두 0 으로 표시 (graceful).
+  //   응답 자체가 400 / 검증 실패면 statsError 노출.
+  const nccExtIds = rows.map((e) => e.nccExtId)
+  const metricsMap = new Map<
+    string,
+    { impCnt: number; clkCnt: number; ctr: number; cpc: number; salesAmt: number }
+  >()
+  let statsError: string | null = null
+  if (advertiser.hasKeys && nccExtIds.length > 0) {
+    try {
+      const statsRows = await getStatsChunked(advertiser.customerId, {
+        ids: nccExtIds,
+        fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
+        datePreset: period,
+      })
+      for (const r of statsRows) {
+        if (typeof r.id !== "string") continue
+        metricsMap.set(r.id, {
+          impCnt: typeof r.impCnt === "number" ? r.impCnt : 0,
+          clkCnt: typeof r.clkCnt === "number" ? r.clkCnt : 0,
+          ctr: typeof r.ctr === "number" ? r.ctr : 0,
+          cpc: typeof r.cpc === "number" ? r.cpc : 0,
+          salesAmt: typeof r.salesAmt === "number" ? r.salesAmt : 0,
+        })
+      }
+    } catch (e) {
+      statsError =
+        e instanceof NaverSaError ? e.message : e instanceof Error ? e.message : "알 수 없는 오류"
+      console.warn("[extensions/page] getStatsChunked failed:", e)
+    }
+  }
+
   // RSC → 클라이언트 직렬화. Date → ISO 문자열. ExtensionRow shape 매핑.
   // adgroup 은 항상 동반 (where 에서 ownerType=adgroup + adgroup join 필수 통과).
   // 그럼에도 prisma 가 relation 을 nullable 로 추론하면 fallback 처리.
@@ -186,6 +228,7 @@ export default async function ExtensionsPage({
           name: e.adgroup!.campaign.name,
         },
       },
+      metrics: metricsMap.get(e.nccExtId) ?? EMPTY_METRICS,
     }))
 
   return (
@@ -224,6 +267,8 @@ export default async function ExtensionsPage({
         extensions={extensions}
         adgroups={adgroups}
         userRole={userRole}
+        period={period}
+        statsError={statsError}
       />
     </div>
   )

@@ -55,6 +55,7 @@ import {
   type SortingState,
   type ColumnFiltersState,
   type FilterFn,
+  type Row,
 } from "@tanstack/react-table"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import {
@@ -116,6 +117,15 @@ import {
   type BulkActionAdExtensionsInput,
 } from "@/app/(dashboard)/[advertiserId]/extensions/actions"
 import { cn } from "@/lib/utils"
+import {
+  PERIOD_LABELS,
+  formatInt,
+  formatPct,
+  formatWon,
+  sumMetrics,
+  type AdMetrics,
+  type AdsPeriod,
+} from "@/lib/dashboard/metrics"
 import type {
   AdExtensionStatus,
   AdExtensionType,
@@ -176,6 +186,12 @@ export type ExtensionRow = {
       name: string
     }
   }
+  /**
+   * P1 stats — RSC 가 page.tsx 에서 batch 조회 (Redis 캐시 5분/1시간).
+   * 단, 네이버 SA Stats 가 nccExtId 단위 미지원일 수 있어 모든 행이 0 일 가능성.
+   * 운영에서 SA 응답 확인 후 정책 결정 (광고그룹 합산 등).
+   */
+  metrics: AdMetrics
 }
 
 /**
@@ -420,6 +436,66 @@ function makeColumns(ctx: RowCtx): ColumnDef<ExtensionRow>[] {
       enableSorting: true,
     },
     {
+      id: "impCnt",
+      accessorFn: (row) => row.metrics.impCnt,
+      header: "노출수",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatInt(row.original.metrics.impCnt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.impCnt - b.original.metrics.impCnt,
+    },
+    {
+      id: "clkCnt",
+      accessorFn: (row) => row.metrics.clkCnt,
+      header: "클릭수",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatInt(row.original.metrics.clkCnt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.clkCnt - b.original.metrics.clkCnt,
+    },
+    {
+      id: "ctr",
+      accessorFn: (row) => row.metrics.ctr,
+      header: "클릭률",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatPct(row.original.metrics.ctr)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.ctr - b.original.metrics.ctr,
+    },
+    {
+      id: "cpc",
+      accessorFn: (row) => row.metrics.cpc,
+      header: "평균 CPC",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatWon(row.original.metrics.cpc)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.cpc - b.original.metrics.cpc,
+    },
+    {
+      id: "salesAmt",
+      accessorFn: (row) => row.metrics.salesAmt,
+      header: "총비용",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm font-medium">
+          {formatWon(row.original.metrics.salesAmt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.salesAmt - b.original.metrics.salesAmt,
+    },
+    {
       accessorKey: "updatedAt",
       header: "최근 수정",
       cell: ({ row }) => (
@@ -447,6 +523,54 @@ function makeColumns(ctx: RowCtx): ColumnDef<ExtensionRow>[] {
 // =============================================================================
 // 행 우측 액션 (케밥 메뉴) — 단건 삭제
 // =============================================================================
+
+/**
+ * 필터 적용 후 행 metrics 합계 (SA 콘솔 footer 동등).
+ *
+ * 컬럼 13개 매핑:
+ *   1 select / 2 text / 3 adgroupId / 4 type / 5 status / 6 inspectStatus /
+ *   7 impCnt / 8 clkCnt / 9 ctr / 10 cpc / 11 salesAmt / 12 updatedAt / 13 actions
+ *
+ * 합계 표시 위치:
+ *   1: 빈 / 2~6 (colSpan=5): 라벨 / 7~11: 합계 / 12~13: 빈
+ *
+ * 주의: SA Stats 가 nccExtId 단위 미지원이면 모든 행 metrics 가 0 → 합계도 0.
+ *      (RSC 가 statsError 를 잡지 못해 응답 자체가 빈 row 셋인 케이스)
+ */
+function ExtensionMetricsFooter({ rows }: { rows: Row<ExtensionRow>[] }) {
+  const totals = React.useMemo(
+    () => sumMetrics(rows.map((r) => r.original.metrics)),
+    [rows],
+  )
+  if (rows.length === 0) return null
+  return (
+    <tfoot className="sticky bottom-0 z-10 border-t-2 bg-muted/40 text-sm font-medium">
+      <tr>
+        <td className="px-3 py-2.5" />
+        <td className="px-3 py-2.5 text-xs text-muted-foreground" colSpan={5}>
+          필터 결과 {rows.length.toLocaleString()}건 합계
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatInt(totals.impCnt)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatInt(totals.clkCnt)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatPct(totals.ctr)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatWon(totals.cpc)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono font-semibold">
+          {formatWon(totals.salesAmt)}
+        </td>
+        <td className="px-3 py-2.5" />
+        <td className="px-3 py-2.5" />
+      </tr>
+    </tfoot>
+  )
+}
 
 function ExtensionRowActions({
   row,
@@ -506,6 +630,8 @@ export function ExtensionsTable({
   extensions,
   adgroups,
   userRole,
+  period,
+  statsError,
 }: {
   advertiserId: string
   hasKeys: boolean
@@ -513,6 +639,10 @@ export function ExtensionsTable({
   /** F-5.4 추가 모달용 — page.tsx 가 광고주 한정으로 별도 조회. */
   adgroups: ExtensionAdgroupOption[]
   userRole: "admin" | "operator" | "viewer"
+  /** RSC 가 searchParams.period 파싱 후 전달 (lib/dashboard/metrics). */
+  period: AdsPeriod
+  /** stats 호출 실패 시 안내 (toolbar 우측 칩) */
+  statsError: string | null
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -909,12 +1039,43 @@ export function ExtensionsTable({
         >
           초기화
         </Button>
-        <span className="ml-auto text-xs text-muted-foreground">
-          총 {extensions.length.toLocaleString()}건
-          {rows.length !== extensions.length && (
-            <> (필터 후 {rows.length.toLocaleString()}건)</>
-          )}
-        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <Select
+            value={period}
+            onValueChange={(v) => {
+              const next = (v ?? "last7days") as AdsPeriod
+              updateQuery({ period: next === "last7days" ? "" : next })
+            }}
+          >
+            <SelectTrigger className="h-8 w-32">
+              <SelectValue placeholder="기간">
+                {(v: string | null) =>
+                  PERIOD_LABELS[(v as AdsPeriod) ?? "last7days"]
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="today">오늘</SelectItem>
+              <SelectItem value="yesterday">어제</SelectItem>
+              <SelectItem value="last7days">지난 7일</SelectItem>
+              <SelectItem value="last30days">지난 30일</SelectItem>
+            </SelectContent>
+          </Select>
+          {statsError ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900"
+              title={statsError}
+            >
+              지표 조회 실패 — 동기화 후 재시도
+            </span>
+          ) : null}
+          <span className="text-xs text-muted-foreground">
+            총 {extensions.length.toLocaleString()}건
+            {rows.length !== extensions.length && (
+              <> (필터 후 {rows.length.toLocaleString()}건)</>
+            )}
+          </span>
+        </div>
       </div>
 
       {/* 다중 선택 일괄 액션 바 */}
@@ -1069,6 +1230,7 @@ export function ExtensionsTable({
                 </tr>
               )}
             </tbody>
+            <ExtensionMetricsFooter rows={rows} />
           </table>
         )}
       </div>

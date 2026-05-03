@@ -80,6 +80,7 @@ import {
   type SortingState,
   type ColumnFiltersState,
   type FilterFn,
+  type Row,
 } from "@tanstack/react-table"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import {
@@ -145,6 +146,15 @@ import {
   type BulkActionKeywordsInput,
 } from "@/app/(dashboard)/[advertiserId]/keywords/actions"
 import { cn } from "@/lib/utils"
+import {
+  PERIOD_LABELS,
+  formatInt,
+  formatPct,
+  formatWon,
+  sumMetrics,
+  type AdMetrics,
+  type AdsPeriod,
+} from "@/lib/dashboard/metrics"
 import type {
   KeywordStatus,
   InspectStatus,
@@ -222,6 +232,8 @@ export type KeywordRow = {
       name: string
     }
   }
+  /** P1 stats (광고주별 캐시 5분/1시간) — RSC 가 page.tsx 에서 batch 조회. */
+  metrics: AdMetrics
 }
 
 /**
@@ -653,6 +665,66 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       },
     },
     {
+      id: "impCnt",
+      accessorFn: (row) => row.metrics.impCnt,
+      header: "노출수",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatInt(row.original.metrics.impCnt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.impCnt - b.original.metrics.impCnt,
+    },
+    {
+      id: "clkCnt",
+      accessorFn: (row) => row.metrics.clkCnt,
+      header: "클릭수",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatInt(row.original.metrics.clkCnt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.clkCnt - b.original.metrics.clkCnt,
+    },
+    {
+      id: "ctr",
+      accessorFn: (row) => row.metrics.ctr,
+      header: "클릭률",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatPct(row.original.metrics.ctr)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.ctr - b.original.metrics.ctr,
+    },
+    {
+      id: "cpc",
+      accessorFn: (row) => row.metrics.cpc,
+      header: "평균 CPC",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm">
+          {formatWon(row.original.metrics.cpc)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.cpc - b.original.metrics.cpc,
+    },
+    {
+      id: "salesAmt",
+      accessorFn: (row) => row.metrics.salesAmt,
+      header: "총비용",
+      cell: ({ row }) => (
+        <div className="text-right font-mono text-sm font-medium">
+          {formatWon(row.original.metrics.salesAmt)}
+        </div>
+      ),
+      enableSorting: true,
+      sortingFn: (a, b) => a.original.metrics.salesAmt - b.original.metrics.salesAmt,
+    },
+    {
       accessorKey: "updatedAt",
       header: "최근 수정",
       cell: ({ row }) => (
@@ -682,6 +754,52 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
 // =============================================================================
 // 행 우측 액션 (케밥 메뉴) — F-3.7
 // =============================================================================
+
+/**
+ * 필터 적용 후 행 metrics 합계 (SA 콘솔 footer 동등).
+ *
+ * 컬럼 17개 매핑:
+ *   1 select / 2 stagingMarker / 3 keyword / 4 adgroupId / 5 matchType / 6 bid /
+ *   7 userLock / 8 status / 9 inspectStatus / 10 recentAvgRnk /
+ *   11 impCnt / 12 clkCnt / 13 ctr / 14 cpc / 15 salesAmt / 16 updatedAt / 17 actions
+ *
+ * 합계 표시 위치:
+ *   1: 빈 / 2~10 (colSpan=9): "필터 결과 N건 합계" 라벨 / 11~15: 합계 / 16~17: 빈
+ */
+function KeywordMetricsFooter({ rows }: { rows: Row<KeywordRow>[] }) {
+  const totals = React.useMemo(
+    () => sumMetrics(rows.map((r) => r.original.metrics)),
+    [rows],
+  )
+  if (rows.length === 0) return null
+  return (
+    <tfoot className="sticky bottom-0 z-10 border-t-2 bg-muted/40 text-sm font-medium">
+      <tr>
+        <td className="px-3 py-2.5" />
+        <td className="px-3 py-2.5 text-xs text-muted-foreground" colSpan={9}>
+          필터 결과 {rows.length.toLocaleString()}건 합계
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatInt(totals.impCnt)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatInt(totals.clkCnt)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatPct(totals.ctr)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono">
+          {formatWon(totals.cpc)}
+        </td>
+        <td className="px-3 py-2.5 text-right font-mono font-semibold">
+          {formatWon(totals.salesAmt)}
+        </td>
+        <td className="px-3 py-2.5" />
+        <td className="px-3 py-2.5" />
+      </tr>
+    </tfoot>
+  )
+}
 
 function KeywordRowActions({
   row,
@@ -998,6 +1116,8 @@ export function KeywordsTable({
   keywords,
   adgroups,
   userRole,
+  period,
+  statsError,
 }: {
   advertiserId: string
   hasKeys: boolean
@@ -1006,6 +1126,10 @@ export function KeywordsTable({
   adgroups: AdgroupOption[]
   /** F-3.7 — admin 한정 단건 삭제 권한 (RSC 에서 ctx.user.role 전달). */
   userRole: "admin" | "operator" | "viewer"
+  /** RSC 가 searchParams.period 파싱 후 전달 (lib/dashboard/metrics). */
+  period: AdsPeriod
+  /** stats 호출 실패 시 안내 (toolbar 우측 칩) */
+  statsError: string | null
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -1587,12 +1711,43 @@ export function KeywordsTable({
         >
           초기화
         </Button>
-        <span className="ml-auto text-xs text-muted-foreground">
-          총 {keywords.length.toLocaleString()}건
-          {rows.length !== keywords.length && (
-            <> (필터 후 {rows.length.toLocaleString()}건)</>
-          )}
-        </span>
+        <div className="ml-auto flex items-center gap-2">
+          <Select
+            value={period}
+            onValueChange={(v) => {
+              const next = (v ?? "last7days") as AdsPeriod
+              updateQuery({ period: next === "last7days" ? "" : next })
+            }}
+          >
+            <SelectTrigger className="h-8 w-32">
+              <SelectValue placeholder="기간">
+                {(v: string | null) =>
+                  PERIOD_LABELS[(v as AdsPeriod) ?? "last7days"]
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="today">오늘</SelectItem>
+              <SelectItem value="yesterday">어제</SelectItem>
+              <SelectItem value="last7days">지난 7일</SelectItem>
+              <SelectItem value="last30days">지난 30일</SelectItem>
+            </SelectContent>
+          </Select>
+          {statsError ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900"
+              title={statsError}
+            >
+              지표 조회 실패 — 동기화 후 재시도
+            </span>
+          ) : null}
+          <span className="text-xs text-muted-foreground">
+            총 {keywords.length.toLocaleString()}건
+            {rows.length !== keywords.length && (
+              <> (필터 후 {rows.length.toLocaleString()}건)</>
+            )}
+          </span>
+        </div>
       </div>
 
       {/* 변경 검토 바 (F-3.2 인라인 편집 staging 카운터) */}
@@ -1801,6 +1956,7 @@ export function KeywordsTable({
                 </tr>
               )}
             </tbody>
+            <KeywordMetricsFooter rows={rows} />
           </table>
         )}
       </div>

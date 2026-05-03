@@ -42,19 +42,9 @@ import {
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
-import { getStatsChunked, type StatsDatePreset } from "@/lib/naver-sa/stats"
+import { getStatsChunked } from "@/lib/naver-sa/stats"
 import { NaverSaError } from "@/lib/naver-sa/errors"
-
-// 소재 페이지 stats 기간 화이트리스트.
-// SA 콘솔과 동일 — last7days 기본, 토글로 today / yesterday / last30days.
-const PERIOD_WHITELIST = ["today", "yesterday", "last7days", "last30days"] as const
-type AdsPeriod = (typeof PERIOD_WHITELIST)[number]
-const DEFAULT_PERIOD: AdsPeriod = "last7days"
-
-function parsePeriod(raw: string | string[] | undefined): AdsPeriod {
-  const v = Array.isArray(raw) ? raw[0] : raw
-  return PERIOD_WHITELIST.includes(v as AdsPeriod) ? (v as AdsPeriod) : DEFAULT_PERIOD
-}
+import { EMPTY_METRICS, parsePeriod } from "@/lib/dashboard/metrics"
 
 type AdsSearchParams = CampaignScopeSearchParams & {
   period?: string | string[]
@@ -187,7 +177,7 @@ export default async function AdsPage({
       const statsRows = await getStatsChunked(advertiser.customerId, {
         ids: nccAdIds,
         fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
-        datePreset: period satisfies StatsDatePreset,
+        datePreset: period,
       })
       for (const r of statsRows) {
         if (typeof r.id !== "string") continue
@@ -228,13 +218,7 @@ export default async function AdsPage({
       },
     },
     // 매칭 없으면 0 으로 채움 (소재가 신규라 아직 노출 0 인 케이스 정상).
-    metrics: metricsMap.get(a.nccAdId) ?? {
-      impCnt: 0,
-      clkCnt: 0,
-      ctr: 0,
-      cpc: 0,
-      salesAmt: 0,
-    },
+    metrics: metricsMap.get(a.nccAdId) ?? EMPTY_METRICS,
   }))
 
   return (

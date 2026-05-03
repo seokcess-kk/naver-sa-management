@@ -114,6 +114,16 @@ import {
   type BulkActionAdsInput,
 } from "@/app/(dashboard)/[advertiserId]/ads/actions"
 import { cn } from "@/lib/utils"
+import {
+  EMPTY_METRICS,
+  PERIOD_LABELS,
+  formatInt,
+  formatPct,
+  formatWon,
+  sumMetrics,
+  type AdMetrics,
+  type AdsPeriod,
+} from "@/lib/dashboard/metrics"
 import type { AdStatus, InspectStatus } from "@/lib/generated/prisma/client"
 
 // 상한 — bulkActionAdsSchema 의 .max(500) 와 일치.
@@ -139,18 +149,6 @@ const INSPECT_LABELS: Record<string, string> = {
 
 // AdsAddModal 의 광고그룹 옵션을 page.tsx 가 본 모듈만 import 하도록 re-export.
 export type { AdAdgroupOption }
-
-/** 소재 단위 stats (RSC 가 getStatsChunked 결과를 매핑). 매칭 없으면 0 채움. */
-export type AdMetrics = {
-  impCnt: number
-  clkCnt: number
-  /** 클릭률 % (예: 0.32) */
-  ctr: number
-  /** 평균 CPC (원) */
-  cpc: number
-  /** 총 비용 (원) */
-  salesAmt: number
-}
 
 /** RSC → 클라이언트 전달용 소재 행. raw 컬럼 / 시크릿 X. */
 export type AdRow = {
@@ -179,15 +177,6 @@ export type AdRow = {
   metrics: AdMetrics
 }
 
-/** 페이지 stats 기간 (RSC 가 searchParams 에서 파싱 후 prop 으로 전달). */
-export type AdsPeriod = "today" | "yesterday" | "last7days" | "last30days"
-
-const PERIOD_LABELS: Record<AdsPeriod, string> = {
-  today: "오늘",
-  yesterday: "어제",
-  last7days: "지난 7일",
-  last30days: "지난 30일",
-}
 
 /**
  * F-4.3 다중 선택 액션 종류 (소재는 입찰가 없음 → toggle 만).
@@ -364,23 +353,6 @@ function pickFirstFromArrayObj(obj: Record<string, unknown>, key: string): strin
   return ""
 }
 
-// =============================================================================
-// 숫자 포맷 — metric 셀 / footer 합계 공통
-// =============================================================================
-
-const NUMBER_FMT = new Intl.NumberFormat("ko-KR")
-
-function formatInt(n: number): string {
-  return NUMBER_FMT.format(Math.round(n))
-}
-
-function formatPct(n: number): string {
-  return `${n.toFixed(2)} %`
-}
-
-function formatWon(n: number): string {
-  return `${NUMBER_FMT.format(Math.round(n))}원`
-}
 
 // =============================================================================
 // 필터 정의 (클라이언트 측, 5천 행 메모리 충분)
@@ -710,19 +682,10 @@ function MetricsFooter({
   rows: Row<AdRow>[]
   columnCount: number
 }) {
-  const totals = React.useMemo(() => {
-    let impCnt = 0
-    let clkCnt = 0
-    let salesAmt = 0
-    for (const r of rows) {
-      impCnt += r.original.metrics.impCnt
-      clkCnt += r.original.metrics.clkCnt
-      salesAmt += r.original.metrics.salesAmt
-    }
-    const ctr = impCnt > 0 ? (clkCnt / impCnt) * 100 : 0
-    const cpc = clkCnt > 0 ? salesAmt / clkCnt : 0
-    return { impCnt, clkCnt, salesAmt, ctr, cpc }
-  }, [rows])
+  const totals = React.useMemo(
+    () => sumMetrics(rows.map((r) => r.original.metrics)),
+    [rows],
+  )
 
   if (rows.length === 0 || columnCount === 0) return null
 

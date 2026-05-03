@@ -43,6 +43,13 @@ import {
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
+import { getStatsChunked } from "@/lib/naver-sa/stats"
+import { NaverSaError } from "@/lib/naver-sa/errors"
+import { EMPTY_METRICS, parsePeriod } from "@/lib/dashboard/metrics"
+
+type KeywordsSearchParams = CampaignScopeSearchParams & {
+  period?: string | string[]
+}
 
 // Server Action 단기 timeout fix — syncKeywords 가 광고그룹 N회 listKeywords 호출.
 // 광고그룹 100개+ 일 때 60s 기본값으로 504 발생 → 300s 로 상향.
@@ -54,12 +61,13 @@ export default async function KeywordsPage({
   searchParams,
 }: {
   params: Promise<{ advertiserId: string }>
-  searchParams: Promise<CampaignScopeSearchParams>
+  searchParams: Promise<KeywordsSearchParams>
 }) {
   const { advertiserId } = await params
   const scopeSearchParams = await searchParams
   const campaignScopeIds = parseCampaignScopeIds(scopeSearchParams)
   const adgroupScopeIds = parseAdgroupScopeIds(scopeSearchParams)
+  const period = parsePeriod(scopeSearchParams.period)
   const campaignWhere =
     campaignScopeIds.length > 0
       ? { advertiserId, id: { in: campaignScopeIds } }
@@ -166,6 +174,38 @@ export default async function KeywordsPage({
     status: c.status as "on" | "off" | "deleted",
   }))
 
+  // 키워드별 stats 조회 — ads/page.tsx 와 동일 패턴.
+  // graceful degrade — 실패 시 metrics 0 + statsError 안내.
+  const nccKeywordIds = rows.map((k) => k.nccKeywordId)
+  const metricsMap = new Map<
+    string,
+    { impCnt: number; clkCnt: number; ctr: number; cpc: number; salesAmt: number }
+  >()
+  let statsError: string | null = null
+  if (advertiser.hasKeys && nccKeywordIds.length > 0) {
+    try {
+      const statsRows = await getStatsChunked(advertiser.customerId, {
+        ids: nccKeywordIds,
+        fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
+        datePreset: period,
+      })
+      for (const r of statsRows) {
+        if (typeof r.id !== "string") continue
+        metricsMap.set(r.id, {
+          impCnt: typeof r.impCnt === "number" ? r.impCnt : 0,
+          clkCnt: typeof r.clkCnt === "number" ? r.clkCnt : 0,
+          ctr: typeof r.ctr === "number" ? r.ctr : 0,
+          cpc: typeof r.cpc === "number" ? r.cpc : 0,
+          salesAmt: typeof r.salesAmt === "number" ? r.salesAmt : 0,
+        })
+      }
+    } catch (e) {
+      statsError =
+        e instanceof NaverSaError ? e.message : e instanceof Error ? e.message : "알 수 없는 오류"
+      console.warn("[keywords/page] getStatsChunked failed:", e)
+    }
+  }
+
   // Decimal / Date → JSON-friendly 직렬화. KeywordRow shape 으로 매핑.
   const keywords: KeywordRow[] = rows.map((k) => ({
     id: k.id,
@@ -190,6 +230,7 @@ export default async function KeywordsPage({
         name: k.adgroup.campaign.name,
       },
     },
+    metrics: metricsMap.get(k.nccKeywordId) ?? EMPTY_METRICS,
   }))
 
   return (
@@ -231,6 +272,8 @@ export default async function KeywordsPage({
         keywords={keywords}
         adgroups={adgroups}
         userRole={userRole}
+        period={period}
+        statsError={statsError}
       />
     </div>
   )
