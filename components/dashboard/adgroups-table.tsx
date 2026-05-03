@@ -510,7 +510,7 @@ export function AdgroupsTable({
           */}
           <colgroup>
             <col style={{ width: 44 }} />
-            <col />
+            <col style={{ width: 280 }} />
             <col style={{ width: 192 }} />
             <col style={{ width: 110 }} />
             <col style={{ width: 56 }} />

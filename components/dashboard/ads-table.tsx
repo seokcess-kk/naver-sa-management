@@ -582,6 +582,7 @@ function makeColumns(ctx: RowCtx): ColumnDef<AdRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.impCnt - b.original.metrics.impCnt,
+      meta: { align: "right" },
     },
     {
       id: "clkCnt",
@@ -594,6 +595,7 @@ function makeColumns(ctx: RowCtx): ColumnDef<AdRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.clkCnt - b.original.metrics.clkCnt,
+      meta: { align: "right" },
     },
     {
       id: "ctr",
@@ -606,6 +608,7 @@ function makeColumns(ctx: RowCtx): ColumnDef<AdRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.ctr - b.original.metrics.ctr,
+      meta: { align: "right" },
     },
     {
       id: "cpc",
@@ -618,6 +621,7 @@ function makeColumns(ctx: RowCtx): ColumnDef<AdRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.cpc - b.original.metrics.cpc,
+      meta: { align: "right" },
     },
     {
       id: "salesAmt",
@@ -630,6 +634,7 @@ function makeColumns(ctx: RowCtx): ColumnDef<AdRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.salesAmt - b.original.metrics.salesAmt,
+      meta: { align: "right" },
     },
     {
       accessorKey: "updatedAt",
@@ -1314,7 +1319,7 @@ export function AdsTable({
             */}
             <colgroup>
               <col style={{ width: 44 }} />
-              <col />
+              <col style={{ width: 380 }} />
               <col style={{ width: 192 }} />
               <col style={{ width: 96 }} />
               <col style={{ width: 96 }} />
@@ -1333,11 +1338,17 @@ export function AdsTable({
                   {headerGroup.headers.map((header) => {
                     const canSort = header.column.getCanSort()
                     const sortDir = header.column.getIsSorted()
+                    // columnDef.meta.align 으로 헤더 정렬 결정 (셀 정렬과 일치)
+                    const align = (
+                      header.column.columnDef.meta as
+                        | { align?: "left" | "right" | "center" }
+                        | undefined
+                    )?.align
                     return (
                       <th
                         key={header.id}
                         className={cn(
-                          "h-10 px-3 text-left align-middle text-xs font-medium text-muted-foreground",
+                          "h-10 px-3 align-middle text-xs font-medium text-muted-foreground",
                           canSort &&
                             "cursor-pointer select-none hover:text-foreground",
                         )}
@@ -1347,7 +1358,13 @@ export function AdsTable({
                             : undefined
                         }
                       >
-                        <div className="inline-flex items-center gap-1">
+                        <div
+                          className={cn(
+                            "flex items-center gap-1",
+                            align === "right" && "justify-end",
+                            align === "center" && "justify-center",
+                          )}
+                        >
                           {header.isPlaceholder
                             ? null
                             : flexRender(

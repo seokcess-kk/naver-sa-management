@@ -600,7 +600,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       // 입찰가 + 그룹입찰가 사용을 한 셀에 결합 — 인라인 편집 가능
       id: "bid",
       accessorFn: (row) => (row.useGroupBidAmt ? null : row.bidAmt),
-      header: () => <div className="text-right">입찰가</div>,
+      header: "입찰가",
       cell: (info: CellContext<KeywordRow, unknown>) => (
         <BidCell row={info.row.original} ctx={ctx} />
       ),
@@ -615,17 +615,19 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
         if (bv === null) return -1
         return av - bv
       },
+      meta: { align: "right" },
     },
     {
       // userLock 토글 — ON/OFF 인라인 편집
       id: "userLock",
       accessorFn: (row) => row.userLock,
-      header: () => <div className="text-center">ON/OFF</div>,
+      header: "ON/OFF",
       cell: (info: CellContext<KeywordRow, unknown>) => (
         <UserLockCell row={info.row.original} ctx={ctx} />
       ),
       filterFn: userLockFilter,
       enableSorting: true,
+      meta: { align: "center" },
     },
     {
       accessorKey: "status",
@@ -645,7 +647,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
     },
     {
       accessorKey: "recentAvgRnk",
-      header: () => <div className="text-right">평균 노출</div>,
+      header: "평균 노출",
       cell: ({ row }) => (
         <div className="text-right font-mono text-xs">
           {row.original.recentAvgRnk !== null
@@ -655,6 +657,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       ),
       filterFn: rnkRangeFilter,
       enableSorting: true,
+      meta: { align: "right" },
       sortingFn: (a, b) => {
         const av = a.original.recentAvgRnk
         const bv = b.original.recentAvgRnk
@@ -675,6 +678,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.impCnt - b.original.metrics.impCnt,
+      meta: { align: "right" },
     },
     {
       id: "clkCnt",
@@ -687,6 +691,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.clkCnt - b.original.metrics.clkCnt,
+      meta: { align: "right" },
     },
     {
       id: "ctr",
@@ -699,6 +704,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.ctr - b.original.metrics.ctr,
+      meta: { align: "right" },
     },
     {
       id: "cpc",
@@ -711,6 +717,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.cpc - b.original.metrics.cpc,
+      meta: { align: "right" },
     },
     {
       id: "salesAmt",
@@ -723,6 +730,7 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
       ),
       enableSorting: true,
       sortingFn: (a, b) => a.original.metrics.salesAmt - b.original.metrics.salesAmt,
+      meta: { align: "right" },
     },
     {
       accessorKey: "updatedAt",
@@ -1883,7 +1891,7 @@ export function KeywordsTable({
             <colgroup>
               <col style={{ width: 44 }} />
               <col style={{ width: 36 }} />
-              <col />
+              <col style={{ width: 280 }} />
               <col style={{ width: 192 }} />
               <col style={{ width: 84 }} />
               <col style={{ width: 110 }} />
@@ -1905,11 +1913,17 @@ export function KeywordsTable({
                   {headerGroup.headers.map((header) => {
                     const canSort = header.column.getCanSort()
                     const sortDir = header.column.getIsSorted()
+                    // columnDef.meta.align 으로 헤더 정렬 결정 (셀 정렬과 일치)
+                    const align = (
+                      header.column.columnDef.meta as
+                        | { align?: "left" | "right" | "center" }
+                        | undefined
+                    )?.align
                     return (
                       <th
                         key={header.id}
                         className={cn(
-                          "h-10 px-3 text-left align-middle text-xs font-medium text-muted-foreground",
+                          "h-10 px-3 align-middle text-xs font-medium text-muted-foreground",
                           canSort && "cursor-pointer select-none hover:text-foreground",
                         )}
                         onClick={
@@ -1918,7 +1932,13 @@ export function KeywordsTable({
                             : undefined
                         }
                       >
-                        <div className="inline-flex items-center gap-1">
+                        <div
+                          className={cn(
+                            "flex items-center gap-1",
+                            align === "right" && "justify-end",
+                            align === "center" && "justify-center",
+                          )}
+                        >
                           {header.isPlaceholder
                             ? null
                             : flexRender(

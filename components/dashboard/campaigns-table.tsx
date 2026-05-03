@@ -436,7 +436,7 @@ export function CampaignsTable({
           */}
           <colgroup>
             <col style={{ width: 44 }} />
-            <col />
+            <col style={{ width: 320 }} />
             <col style={{ width: 100 }} />
             <col style={{ width: 132 }} />
             <col style={{ width: 96 }} />
