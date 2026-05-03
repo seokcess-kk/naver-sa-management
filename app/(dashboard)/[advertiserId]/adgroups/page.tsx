@@ -159,6 +159,7 @@ export default async function AdgroupsPage({
             advertiserId={advertiserId}
             hasKeys={advertiser.hasKeys}
             campaigns={syncCampaigns}
+            initialCampaignIds={campaignScopeIds}
           />
         }
       />

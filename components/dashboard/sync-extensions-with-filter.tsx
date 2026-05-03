@@ -66,6 +66,11 @@ export type SyncExtensionsWithFilterProps = {
   advertiserId: string
   hasKeys: boolean
   campaigns: CampaignOption[]
+  /**
+   * URL `?campaignIds=...` scope 진입 시 자동 프리셀렉트 (페이지에서 prop 전달).
+   * 미지정 → 빈 배열 (기존 동작 유지). 사용자는 멀티셀렉트로 추가/제거 자유.
+   */
+  initialCampaignIds?: string[]
 }
 
 // =============================================================================
@@ -76,6 +81,7 @@ export function SyncExtensionsWithFilter({
   advertiserId,
   hasKeys,
   campaigns,
+  initialCampaignIds = [],
 }: SyncExtensionsWithFilterProps) {
   const router = useRouter()
 
@@ -88,7 +94,9 @@ export function SyncExtensionsWithFilter({
   // 캠페인 1개뿐 → 필터 UI 미노출, 단순 sync 버튼
   const showFilter = visibleCampaigns.length > 1
 
-  const [selectedIds, setSelectedIds] = React.useState<string[]>([])
+  const [selectedIds, setSelectedIds] = React.useState<string[]>(
+    initialCampaignIds,
+  )
   const [running, setRunning] = React.useState(false)
 
   // 동기화 호출 핸들러 — sync-extensions-button 의 toast.promise 패턴 그대로.

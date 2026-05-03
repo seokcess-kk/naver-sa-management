@@ -220,6 +220,7 @@ export default async function KeywordsPage({
               advertiserId={advertiserId}
               hasKeys={advertiser.hasKeys}
               campaigns={syncCampaigns}
+              initialCampaignIds={campaignScopeIds}
             />
           </>
         }

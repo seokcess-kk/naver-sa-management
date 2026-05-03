@@ -64,6 +64,11 @@ export type SyncAdsWithFilterProps = {
   advertiserId: string
   hasKeys: boolean
   campaigns: CampaignOption[]
+  /**
+   * URL `?campaignIds=...` scope 진입 시 자동 프리셀렉트 (페이지에서 prop 전달).
+   * 미지정 → 빈 배열 (기존 동작 유지). 사용자는 멀티셀렉트로 추가/제거 자유.
+   */
+  initialCampaignIds?: string[]
 }
 
 // =============================================================================
@@ -74,6 +79,7 @@ export function SyncAdsWithFilter({
   advertiserId,
   hasKeys,
   campaigns,
+  initialCampaignIds = [],
 }: SyncAdsWithFilterProps) {
   const router = useRouter()
 
@@ -84,7 +90,9 @@ export function SyncAdsWithFilter({
 
   const showFilter = visibleCampaigns.length > 1
 
-  const [selectedIds, setSelectedIds] = React.useState<string[]>([])
+  const [selectedIds, setSelectedIds] = React.useState<string[]>(
+    initialCampaignIds,
+  )
   const [running, setRunning] = React.useState(false)
 
   const handleSync = React.useCallback(() => {

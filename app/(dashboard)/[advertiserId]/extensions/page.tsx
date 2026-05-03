@@ -214,6 +214,7 @@ export default async function ExtensionsPage({
             advertiserId={advertiser.id}
             hasKeys={advertiser.hasKeys}
             campaigns={syncCampaigns}
+            initialCampaignIds={campaignScopeIds}
           />
         }
       />
