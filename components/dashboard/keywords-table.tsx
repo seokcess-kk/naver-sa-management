@@ -1872,7 +1872,33 @@ export function KeywordsTable({
             현재 필터에 일치하는 키워드가 없습니다.
           </div>
         ) : (
-          <table className="w-full caption-bottom text-sm">
+          <table className="w-full caption-bottom text-sm" style={{ tableLayout: "fixed" }}>
+            {/*
+              컬럼 너비 표준화 — 17개 컬럼 (makeColumns 순서):
+                1 select  2 stagingMarker  3 keyword(auto)  4 adgroup  5 matchType
+                6 bid  7 userLock  8 status  9 inspect  10 recentAvgRnk
+                11 impCnt  12 clkCnt  13 ctr  14 cpc  15 salesAmt
+                16 updatedAt  17 actions
+            */}
+            <colgroup>
+              <col style={{ width: 44 }} />
+              <col style={{ width: 36 }} />
+              <col />
+              <col style={{ width: 192 }} />
+              <col style={{ width: 84 }} />
+              <col style={{ width: 110 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 88 }} />
+              <col style={{ width: 88 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 88 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 144 }} />
+              <col style={{ width: 168 }} />
+              <col style={{ width: 56 }} />
+            </colgroup>
             <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_0_var(--border)]">
               {table.getHeaderGroups().map((headerGroup) => (
                 <tr key={headerGroup.id} className="border-b">

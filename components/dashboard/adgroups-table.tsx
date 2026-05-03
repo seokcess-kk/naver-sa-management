@@ -503,10 +503,24 @@ export function AdgroupsTable({
 
       {/* 테이블 */}
       <div className="rounded-lg border">
-        <Table>
+        <Table style={{ tableLayout: "fixed" }}>
+          {/*
+            컬럼 너비 표준화 — 8개 컬럼:
+              select / 광고그룹명(auto) / 캠페인 / 입찰가 / PC / Mobile / 상태 / 최근 수정
+          */}
+          <colgroup>
+            <col style={{ width: 44 }} />
+            <col />
+            <col style={{ width: 192 }} />
+            <col style={{ width: 110 }} />
+            <col style={{ width: 56 }} />
+            <col style={{ width: 64 }} />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 168 }} />
+          </colgroup>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-10">
+              <TableHead>
                 <Checkbox
                   checked={allSelected}
                   indeterminate={someSelected}

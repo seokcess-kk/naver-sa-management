@@ -1304,7 +1304,29 @@ export function AdsTable({
             현재 필터에 일치하는 소재가 없습니다.
           </div>
         ) : (
-          <table className="w-full caption-bottom text-sm">
+          <table className="w-full caption-bottom text-sm" style={{ tableLayout: "fixed" }}>
+            {/*
+              컬럼 너비 표준화 — thead / tbody / tfoot 모두 colgroup 의 너비를 따름.
+              13개 컬럼 매핑(makeColumns 순서 동일):
+                1 select  2 preview(auto)  3 adgroup  4 type  5 status  6 inspect
+                7 impCnt  8 clkCnt  9 ctr  10 cpc  11 salesAmt  12 updatedAt  13 actions
+              auto(2) 가 남은 너비 차지 → 본문 풍부화 셀이 헤드라인/설명/URL 펼쳐 표시.
+            */}
+            <colgroup>
+              <col style={{ width: 44 }} />
+              <col />
+              <col style={{ width: 192 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 88 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 144 }} />
+              <col style={{ width: 168 }} />
+              <col style={{ width: 56 }} />
+            </colgroup>
             <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_0_var(--border)]">
               {table.getHeaderGroups().map((headerGroup) => (
                 <tr key={headerGroup.id} className="border-b">

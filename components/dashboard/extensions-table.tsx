@@ -1153,7 +1153,27 @@ export function ExtensionsTable({
             현재 필터에 일치하는 확장소재가 없습니다.
           </div>
         ) : (
-          <table className="w-full caption-bottom text-sm">
+          <table className="w-full caption-bottom text-sm" style={{ tableLayout: "fixed" }}>
+            {/*
+              컬럼 너비 표준화 — 13개 컬럼 (makeColumns 순서):
+                1 select  2 text(auto)  3 adgroup  4 type  5 status  6 inspect
+                7 impCnt  8 clkCnt  9 ctr  10 cpc  11 salesAmt  12 updatedAt  13 actions
+            */}
+            <colgroup>
+              <col style={{ width: 44 }} />
+              <col />
+              <col style={{ width: 192 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 96 }} />
+              <col style={{ width: 88 }} />
+              <col style={{ width: 80 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 144 }} />
+              <col style={{ width: 168 }} />
+              <col style={{ width: 56 }} />
+            </colgroup>
             <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_0_var(--border)]">
               {table.getHeaderGroups().map((headerGroup) => (
                 <tr key={headerGroup.id} className="border-b">

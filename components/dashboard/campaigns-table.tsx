@@ -430,10 +430,21 @@ export function CampaignsTable({
 
       {/* 테이블 */}
       <div className="rounded-lg border">
-        <Table>
+        <Table style={{ tableLayout: "fixed" }}>
+          {/*
+            컬럼 너비 표준화 — 6개 컬럼 (select / 이름(auto) / 타입 / 일 예산 / 상태 / 마지막 동기화).
+          */}
+          <colgroup>
+            <col style={{ width: 44 }} />
+            <col />
+            <col style={{ width: 100 }} />
+            <col style={{ width: 132 }} />
+            <col style={{ width: 96 }} />
+            <col style={{ width: 168 }} />
+          </colgroup>
           <TableHeader>
             <TableRow>
-              <TableHead className="w-10">
+              <TableHead>
                 <Checkbox
                   checked={allSelected}
                   indeterminate={someSelected}
