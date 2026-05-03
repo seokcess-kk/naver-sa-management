@@ -179,18 +179,34 @@ type BulkInputForAds = { action: "toggleOn" } | { action: "toggleOff" }
 // 미리보기 추출 — fields JSON 에서 텍스트 후보 추출
 // =============================================================================
 //
-// adType 별로 ad 구조가 상이 (TEXT_45 / RSA_AD 등). 본 PR 은 단순 휴리스틱:
-//   1. headline / title / description 같은 일반 키 우선
-//   2. 없으면 fields JSON.stringify slice (60자)
-// 후속 PR 에서 adType 별 정밀 미리보기 (RSA_AD 의 headlines[0] 등) 가능.
+// adType 별로 ad 구조가 상이 (TEXT_45 / RSA_AD / GFA 이미지 통합광고 등):
+//   1. headline / title / description 등 일반 텍스트 키 우선
+//   2. 없으면 RSA_AD 의 headlines[0]
+//   3. 없으면 GFA 이미지 광고 (dittoId / thumbnail) → "이미지 광고" 라벨
+//   4. 모두 없으면 "본문 정보 없음" 라벨
+//      (raw JSON 직렬화는 사용자에게 의미 없는 dittoId / 내부 키가 그대로 노출되어 제거)
+//
+// 후속 PR 에서 adType 별 정밀 미리보기 (썸네일 inline 표시 등) 가능.
 
 function extractAdPreview(fields: unknown): string {
   if (fields === null || fields === undefined) return ""
   if (typeof fields !== "object") return String(fields).slice(0, 60)
   const obj = fields as Record<string, unknown>
 
-  // 1차 후보 — 텍스트 가능성 높은 키 순서
-  const textKeys = ["headline", "title", "description", "subject", "name"]
+  // 1차 후보 — 텍스트 가능성 높은 키 순서 (TEXT_45 / 텍스트 광고 변형)
+  const textKeys = [
+    "headline",
+    "title",
+    "description",
+    "subject",
+    "name",
+    "headline1",
+    "subject1",
+    "productName",
+    "productNm",
+    "text",
+    "body",
+  ]
   for (const k of textKeys) {
     const v = obj[k]
     if (typeof v === "string" && v.trim().length > 0) {
@@ -209,12 +225,20 @@ function extractAdPreview(fields: unknown): string {
     }
   }
 
-  // 폴백 — JSON 직렬화 일부
-  try {
-    return JSON.stringify(fields).slice(0, 60)
-  } catch {
-    return ""
+  // GFA 이미지 통합광고 — 텍스트 본문 없음. dittoId / thumbnail 만 존재.
+  // 식별은 두 번째 줄의 nccAdId 로 가능 (cell render 가 항상 표시).
+  if (
+    typeof obj["thumbnail"] === "string" ||
+    typeof obj["dittoId"] === "string" ||
+    typeof obj["imageUrl"] === "string" ||
+    typeof obj["image"] === "string"
+  ) {
+    return "이미지 광고"
   }
+
+  // 폴백 — raw JSON 직렬화 대신 친절 라벨.
+  // (dittoId / thumbnail 같은 내부 키가 잘린 채 노출되는 UX 문제 회피)
+  return "본문 정보 없음"
 }
 
 // =============================================================================
