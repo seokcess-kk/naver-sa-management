@@ -66,7 +66,9 @@ export function DashboardSectionNav({
           {sections.map((section) => {
             const href = `${rootHref}${section.href}`
             const active =
-              pathname === href || pathname.startsWith(`${href}/`)
+              section.href === ""
+                ? pathname === rootHref
+                : pathname === href || pathname.startsWith(`${href}/`)
             return (
               <Link
                 key={section.label}
