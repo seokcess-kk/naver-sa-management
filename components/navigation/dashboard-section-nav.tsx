@@ -5,7 +5,8 @@ import { usePathname, useSearchParams } from "next/navigation"
 
 import { KeyStatusBadge } from "@/components/admin/key-status-badge"
 import {
-  getCampaignScopedHref,
+  getScopedHref,
+  parseAdgroupScopeIds,
   parseCampaignScopeIds,
 } from "@/lib/navigation/campaign-scope"
 import { cn } from "@/lib/utils"
@@ -43,6 +44,9 @@ export function DashboardSectionNav({
   const rootHref = `/${advertiser.id}`
   const scopedCampaignIds = parseCampaignScopeIds({
     campaignIds: searchParams.get("campaignIds") ?? undefined,
+  })
+  const scopedAdgroupIds = parseAdgroupScopeIds({
+    adgroupIds: searchParams.get("adgroupIds") ?? undefined,
   })
   const pathnameSegments = pathname.split("/").filter(Boolean)
   const advertiserSegmentIndex = pathnameSegments.findIndex(
@@ -84,8 +88,13 @@ export function DashboardSectionNav({
           {sections.map((section) => {
             const baseHref = `${rootHref}${section.href}`
             const href =
-              scopedCampaignIds.length > 0 && section.href !== ""
-                ? getCampaignScopedHref(baseHref, scopedCampaignIds)
+              (scopedCampaignIds.length > 0 ||
+                scopedAdgroupIds.length > 0) &&
+              section.href !== ""
+                ? getScopedHref(baseHref, {
+                    campaignIds: scopedCampaignIds,
+                    adgroupIds: scopedAdgroupIds,
+                  })
                 : baseHref
             const active = section.href === activeSectionHref
             return (

@@ -38,6 +38,7 @@ import { SyncKeywordsWithFilter } from "@/components/dashboard/sync-keywords-wit
 import { LastSyncBadge } from "@/components/dashboard/last-sync-badge"
 import { getLastSyncAt } from "@/lib/sync/last-sync-at"
 import {
+  parseAdgroupScopeIds,
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
@@ -50,11 +51,17 @@ export default async function KeywordsPage({
   searchParams: Promise<CampaignScopeSearchParams>
 }) {
   const { advertiserId } = await params
-  const campaignScopeIds = parseCampaignScopeIds(await searchParams)
+  const scopeSearchParams = await searchParams
+  const campaignScopeIds = parseCampaignScopeIds(scopeSearchParams)
+  const adgroupScopeIds = parseAdgroupScopeIds(scopeSearchParams)
   const campaignWhere =
     campaignScopeIds.length > 0
       ? { advertiserId, id: { in: campaignScopeIds } }
       : { advertiserId }
+  const adgroupWhere =
+    adgroupScopeIds.length > 0
+      ? { id: { in: adgroupScopeIds }, campaign: campaignWhere }
+      : { campaign: campaignWhere }
 
   let advertiser
   let userRole: "admin" | "operator" | "viewer"
@@ -83,7 +90,7 @@ export default async function KeywordsPage({
   // raw 컬럼 select 안 함. Keyword 는 advertiserId 직접 외래키 X
   //   → adgroup.campaign.advertiserId join 으로 한정.
   const rows = await prisma.keyword.findMany({
-    where: { adgroup: { campaign: campaignWhere } },
+    where: { adgroup: adgroupWhere },
     select: {
       id: true,
       nccKeywordId: true,
@@ -120,7 +127,7 @@ export default async function KeywordsPage({
   // 광고주 횡단 차단: where: { campaign: { advertiserId } }
   const adgroupRows = await prisma.adGroup.findMany({
     where: {
-      campaign: campaignWhere,
+      ...adgroupWhere,
       status: { not: "deleted" },
     },
     select: {
@@ -184,8 +191,10 @@ export default async function KeywordsPage({
       <PageHeader
         title="키워드"
         description={
-          campaignScopeIds.length > 0
-            ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 키워드만 표시합니다.`
+          adgroupScopeIds.length > 0
+            ? `선택한 광고그룹 ${adgroupScopeIds.length}개에 속한 키워드만 표시합니다.`
+            : campaignScopeIds.length > 0
+              ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 키워드만 표시합니다.`
             : "셀을 클릭해 인라인 편집하거나, 체크박스로 다중 선택 후 ON/OFF · 입찰가 일괄 변경. CSV 가져오기로 일괄 생성·수정·OFF 가능."
         }
         breadcrumbs={[

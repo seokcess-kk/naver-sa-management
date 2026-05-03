@@ -33,6 +33,7 @@ import { AdgroupsTable } from "@/components/dashboard/adgroups-table"
 import type { AdgroupRow } from "@/components/dashboard/adgroups-table"
 import { SyncAdgroupsWithFilter } from "@/components/dashboard/sync-adgroups-with-filter"
 import {
+  parseAdgroupScopeIds,
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
@@ -45,7 +46,9 @@ export default async function AdgroupsPage({
   searchParams: Promise<CampaignScopeSearchParams>
 }) {
   const { advertiserId } = await params
-  const campaignScopeIds = parseCampaignScopeIds(await searchParams)
+  const scopeSearchParams = await searchParams
+  const campaignScopeIds = parseCampaignScopeIds(scopeSearchParams)
+  const adgroupScopeIds = parseAdgroupScopeIds(scopeSearchParams)
   const campaignWhere =
     campaignScopeIds.length > 0
       ? { advertiserId, id: { in: campaignScopeIds } }
@@ -130,7 +133,9 @@ export default async function AdgroupsPage({
       <PageHeader
         title="광고그룹"
         description={
-          campaignScopeIds.length > 0
+          adgroupScopeIds.length > 0
+            ? `선택한 광고그룹 ${adgroupScopeIds.length}개가 선택된 상태입니다.`
+            : campaignScopeIds.length > 0
             ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 광고그룹만 표시합니다.`
             : "ON/OFF · 입찰가 · 기본 매체를 다중 선택 후 일괄 변경할 수 있습니다."
         }
@@ -147,9 +152,11 @@ export default async function AdgroupsPage({
         }
       />
       <AdgroupsTable
+        key={adgroupScopeIds.join(",")}
         advertiserId={advertiserId}
         hasKeys={advertiser.hasKeys}
         adgroups={adgroups}
+        initialSelectedAdgroupIds={adgroupScopeIds}
       />
     </div>
   )

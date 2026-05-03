@@ -34,6 +34,7 @@
  */
 
 import * as React from "react"
+import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 
@@ -68,6 +69,7 @@ import {
   type BulkActionResult,
 } from "@/components/forms/bulk-action-modal"
 import { bulkUpdateAdgroups } from "@/app/(dashboard)/[advertiserId]/adgroups/actions"
+import { getScopedHref } from "@/lib/navigation/campaign-scope"
 import type { AdGroupStatus } from "@/lib/generated/prisma/client"
 
 // shadcn Select 한글 라벨 매핑 (Base UI Select.Value 가 raw value 를 표시하지 않도록)
@@ -132,14 +134,18 @@ export function AdgroupsTable({
   advertiserId,
   hasKeys,
   adgroups,
+  initialSelectedAdgroupIds = [],
 }: {
   advertiserId: string
   hasKeys: boolean
   adgroups: AdgroupRow[]
+  initialSelectedAdgroupIds?: string[]
 }) {
   const router = useRouter()
 
-  const [selected, setSelected] = React.useState<Set<string>>(new Set())
+  const [selected, setSelected] = React.useState<Set<string>>(
+    () => new Set(initialSelectedAdgroupIds),
+  )
   const [modalAction, setModalAction] = React.useState<Action | null>(null)
 
   // -- 필터 state -----------------------------------------------------------
@@ -230,6 +236,22 @@ export function AdgroupsTable({
   const selectedRows = React.useMemo(
     () => adgroups.filter((g) => selected.has(g.id)),
     [adgroups, selected],
+  )
+  const selectedCampaignIds = React.useMemo(
+    () => Array.from(new Set(selectedRows.map((g) => g.campaign.id))),
+    [selectedRows],
+  )
+  const selectedAdgroupIds = React.useMemo(
+    () => selectedRows.map((g) => g.id),
+    [selectedRows],
+  )
+  const scopedHref = React.useCallback(
+    (path: string) =>
+      getScopedHref(`/${advertiserId}${path}`, {
+        campaignIds: selectedCampaignIds,
+        adgroupIds: selectedAdgroupIds,
+      }),
+    [advertiserId, selectedCampaignIds, selectedAdgroupIds],
   )
 
   function openModal(action: Action) {
@@ -425,7 +447,25 @@ export function AdgroupsTable({
             ? `${selected.size}개 선택됨`
             : "선택된 광고그룹 없음"}
         </span>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <ScopedAdgroupLink
+            href={scopedHref("/keywords")}
+            disabled={selected.size === 0}
+          >
+            키워드 보기
+          </ScopedAdgroupLink>
+          <ScopedAdgroupLink
+            href={scopedHref("/ads")}
+            disabled={selected.size === 0}
+          >
+            소재 보기
+          </ScopedAdgroupLink>
+          <ScopedAdgroupLink
+            href={scopedHref("/extensions")}
+            disabled={selected.size === 0}
+          >
+            확장소재 보기
+          </ScopedAdgroupLink>
           <Button
             size="sm"
             variant="outline"
@@ -583,6 +623,27 @@ export function AdgroupsTable({
         />
       )}
     </div>
+  )
+}
+
+function ScopedAdgroupLink({
+  href,
+  disabled,
+  children,
+}: {
+  href: string
+  disabled: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={disabled}
+      render={disabled ? undefined : <Link href={href} />}
+    >
+      {children}
+    </Button>
   )
 }
 

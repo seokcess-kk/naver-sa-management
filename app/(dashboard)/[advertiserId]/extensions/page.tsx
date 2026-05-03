@@ -42,6 +42,7 @@ import type {
 } from "@/components/dashboard/extensions-table"
 import { SyncExtensionsWithFilter } from "@/components/dashboard/sync-extensions-with-filter"
 import {
+  parseAdgroupScopeIds,
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
@@ -54,11 +55,17 @@ export default async function ExtensionsPage({
   searchParams: Promise<CampaignScopeSearchParams>
 }) {
   const { advertiserId } = await params
-  const campaignScopeIds = parseCampaignScopeIds(await searchParams)
+  const scopeSearchParams = await searchParams
+  const campaignScopeIds = parseCampaignScopeIds(scopeSearchParams)
+  const adgroupScopeIds = parseAdgroupScopeIds(scopeSearchParams)
   const campaignWhere =
     campaignScopeIds.length > 0
       ? { advertiserId, id: { in: campaignScopeIds } }
       : { advertiserId }
+  const adgroupWhere =
+    adgroupScopeIds.length > 0
+      ? { id: { in: adgroupScopeIds }, campaign: campaignWhere }
+      : { campaign: campaignWhere }
 
   let advertiser
   let userRole: "admin" | "operator" | "viewer"
@@ -85,7 +92,7 @@ export default async function ExtensionsPage({
   const rows = await prisma.adExtension.findMany({
     where: {
       ownerType: "adgroup",
-      adgroup: { campaign: campaignWhere },
+      adgroup: adgroupWhere,
       type: { in: ["headline", "description", "image"] },
     },
     select: {
@@ -115,7 +122,7 @@ export default async function ExtensionsPage({
   // 광고주 횡단 차단: where: { campaign: { advertiserId } }
   const adgroupRows = await prisma.adGroup.findMany({
     where: {
-      campaign: campaignWhere,
+      ...adgroupWhere,
       status: { not: "deleted" },
     },
     select: {
@@ -180,8 +187,10 @@ export default async function ExtensionsPage({
       <PageHeader
         title="확장소재"
         description={
-          campaignScopeIds.length > 0
-            ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 확장소재만 표시합니다.`
+          adgroupScopeIds.length > 0
+            ? `선택한 광고그룹 ${adgroupScopeIds.length}개에 속한 확장소재만 표시합니다.`
+            : campaignScopeIds.length > 0
+              ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 확장소재만 표시합니다.`
             : "추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집은 후속 PR)"
         }
         breadcrumbs={[

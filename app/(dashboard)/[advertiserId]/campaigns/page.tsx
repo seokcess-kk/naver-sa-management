@@ -28,13 +28,23 @@ import { PageHeader } from "@/components/navigation/page-header"
 import { CampaignsTable } from "@/components/dashboard/campaigns-table"
 import type { CampaignRow } from "@/components/dashboard/campaigns-table"
 import { SyncCampaignsButton } from "@/components/dashboard/sync-campaigns-button"
+import {
+  parseAdgroupScopeIds,
+  parseCampaignScopeIds,
+  type CampaignScopeSearchParams,
+} from "@/lib/navigation/campaign-scope"
 
 export default async function CampaignsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ advertiserId: string }>
+  searchParams: Promise<CampaignScopeSearchParams>
 }) {
   const { advertiserId } = await params
+  const scopeSearchParams = await searchParams
+  const campaignScopeIds = parseCampaignScopeIds(scopeSearchParams)
+  const adgroupScopeIds = parseAdgroupScopeIds(scopeSearchParams)
 
   let advertiser
   try {
@@ -85,6 +95,19 @@ export default async function CampaignsPage({
     status: c.status,
     updatedAt: c.updatedAt.toISOString(),
   }))
+  let initialSelectedCampaignIds = campaignScopeIds
+  if (initialSelectedCampaignIds.length === 0 && adgroupScopeIds.length > 0) {
+    const scopedAdgroups = await prisma.adGroup.findMany({
+      where: {
+        id: { in: adgroupScopeIds },
+        campaign: { advertiserId },
+      },
+      select: { campaignId: true },
+    })
+    initialSelectedCampaignIds = Array.from(
+      new Set(scopedAdgroups.map((g) => g.campaignId)),
+    )
+  }
 
   return (
     <div className="flex flex-col gap-4 p-6">
@@ -103,9 +126,11 @@ export default async function CampaignsPage({
         }
       />
       <CampaignsTable
+        key={initialSelectedCampaignIds.join(",")}
         advertiserId={advertiserId}
         hasKeys={advertiser.hasKeys}
         campaigns={campaigns}
+        initialSelectedCampaignIds={initialSelectedCampaignIds}
       />
     </div>
   )

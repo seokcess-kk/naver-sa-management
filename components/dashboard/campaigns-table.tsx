@@ -109,14 +109,18 @@ export function CampaignsTable({
   advertiserId,
   hasKeys,
   campaigns,
+  initialSelectedCampaignIds = [],
 }: {
   advertiserId: string
   hasKeys: boolean
   campaigns: CampaignRow[]
+  initialSelectedCampaignIds?: string[]
 }) {
   const router = useRouter()
 
-  const [selected, setSelected] = React.useState<Set<string>>(new Set())
+  const [selected, setSelected] = React.useState<Set<string>>(
+    () => new Set(initialSelectedCampaignIds),
+  )
   const [modalAction, setModalAction] = React.useState<Action | null>(null)
 
   // -- 필터 state -----------------------------------------------------------
