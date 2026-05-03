@@ -36,6 +36,7 @@ import type {
   AdAdgroupOption,
 } from "@/components/dashboard/ads-table"
 import { SyncAdsWithFilter } from "@/components/dashboard/sync-ads-with-filter"
+import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import {
   parseAdgroupScopeIds,
   parseCampaignScopeIds,
@@ -175,11 +176,17 @@ export default async function AdsPage({
       <PageHeader
         title="소재"
         description={
-          adgroupScopeIds.length > 0
-            ? `선택한 광고그룹 ${adgroupScopeIds.length}개에 속한 소재만 표시합니다.`
-            : campaignScopeIds.length > 0
-              ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 소재만 표시합니다.`
-            : "광고그룹별 소재 목록. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집·CSV 는 후속 PR)"
+          adgroupScopeIds.length > 0 ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/ads`}>
+              {`선택한 광고그룹 ${adgroupScopeIds.length}개에 속한 소재만 표시합니다.`}
+            </ScopeClearLink>
+          ) : campaignScopeIds.length > 0 ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/ads`}>
+              {`선택한 캠페인 ${campaignScopeIds.length}개에 속한 소재만 표시합니다.`}
+            </ScopeClearLink>
+          ) : (
+            "광고그룹별 소재 목록. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집·CSV 는 후속 PR)"
+          )
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },

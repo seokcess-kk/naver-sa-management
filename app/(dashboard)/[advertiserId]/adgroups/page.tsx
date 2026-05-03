@@ -32,6 +32,7 @@ import { PageHeader } from "@/components/navigation/page-header"
 import { AdgroupsTable } from "@/components/dashboard/adgroups-table"
 import type { AdgroupRow } from "@/components/dashboard/adgroups-table"
 import { SyncAdgroupsWithFilter } from "@/components/dashboard/sync-adgroups-with-filter"
+import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import {
   parseAdgroupScopeIds,
   parseCampaignScopeIds,
@@ -133,11 +134,17 @@ export default async function AdgroupsPage({
       <PageHeader
         title="광고그룹"
         description={
-          adgroupScopeIds.length > 0
-            ? `선택한 광고그룹 ${adgroupScopeIds.length}개가 선택된 상태입니다.`
-            : campaignScopeIds.length > 0
-            ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 광고그룹만 표시합니다.`
-            : "ON/OFF · 입찰가 · 기본 매체를 다중 선택 후 일괄 변경할 수 있습니다."
+          adgroupScopeIds.length > 0 ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/adgroups`}>
+              {`선택한 광고그룹 ${adgroupScopeIds.length}개가 선택된 상태입니다.`}
+            </ScopeClearLink>
+          ) : campaignScopeIds.length > 0 ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/adgroups`}>
+              {`선택한 캠페인 ${campaignScopeIds.length}개에 속한 광고그룹만 표시합니다.`}
+            </ScopeClearLink>
+          ) : (
+            "ON/OFF · 입찰가 · 기본 매체를 다중 선택 후 일괄 변경할 수 있습니다."
+          )
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },

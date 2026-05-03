@@ -28,6 +28,7 @@ import { PageHeader } from "@/components/navigation/page-header"
 import { CampaignsTable } from "@/components/dashboard/campaigns-table"
 import type { CampaignRow } from "@/components/dashboard/campaigns-table"
 import { SyncCampaignsButton } from "@/components/dashboard/sync-campaigns-button"
+import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import {
   parseAdgroupScopeIds,
   parseCampaignScopeIds,
@@ -109,11 +110,28 @@ export default async function CampaignsPage({
     )
   }
 
+  const hasScope =
+    campaignScopeIds.length > 0 || adgroupScopeIds.length > 0
+  const scopeMessage =
+    adgroupScopeIds.length > 0
+      ? `선택한 광고그룹 ${adgroupScopeIds.length}개의 부모 캠페인이 자동 선택되었습니다.`
+      : campaignScopeIds.length > 0
+        ? `선택한 캠페인 ${campaignScopeIds.length}개가 선택된 상태입니다.`
+        : null
+
   return (
     <div className="flex flex-col gap-4 p-6">
       <PageHeader
         title="캠페인"
-        description="ON/OFF · 일 예산을 다중 선택 후 일괄 변경할 수 있습니다."
+        description={
+          hasScope && scopeMessage ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/campaigns`}>
+              {scopeMessage}
+            </ScopeClearLink>
+          ) : (
+            "ON/OFF · 일 예산을 다중 선택 후 일괄 변경할 수 있습니다."
+          )
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "캠페인" },

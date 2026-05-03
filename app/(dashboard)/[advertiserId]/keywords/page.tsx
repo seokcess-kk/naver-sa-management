@@ -36,6 +36,7 @@ import type {
 } from "@/components/dashboard/keywords-table"
 import { SyncKeywordsWithFilter } from "@/components/dashboard/sync-keywords-with-filter"
 import { LastSyncBadge } from "@/components/dashboard/last-sync-badge"
+import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import { getLastSyncAt } from "@/lib/sync/last-sync-at"
 import {
   parseAdgroupScopeIds,
@@ -191,11 +192,17 @@ export default async function KeywordsPage({
       <PageHeader
         title="키워드"
         description={
-          adgroupScopeIds.length > 0
-            ? `선택한 광고그룹 ${adgroupScopeIds.length}개에 속한 키워드만 표시합니다.`
-            : campaignScopeIds.length > 0
-              ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 키워드만 표시합니다.`
-            : "셀을 클릭해 인라인 편집하거나, 체크박스로 다중 선택 후 ON/OFF · 입찰가 일괄 변경. CSV 가져오기로 일괄 생성·수정·OFF 가능."
+          adgroupScopeIds.length > 0 ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/keywords`}>
+              {`선택한 광고그룹 ${adgroupScopeIds.length}개에 속한 키워드만 표시합니다.`}
+            </ScopeClearLink>
+          ) : campaignScopeIds.length > 0 ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/keywords`}>
+              {`선택한 캠페인 ${campaignScopeIds.length}개에 속한 키워드만 표시합니다.`}
+            </ScopeClearLink>
+          ) : (
+            "셀을 클릭해 인라인 편집하거나, 체크박스로 다중 선택 후 ON/OFF · 입찰가 일괄 변경. CSV 가져오기로 일괄 생성·수정·OFF 가능."
+          )
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },

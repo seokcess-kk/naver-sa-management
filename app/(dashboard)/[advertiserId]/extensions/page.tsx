@@ -41,6 +41,7 @@ import type {
   ExtensionAdgroupOption,
 } from "@/components/dashboard/extensions-table"
 import { SyncExtensionsWithFilter } from "@/components/dashboard/sync-extensions-with-filter"
+import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import {
   parseAdgroupScopeIds,
   parseCampaignScopeIds,
@@ -187,11 +188,17 @@ export default async function ExtensionsPage({
       <PageHeader
         title="확장소재"
         description={
-          adgroupScopeIds.length > 0
-            ? `선택한 광고그룹 ${adgroupScopeIds.length}개에 속한 확장소재만 표시합니다.`
-            : campaignScopeIds.length > 0
-              ? `선택한 캠페인 ${campaignScopeIds.length}개에 속한 확장소재만 표시합니다.`
-            : "추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집은 후속 PR)"
+          adgroupScopeIds.length > 0 ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/extensions`}>
+              {`선택한 광고그룹 ${adgroupScopeIds.length}개에 속한 확장소재만 표시합니다.`}
+            </ScopeClearLink>
+          ) : campaignScopeIds.length > 0 ? (
+            <ScopeClearLink clearHref={`/${advertiserId}/extensions`}>
+              {`선택한 캠페인 ${campaignScopeIds.length}개에 속한 확장소재만 표시합니다.`}
+            </ScopeClearLink>
+          ) : (
+            "추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집은 후속 PR)"
+          )
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
