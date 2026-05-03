@@ -17,8 +17,10 @@
  *   - bulkUpdateAdgroups 시그니처 / UX 변경 X.
  *
  * F-2.1 캠페인 테이블과의 차이 (그대로 유지):
- *   - 컬럼 추가: 캠페인명 / 입찰가 / PC / Mobile (+ 일예산 / 상태)
- *   - 다중 액션 5종: ON / OFF / 입찰가 변경 / 예산 변경 / 채널 변경
+ *   - 컬럼 추가: 캠페인명 / 입찰가 / PC / Mobile (+ 상태)
+ *   - 다중 액션 4종: ON / OFF / 입찰가 변경 / 채널 변경
+ *     (Phase 1 — 광고그룹 일예산 운영 차단 정책으로 "예산 변경" 제거.
+ *      DB 컬럼은 Phase 2 까지 보존 — actions.ts 머리 주석 참조.)
  *   - 채널 변경은 backend 가 명시적 throw — UI 에서 "운영 검증 필요" 안내 +
  *     "강제 시도" 버튼으로 ChangeBatch 실패 결과를 운영자가 확인 가능
  *
@@ -94,8 +96,6 @@ export type AdgroupRow = {
   name: string
   /** 그룹 기본 입찰가 (Decimal → number 직렬화). 미설정 null. */
   bidAmt: number | null
-  /** 그룹 일 예산 (Decimal → number 직렬화). 미설정 null. */
-  dailyBudget: number | null
   pcChannelOn: boolean
   mblChannelOn: boolean
   status: AdGroupStatus
@@ -109,7 +109,7 @@ export type AdgroupRow = {
   }
 }
 
-type Action = "toggleOn" | "toggleOff" | "bid" | "budget" | "channel"
+type Action = "toggleOn" | "toggleOff" | "bid" | "channel"
 
 /** channel 모달 단계에서 사용자가 선택한 PC/Mobile 적용 값. */
 type ChannelChoice = {
@@ -122,7 +122,6 @@ type BulkInput =
   | { action: "toggleOn" }
   | { action: "toggleOff" }
   | { action: "bid"; bidAmt: number }
-  | { action: "budget"; dailyBudget: number }
   | { action: "channel"; choice: ChannelChoice }
 
 // =============================================================================
@@ -264,9 +263,7 @@ export function AdgroupsTable({
           ? "OFF로 변경 (일괄)"
           : modalAction === "bid"
             ? "그룹 기본 입찰가 변경 (일괄)"
-            : modalAction === "budget"
-              ? "그룹 일 예산 변경 (일괄)"
-              : "기본 매체 ON/OFF 변경 (일괄)"
+            : "기본 매체 ON/OFF 변경 (일괄)"
 
     async function onSubmit(input: BulkInput): Promise<BulkActionResult> {
       let payload: Parameters<typeof bulkUpdateAdgroups>[1]
@@ -292,14 +289,6 @@ export function AdgroupsTable({
           items: selectedRows.map((r) => ({
             adgroupId: r.id,
             bidAmt: input.bidAmt,
-          })),
-        }
-      } else if (input.action === "budget") {
-        payload = {
-          action: "budget",
-          items: selectedRows.map((r) => ({
-            adgroupId: r.id,
-            dailyBudget: input.dailyBudget,
           })),
         }
       } else {
@@ -464,14 +453,6 @@ export function AdgroupsTable({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => openModal("budget")}
-            disabled={selected.size === 0 || !hasKeys}
-          >
-            예산 변경
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
             onClick={() => openModal("channel")}
             disabled={selected.size === 0 || !hasKeys}
           >
@@ -496,7 +477,6 @@ export function AdgroupsTable({
               <TableHead>광고그룹명</TableHead>
               <TableHead>캠페인</TableHead>
               <TableHead className="text-right">입찰가</TableHead>
-              <TableHead className="text-right">일 예산</TableHead>
               <TableHead className="text-center">PC</TableHead>
               <TableHead className="text-center">Mobile</TableHead>
               <TableHead>상태</TableHead>
@@ -507,7 +487,7 @@ export function AdgroupsTable({
             {visibleAdgroups.length === 0 ? (
               <TableRow>
                 <TableCell
-                  colSpan={9}
+                  colSpan={8}
                   className="py-8 text-center text-muted-foreground"
                 >
                   {adgroups.length === 0 ? (
@@ -548,11 +528,6 @@ export function AdgroupsTable({
                     </TableCell>
                     <TableCell className="text-right font-mono">
                       {g.bidAmt !== null ? g.bidAmt.toLocaleString() : "—"}
-                    </TableCell>
-                    <TableCell className="text-right font-mono">
-                      {g.dailyBudget !== null
-                        ? g.dailyBudget.toLocaleString()
-                        : "—"}
                     </TableCell>
                     <TableCell className="text-center text-xs">
                       <ChannelDot on={g.pcChannelOn} />
@@ -660,17 +635,10 @@ function AdgroupBulkInput({
     )
   }
 
-  if (action === "bid" || action === "budget") {
+  if (action === "bid") {
     return (
       <NumericInput
-        action={action}
-        onReady={(n) =>
-          onReady(
-            action === "bid"
-              ? { action: "bid", bidAmt: n }
-              : { action: "budget", dailyBudget: n },
-          )
-        }
+        onReady={(n) => onReady({ action: "bid", bidAmt: n })}
       />
     )
   }
@@ -684,10 +652,8 @@ function AdgroupBulkInput({
 }
 
 function NumericInput({
-  action,
   onReady,
 }: {
-  action: "bid" | "budget"
   onReady: (n: number) => void
 }) {
   const [valueInput, setValueInput] = React.useState("")
@@ -699,18 +665,16 @@ function NumericInput({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor="bulk-value">
-          {action === "bid" ? "새 그룹 기본 입찰가 (원)" : "새 일 예산 (원)"}
-        </Label>
+        <Label htmlFor="bulk-value">새 그룹 기본 입찰가 (원)</Label>
         <Input
           id="bulk-value"
           type="number"
           inputMode="numeric"
           min={0}
-          step={action === "bid" ? 10 : 1000}
+          step={10}
           value={valueInput}
           onChange={(e) => setValueInput(e.target.value)}
-          placeholder={action === "bid" ? "예: 500" : "예: 50000"}
+          placeholder="예: 500"
         />
         <p className="text-xs text-muted-foreground">
           선택한 모든 광고그룹에 동일 값이 적용됩니다. 0 이상의 정수.
@@ -835,11 +799,9 @@ function AdgroupBulkPreview({
   const valueLabel =
     input.action === "bid"
       ? "입찰가"
-      : input.action === "budget"
-        ? "일 예산"
-        : input.action === "channel"
-          ? "PC/Mobile"
-          : "ON/OFF"
+      : input.action === "channel"
+        ? "PC/Mobile"
+        : "ON/OFF"
 
   return (
     <div className="max-h-72 overflow-y-auto rounded-md border">
@@ -875,9 +837,6 @@ function computeBefore(r: AdgroupRow, input: BulkInput): string {
   if (input.action === "bid") {
     return r.bidAmt !== null ? `${r.bidAmt.toLocaleString()}원` : "—"
   }
-  if (input.action === "budget") {
-    return r.dailyBudget !== null ? `${r.dailyBudget.toLocaleString()}원` : "—"
-  }
   if (input.action === "channel") {
     return `PC ${r.pcChannelOn ? "ON" : "OFF"} / M ${r.mblChannelOn ? "ON" : "OFF"}`
   }
@@ -888,7 +847,6 @@ function computeAfter(r: AdgroupRow, input: BulkInput): string {
   if (input.action === "toggleOn") return "ON"
   if (input.action === "toggleOff") return "OFF"
   if (input.action === "bid") return `${input.bidAmt.toLocaleString()}원`
-  if (input.action === "budget") return `${input.dailyBudget.toLocaleString()}원`
   // channel
   const beforePc = r.pcChannelOn ? "ON" : "OFF"
   const beforeMbl = r.mblChannelOn ? "ON" : "OFF"

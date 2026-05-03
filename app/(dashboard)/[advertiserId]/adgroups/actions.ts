@@ -5,7 +5,7 @@
  *
  * 책임 (SPEC 6.2 F-2.2):
  *   1. syncAdgroups       — NAVER SA listAdgroups → DB upsert (광고주 단위)
- *   2. bulkUpdateAdgroups — toggle / bid / budget / channel 일괄 변경
+ *   2. bulkUpdateAdgroups — toggle / bid / channel 일괄 변경
  *
  * 운영 정책 (CLAUDE.md / backend-engineer.md):
  *   - 진입부 getCurrentAdvertiser(advertiserId) 호출 (admin / 화이트리스트 검증 + 광고주 객체 반환)
@@ -17,6 +17,12 @@
  *   - AuditLog 기록 (시크릿 X — AdGroup 응답엔 키 없음)
  *   - revalidatePath(`/${advertiserId}/adgroups`)
  *
+ * 일예산 정책 (Phase 1 — 광고그룹 일예산 사용자 차단):
+ *   - 광고그룹의 일예산(dailyBudget)은 캠페인 일예산과 이중 게이트로 작동하지만,
+ *     운영 단순화 / 효율 좋은 그룹의 인위적 캡 회피를 위해 본 어드민에서 노출·조정 차단.
+ *   - syncAdgroups 는 SA 응답의 dailyBudget 을 그대로 DB upsert (Phase 2 컬럼 drop 전까지 유지)
+ *   - bulkUpdateAdgroups 의 "budget" 액션은 제거 (Zod 스키마에서 차단)
+ *
  * 스키마 매핑 메모 (F-2.1 캠페인과 동일 패턴):
  *   - 앱 DB AdGroup 모델은 `status` enum (on/off/deleted) 으로 ON/OFF 표현.
  *   - 네이버 SA 응답은 별도 `userLock`(true=OFF) + `status`(ELIGIBLE/PAUSED/DELETED).
@@ -25,7 +31,7 @@
  *
  * F-2.1 캠페인 액션과의 차이:
  *   - 광고주 한정 join: AdGroup → Campaign.advertiserId (간접)
- *   - 액션 4종: toggle / bid / budget / channel
+ *   - 액션 3종: toggle / bid / channel (budget 은 광고그룹 일예산 정책상 제외)
  *   - channel 액션은 SA 필드명(채널 키 ON/OFF 표현) 미확정 → 명시적 throw + ChangeItem failed (TODO)
  *   - syncAdgroups 는 응답 광고그룹의 nccCampaignId 를 DB Campaign.id 로 룩업해 매핑 (캠페인 사전 동기화 필요)
  */
@@ -237,7 +243,8 @@ export async function syncAdgroups(
 }
 
 // =============================================================================
-// 2. bulkUpdateAdgroups — toggle / bid / budget / channel 일괄 변경
+// 2. bulkUpdateAdgroups — toggle / bid / channel 일괄 변경
+// (광고그룹 일예산 액션은 Phase 1 정책상 제외 — 위 머리 주석 참조)
 // =============================================================================
 
 const bulkActionSchema = z.discriminatedUnion("action", [
@@ -263,19 +270,6 @@ const bulkActionSchema = z.discriminatedUnion("action", [
         z.object({
           adgroupId: z.string().min(1),
           bidAmt: z.number().int().min(0), // 원 단위
-        }),
-      )
-      .min(1)
-      .max(200),
-  }),
-  // 일 예산
-  z.object({
-    action: z.literal("budget"),
-    items: z
-      .array(
-        z.object({
-          adgroupId: z.string().min(1),
-          dailyBudget: z.number().int().min(0), // 원 단위
         }),
       )
       .min(1)
@@ -326,7 +320,6 @@ type DbAdGroupSnapshot = {
   nccAdgroupId: string
   name: string
   bidAmt: number | null
-  dailyBudget: number | null
   pcChannelOn: boolean
   mblChannelOn: boolean
   status: AdGroupStatus
@@ -361,7 +354,6 @@ export async function bulkUpdateAdgroups(
   type ChangePayload = {
     userLock?: boolean
     bidAmt?: number
-    dailyBudget?: number
     pcChannelOn?: boolean
     mblChannelOn?: boolean
   }
@@ -375,11 +367,6 @@ export async function bulkUpdateAdgroups(
     case "bid":
       for (const it of parsed.items) {
         itemsByAdgroupId.set(it.adgroupId, { bidAmt: it.bidAmt })
-      }
-      break
-    case "budget":
-      for (const it of parsed.items) {
-        itemsByAdgroupId.set(it.adgroupId, { dailyBudget: it.dailyBudget })
       }
       break
     case "channel":
@@ -404,7 +391,6 @@ export async function bulkUpdateAdgroups(
       nccAdgroupId: true,
       name: true,
       bidAmt: true,
-      dailyBudget: true,
       pcChannelOn: true,
       mblChannelOn: true,
       status: true,
@@ -423,7 +409,6 @@ export async function bulkUpdateAdgroups(
         nccAdgroupId: g.nccAdgroupId,
         name: g.name,
         bidAmt: g.bidAmt === null ? null : Number(g.bidAmt),
-        dailyBudget: g.dailyBudget === null ? null : Number(g.dailyBudget),
         pcChannelOn: g.pcChannelOn,
         mblChannelOn: g.mblChannelOn,
         status: g.status,
@@ -476,21 +461,6 @@ export async function bulkUpdateAdgroups(
           bidAmt: change.bidAmt,
         })
         break
-      case "budget":
-        // useDailyBudget 은 dailyBudget != null 로 파생 (CLAUDE.md 규약).
-        beforeData = {
-          dailyBudget: dbG.dailyBudget,
-        } as Prisma.InputJsonValue
-        afterData = {
-          dailyBudget: change.dailyBudget,
-        } as Prisma.InputJsonValue
-        itemsForApi.push({
-          nccAdgroupId: dbG.nccAdgroupId,
-          dailyBudget: change.dailyBudget,
-          useDailyBudget:
-            typeof change.dailyBudget === "number" && change.dailyBudget > 0,
-        })
-        break
       case "channel":
         beforeData = {
           pcChannelOn: dbG.pcChannelOn,
@@ -522,7 +492,6 @@ export async function bulkUpdateAdgroups(
   // fields 매핑:
   //   toggle  → "userLock"
   //   bid     → "bidAmt"
-  //   budget  → "dailyBudget,useDailyBudget"
   //   channel → SA 필드명 미확정 (TODO) → 본 PR 에서 명시적 throw
   let success = 0
   let failed = 0
@@ -585,7 +554,7 @@ export async function bulkUpdateAdgroups(
     }
   }
 
-  // toggle / bid / budget — 정상 흐름
+  // toggle / bid — 정상 흐름
   let fields: string
   switch (parsed.action) {
     case "toggle":
@@ -593,9 +562,6 @@ export async function bulkUpdateAdgroups(
       break
     case "bid":
       fields = "bidAmt"
-      break
-    case "budget":
-      fields = "dailyBudget,useDailyBudget"
       break
   }
 
@@ -631,18 +597,6 @@ export async function bulkUpdateAdgroups(
               where: { id: dbG.id },
               data: {
                 bidAmt: newBid,
-                raw: rawJson,
-              },
-            })
-            break
-          }
-          case "budget": {
-            const newBudget =
-              typeof u.dailyBudget === "number" ? u.dailyBudget : null
-            await prisma.adGroup.update({
-              where: { id: dbG.id },
-              data: {
-                dailyBudget: newBudget,
                 raw: rawJson,
               },
             })

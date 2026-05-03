@@ -59,6 +59,7 @@ export default async function AdgroupsPage({
   }
 
   // raw 컬럼 select 안 함. AdGroup 은 advertiserId 직접 외래키 X → campaign join 으로 한정.
+  // dailyBudget 은 Phase 1 정책상 UI 비노출 — select 하지 않음 (DB 컬럼은 Phase 2 까지 보존).
   const rows = await prisma.adGroup.findMany({
     where: { campaign: { advertiserId } },
     select: {
@@ -66,7 +67,6 @@ export default async function AdgroupsPage({
       nccAdgroupId: true,
       name: true,
       bidAmt: true,
-      dailyBudget: true,
       pcChannelOn: true,
       mblChannelOn: true,
       status: true,
@@ -98,14 +98,11 @@ export default async function AdgroupsPage({
 
   // Decimal / Date → JSON-friendly 직렬화. AdgroupRow shape 으로 매핑.
   // bidAmt 는 Int? (Decimal 아님) — 추가 변환 불필요.
-  // dailyBudget 는 Decimal(14,2) — Number() 로 변환.
   const adgroups: AdgroupRow[] = rows.map((g) => ({
     id: g.id,
     nccAdgroupId: g.nccAdgroupId,
     name: g.name,
     bidAmt: g.bidAmt,
-    dailyBudget:
-      g.dailyBudget !== null ? Number(g.dailyBudget.toString()) : null,
     pcChannelOn: g.pcChannelOn,
     mblChannelOn: g.mblChannelOn,
     status: g.status,
@@ -121,7 +118,7 @@ export default async function AdgroupsPage({
     <div className="flex flex-col gap-4 p-6">
       <PageHeader
         title="광고그룹"
-        description="ON/OFF · 입찰가 · 예산 · 기본 매체를 다중 선택 후 일괄 변경할 수 있습니다."
+        description="ON/OFF · 입찰가 · 기본 매체를 다중 선택 후 일괄 변경할 수 있습니다."
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "광고그룹" },
