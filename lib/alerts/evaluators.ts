@@ -1319,3 +1319,114 @@ function clampInt(
   if (i < min || i > max) return fallback
   return i
 }
+
+// =============================================================================
+// 13. budget_pacing — 어제 일예산 100% 도달 캠페인 (Phase E.2)
+// =============================================================================
+
+/** budget_pacing rule.params shape. */
+export type BudgetPacingParams = {
+  /** 100% 임계. 기본 100. 50..200. */
+  thresholdPct?: number
+  /** 보고 최소 캠페인 수. 기본 1. 0..100. */
+  minCampaigns?: number
+}
+
+/**
+ * 어제 KST 기준 일예산 100% 도달 캠페인 카운트 → 광고주 단위 1건 알림.
+ *
+ * 핵심 차이 (budget_burn 과 비교):
+ *   - budget_burn: 오늘 실시간 (캠페인별 N건)
+ *   - budget_pacing: 어제 결과 (광고주 단위 1건 일일 요약)
+ *
+ * 운영 의도 (사용자 검토 반영):
+ *   - "다음날 +20% 자동 증액" 같은 자동 행동은 본 PR 비대상 — 알림으로만 (옵트인 옵션은 후속)
+ *   - 균등배분 모드 분기는 BidAutomationConfig.budgetPacingMode 가 별도 결정 컬럼 (본 평가기 의존 X)
+ *
+ * muteKey: `budget_pacing:${advertiserId}:${yyyy-mm-dd}` — 광고주당 1일 1회.
+ */
+export async function evaluateBudgetPacing(
+  ctx: EvalContext,
+  rule: RuleSlice<BudgetPacingParams>,
+): Promise<AlertCandidate[]> {
+  const thresholdPct = clampInt(rule.params?.thresholdPct, 50, 200, 100)
+  const minCampaigns = clampInt(rule.params?.minCampaigns, 0, 100, 1)
+
+  // 광고주 캠페인 (예산 설정 + 활성)
+  const campaigns = await prisma.campaign.findMany({
+    where: {
+      advertiserId: ctx.advertiserId,
+      status: { not: "deleted" },
+      dailyBudget: { not: null },
+    },
+    select: { nccCampaignId: true, name: true, dailyBudget: true },
+  })
+  if (campaigns.length === 0) return []
+
+  // 어제 비용 (datePreset='yesterday')
+  const ids = campaigns.map((c) => c.nccCampaignId)
+  const rows = await getStats(ctx.customerId, {
+    ids,
+    fields: ["salesAmt"],
+    datePreset: "yesterday",
+  })
+  const salesById = new Map<string, number>()
+  for (const r of rows) {
+    if (typeof r.id === "string") {
+      salesById.set(r.id, typeof r.salesAmt === "number" ? r.salesAmt : 0)
+    }
+  }
+
+  // 100% 도달 캠페인 검출
+  const exhausted: { name: string; pct: number; cost: number; budget: number }[] = []
+  for (const c of campaigns) {
+    const budget = Number(c.dailyBudget ?? 0)
+    if (budget <= 0) continue
+    const cost = salesById.get(c.nccCampaignId) ?? 0
+    if (cost <= 0) continue
+    const pct = (cost / budget) * 100
+    if (pct >= thresholdPct) {
+      exhausted.push({ name: c.name, pct, cost, budget })
+    }
+  }
+
+  if (exhausted.length < minCampaigns) return []
+
+  // 어제 KST yyyy-mm-dd
+  const kstYesterday = new Date(Date.now() + 9 * 60 * 60 * 1000 - 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10)
+
+  // 광고주 단위 1건
+  const totalCost = exhausted.reduce((s, e) => s + e.cost, 0)
+  const totalBudget = exhausted.reduce((s, e) => s + e.budget, 0)
+  const top = exhausted
+    .sort((a, b) => b.pct - a.pct)
+    .slice(0, 3)
+    .map((e) => `${e.name} ${e.pct.toFixed(0)}%`)
+    .join(", ")
+
+  return [
+    {
+      ruleType: "budget_pacing",
+      severity: exhausted.length >= 3 ? "warn" : "info",
+      title: `어제 예산 100% 도달 ${exhausted.length}건`,
+      body: `어제(${kstYesterday}) ${exhausted.length}개 캠페인이 일예산을 ${thresholdPct}% 이상 소진. 합계 ${totalCost.toLocaleString()}원 / ${totalBudget.toLocaleString()}원. 상위: ${top}.`,
+      meta: {
+        advertiserId: ctx.advertiserId,
+        date: kstYesterday,
+        thresholdPct,
+        exhaustedCount: exhausted.length,
+        totalCost,
+        totalBudget,
+        topCampaigns: exhausted.slice(0, 5).map((e) => ({
+          name: e.name,
+          cost: e.cost,
+          budget: e.budget,
+          pct: Number(e.pct.toFixed(2)),
+        })),
+      },
+      muteKey: `budget_pacing:${ctx.advertiserId}:${kstYesterday}`,
+    },
+  ]
+}

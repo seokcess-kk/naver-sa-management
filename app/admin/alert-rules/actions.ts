@@ -39,6 +39,7 @@ export type AlertRuleType =
   | "optimization_summary"
   | "suggestion_inbox"
   | "quality_stagnation"
+  | "budget_pacing"
 
 export type AlertRuleRow = {
   id: string
@@ -77,6 +78,7 @@ const alertRuleTypeSchema = z.enum([
   "optimization_summary",
   "suggestion_inbox",
   "quality_stagnation",
+  "budget_pacing",
 ])
 
 /**
@@ -183,6 +185,14 @@ const qualityStagnationParamsSchema = z
   })
   .strict()
 
+const budgetPacingParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    thresholdPct: z.number().int().min(50).max(200).optional(),
+    minCampaigns: z.number().int().min(0).max(100).optional(),
+  })
+  .strict()
+
 /** params 검증을 type 에 따라 분기. */
 function validateParams(
   type: AlertRuleType,
@@ -225,6 +235,9 @@ function validateParams(
       break
     case "quality_stagnation":
       parsed = qualityStagnationParamsSchema.safeParse(params)
+      break
+    case "budget_pacing":
+      parsed = budgetPacingParamsSchema.safeParse(params)
       break
     default:
       return { ok: false, error: `미지원 type: ${type}` }

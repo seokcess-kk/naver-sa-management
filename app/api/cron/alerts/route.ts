@@ -52,6 +52,7 @@ import {
   evaluateOptimizationSummary,
   evaluateSuggestionInbox,
   evaluateQualityStagnation,
+  evaluateBudgetPacing,
   type AlertCandidate,
   type EvalContext,
 } from "@/lib/alerts/evaluators"
@@ -263,6 +264,13 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
               threshold30d?: number
               maxCandidates?: number
             },
+          })
+          break
+        case "budget_pacing":
+          candidates = await evaluateBudgetPacing(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as { thresholdPct?: number; minCampaigns?: number },
           })
           break
         default:

@@ -36,6 +36,14 @@
     {
       "path": "/api/cron/bid-suggest",
       "schedule": "20 * * * *"
+    },
+    {
+      "path": "/api/cron/quality-monitor",
+      "schedule": "0 20 * * *"
+    },
+    {
+      "path": "/api/cron/targeting-tuner",
+      "schedule": "30 18 * * 1"
     }
   ]
 }

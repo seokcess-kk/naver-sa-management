@@ -122,6 +122,12 @@ const ALERT_TYPES: { value: AlertRuleType; label: string; description: string }[
     description:
       "Keyword.qualityScore 7/14/30일 정체 단계별 알림 (기본 4/5/6 미만)",
   },
+  {
+    value: "budget_pacing",
+    label: "어제 예산 100% 도달 (budget_pacing)",
+    description:
+      "어제(KST) 일예산 100% 이상 소진 캠페인 카운트. 광고주 단위 1일 1건 일일 요약",
+  },
 ]
 
 const DEFAULT_THRESHOLDS = [50, 80, 100]
