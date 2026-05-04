@@ -24,6 +24,7 @@ const sections: DashboardSection[] = [
   { href: "/ads", label: "소재" },
   { href: "/extensions", label: "확장소재" },
   { href: "/bidding-policies", label: "비딩 정책" },
+  { href: "/bid-inbox", label: "비딩 Inbox" },
   { href: "/targeting", label: "타게팅" },
   { href: "/marginal-utility", label: "한계효용" },
 ]
