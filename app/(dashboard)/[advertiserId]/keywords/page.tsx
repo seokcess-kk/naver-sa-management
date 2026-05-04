@@ -43,8 +43,6 @@ import {
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
-import { getStatsChunked } from "@/lib/naver-sa/stats"
-import { NaverSaError } from "@/lib/naver-sa/errors"
 import { EMPTY_METRICS, parsePeriod } from "@/lib/dashboard/metrics"
 
 type KeywordsSearchParams = CampaignScopeSearchParams & {
@@ -97,61 +95,62 @@ export default async function KeywordsPage({
     throw e
   }
 
-  // 마지막 동기화 시각 — UI 배지 표시용. 헬퍼는 read-only / 광고주 권한 검증은 위 getCurrentAdvertiser 가 담당.
-  const lastSync = await getLastSyncAt(advertiserId)
-  const keywordsLastSync = lastSync.keywords
-
-  // raw 컬럼 select 안 함. Keyword 는 advertiserId 직접 외래키 X
-  //   → adgroup.campaign.advertiserId join 으로 한정.
-  const rows = await prisma.keyword.findMany({
-    where: { adgroup: adgroupWhere },
-    select: {
-      id: true,
-      nccKeywordId: true,
-      keyword: true,
-      matchType: true,
-      bidAmt: true,
-      useGroupBidAmt: true,
-      userLock: true,
-      externalId: true, // F-3.5 CSV 내보내기 — UPDATE 행에 함께 출력 (재업로드 멱등키 보존)
-      status: true,
-      inspectStatus: true,
-      recentAvgRnk: true,
-      updatedAt: true,
-      adgroup: {
-        select: {
-          id: true,
-          name: true,
-          nccAdgroupId: true,
-          campaign: { select: { id: true, name: true } },
+  // 4개 호출 병렬 실행 (서로 독립).
+  //   - lastSync:         마지막 동기화 시각 배지
+  //   - rows:             메인 키워드 데이터 (5천행 상한)
+  //   - adgroupRows:      F-3.6 추가 모달 광고그룹 옵션
+  //   - syncCampaignRows: F-3.1 동기화 캠페인 필터
+  // raw 컬럼 select 안 함. 광고주 횡단 차단: adgroup.campaign.advertiserId join.
+  const [lastSync, rows, adgroupRows, syncCampaignRows] = await Promise.all([
+    getLastSyncAt(advertiserId),
+    prisma.keyword.findMany({
+      where: { adgroup: adgroupWhere },
+      select: {
+        id: true,
+        nccKeywordId: true,
+        keyword: true,
+        matchType: true,
+        bidAmt: true,
+        useGroupBidAmt: true,
+        userLock: true,
+        externalId: true, // F-3.5 CSV 내보내기 — UPDATE 행에 함께 출력 (재업로드 멱등키 보존)
+        status: true,
+        inspectStatus: true,
+        recentAvgRnk: true,
+        updatedAt: true,
+        adgroup: {
+          select: {
+            id: true,
+            name: true,
+            nccAdgroupId: true,
+            campaign: { select: { id: true, name: true } },
+          },
         },
       },
-    },
-    orderBy: { updatedAt: "desc" },
-    take: 5000, // F-3.1 가상 스크롤 5천 행 안전 상한
-  })
+      orderBy: { updatedAt: "desc" },
+      take: 5000, // F-3.1 가상 스크롤 5천 행 안전 상한
+    }),
+    prisma.adGroup.findMany({
+      where: {
+        ...adgroupWhere,
+        status: { not: "deleted" },
+      },
+      select: {
+        id: true,
+        nccAdgroupId: true,
+        name: true,
+        campaign: { select: { id: true, name: true } },
+      },
+      orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+    }),
+    prisma.campaign.findMany({
+      where: { advertiserId, status: { not: "deleted" } },
+      select: { id: true, name: true, nccCampaignId: true, status: true },
+      orderBy: { name: "asc" },
+    }),
+  ])
 
-  // F-3.6 키워드 추가 모달 — 광고그룹 옵션 (status='deleted' 제외, 광고주 한정).
-  //
-  // KeywordsTable 의 필터바 광고그룹 select 는 "현재 키워드 데이터 안의 광고그룹"
-  // 만 노출 (= keywords 배열에서 unique 추출) — 필터링 대상 한정 유지.
-  // 본 adgroupRows 는 그와 분리된 "추가 가능한 모든 광고그룹 목록" 으로,
-  // 키워드가 0건인 광고주에서도 키워드 추가 모달이 정상 동작하도록 별도 조회한다.
-  //
-  // 광고주 횡단 차단: where: { campaign: { advertiserId } }
-  const adgroupRows = await prisma.adGroup.findMany({
-    where: {
-      ...adgroupWhere,
-      status: { not: "deleted" },
-    },
-    select: {
-      id: true,
-      nccAdgroupId: true,
-      name: true,
-      campaign: { select: { id: true, name: true } },
-    },
-    orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
-  })
+  const keywordsLastSync = lastSync.keywords
 
   const adgroups: AdgroupOption[] = adgroupRows.map((a) => ({
     id: a.id,
@@ -160,13 +159,6 @@ export default async function KeywordsPage({
     campaign: { id: a.campaign.id, name: a.campaign.name },
   }))
 
-  // F-3.1 동기화 캠페인 필터 — 광고주 산하 캠페인 prefetch.
-  // status='deleted' 는 옵션에서 제외 (인라인 동기화 의미 없음).
-  const syncCampaignRows = await prisma.campaign.findMany({
-    where: { advertiserId, status: { not: "deleted" } },
-    select: { id: true, name: true, nccCampaignId: true, status: true },
-    orderBy: { name: "asc" },
-  })
   const syncCampaigns = syncCampaignRows.map((c) => ({
     id: c.id,
     name: c.name,
@@ -174,38 +166,7 @@ export default async function KeywordsPage({
     status: c.status as "on" | "off" | "deleted",
   }))
 
-  // 키워드별 stats 조회 — ads/page.tsx 와 동일 패턴.
-  // graceful degrade — 실패 시 metrics 0 + statsError 안내.
-  const nccKeywordIds = rows.map((k) => k.nccKeywordId)
-  const metricsMap = new Map<
-    string,
-    { impCnt: number; clkCnt: number; ctr: number; cpc: number; salesAmt: number }
-  >()
-  let statsError: string | null = null
-  if (advertiser.hasKeys && nccKeywordIds.length > 0) {
-    try {
-      const statsRows = await getStatsChunked(advertiser.customerId, {
-        ids: nccKeywordIds,
-        fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
-        datePreset: period,
-      })
-      for (const r of statsRows) {
-        if (typeof r.id !== "string") continue
-        metricsMap.set(r.id, {
-          impCnt: typeof r.impCnt === "number" ? r.impCnt : 0,
-          clkCnt: typeof r.clkCnt === "number" ? r.clkCnt : 0,
-          ctr: typeof r.ctr === "number" ? r.ctr : 0,
-          cpc: typeof r.cpc === "number" ? r.cpc : 0,
-          salesAmt: typeof r.salesAmt === "number" ? r.salesAmt : 0,
-        })
-      }
-    } catch (e) {
-      statsError =
-        e instanceof NaverSaError ? e.message : e instanceof Error ? e.message : "알 수 없는 오류"
-      console.warn("[keywords/page] getStatsChunked failed:", e)
-    }
-  }
-
+  // stats 호출은 RSC 에서 제외 — 클라이언트(KeywordsTable) 가 useEffect 로 fetchKeywordsStats 호출 (streaming).
   // Decimal / Date → JSON-friendly 직렬화. KeywordRow shape 으로 매핑.
   const keywords: KeywordRow[] = rows.map((k) => ({
     id: k.id,
@@ -230,7 +191,7 @@ export default async function KeywordsPage({
         name: k.adgroup.campaign.name,
       },
     },
-    metrics: metricsMap.get(k.nccKeywordId) ?? EMPTY_METRICS,
+    metrics: EMPTY_METRICS,
   }))
 
   return (
@@ -273,7 +234,6 @@ export default async function KeywordsPage({
         adgroups={adgroups}
         userRole={userRole}
         period={period}
-        statsError={statsError}
       />
     </div>
   )

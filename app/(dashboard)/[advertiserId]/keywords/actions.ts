@@ -60,6 +60,8 @@ import {
   type KeywordCreateItem,
 } from "@/lib/naver-sa/keywords"
 import { NaverSaError } from "@/lib/naver-sa/errors"
+import { getStatsChunked } from "@/lib/naver-sa/stats"
+import type { AdMetrics, AdsPeriod } from "@/lib/dashboard/metrics"
 import type {
   KeywordStatus,
   InspectStatus,
@@ -2934,4 +2936,68 @@ export async function deleteKeywordSingle(
     return { ok: false, error: errorMsg ?? "삭제 실패" }
   }
   return { ok: true, batchId: batch.id, nccKeywordId: dbKeyword.nccKeywordId }
+}
+
+// =============================================================================
+// fetchKeywordsStats — client streaming (Suspense 대안)
+// =============================================================================
+
+/**
+ * 키워드별 stats 조회 (광고주 단위 batch).
+ *
+ * 호출 패턴 / 권한 / 캐시는 fetchAdsStats 와 동일.
+ *   - page.tsx 가 stats 호출 X → 즉시 화면 표시
+ *   - KeywordsTable client useEffect 가 본 액션 호출 → metric 셀 점진 채움
+ *   - getStatsChunked 자체 캐시 (오늘 5분 / 과거 1시간)
+ */
+export type FetchKeywordsStatsResult =
+  | { ok: true; metrics: Array<{ id: string } & AdMetrics> }
+  | { ok: false; error: string }
+
+export async function fetchKeywordsStats(
+  advertiserId: string,
+  period: AdsPeriod,
+): Promise<FetchKeywordsStatsResult> {
+  const { advertiser } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    return { ok: false, error: "API 키/시크릿 미입력" }
+  }
+
+  const keywordRows = await prisma.keyword.findMany({
+    where: { adgroup: { campaign: { advertiserId } } },
+    select: { nccKeywordId: true },
+    take: 5000,
+  })
+  const ids = keywordRows.map((k) => k.nccKeywordId)
+  if (ids.length === 0) return { ok: true, metrics: [] }
+
+  try {
+    const statsRows = await getStatsChunked(advertiser.customerId, {
+      ids,
+      fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
+      datePreset: period,
+    })
+    const out: Array<{ id: string } & AdMetrics> = []
+    for (const r of statsRows) {
+      if (typeof r.id !== "string") continue
+      out.push({
+        id: r.id,
+        impCnt: typeof r.impCnt === "number" ? r.impCnt : 0,
+        clkCnt: typeof r.clkCnt === "number" ? r.clkCnt : 0,
+        ctr: typeof r.ctr === "number" ? r.ctr : 0,
+        cpc: typeof r.cpc === "number" ? r.cpc : 0,
+        salesAmt: typeof r.salesAmt === "number" ? r.salesAmt : 0,
+      })
+    }
+    return { ok: true, metrics: out }
+  } catch (e) {
+    const error =
+      e instanceof NaverSaError
+        ? e.message
+        : e instanceof Error
+          ? e.message
+          : "알 수 없는 오류"
+    console.warn("[fetchKeywordsStats] failed:", e)
+    return { ok: false, error }
+  }
 }

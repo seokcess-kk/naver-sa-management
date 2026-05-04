@@ -63,6 +63,8 @@ import { NaverSaError } from "@/lib/naver-sa/errors"
 import type { AdStatus, InspectStatus } from "@/lib/generated/prisma/client"
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 import { buildAdFields, extractAdType } from "@/lib/sync/ad-fields"
+import { getStatsChunked } from "@/lib/naver-sa/stats"
+import type { AdMetrics, AdsPeriod } from "@/lib/dashboard/metrics"
 
 // =============================================================================
 // 1. syncAds — NAVER → DB upsert
@@ -1200,3 +1202,79 @@ export async function createAdsBatch(
     items: resultItems,
   }
 }
+
+// =============================================================================
+// 5. fetchAdsStats — 페이지 진입 후 client streaming 으로 호출 (Suspense 대안)
+// =============================================================================
+
+/**
+ * 소재별 stats 조회 (광고주 단위 batch).
+ *
+ * 호출 패턴:
+ *   page.tsx 가 stats 호출 X → 즉시 RSC 응답 → 사용자가 페이지 빠르게 봄.
+ *   AdsTable 마운트 후 useEffect 가 본 액션 호출 → metric 셀이 점진 채워짐.
+ *
+ * 권한:
+ *   - getCurrentAdvertiser (admin / 화이트리스트 검증)
+ *   - 광고주 한정 nccAdId 만 stats id 로 사용 (광고주 횡단 차단)
+ *
+ * 캐시:
+ *   - getStatsChunked 가 자체 처리 (오늘 5분 / 과거 1시간)
+ *   - 동일 광고주 + period 재호출 시 cache hit
+ */
+export type FetchAdsStatsResult =
+  | { ok: true; metrics: Array<{ id: string } & AdMetrics> }
+  | { ok: false; error: string }
+
+export async function fetchAdsStats(
+  advertiserId: string,
+  period: AdsPeriod,
+): Promise<FetchAdsStatsResult> {
+  const { advertiser } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    return { ok: false, error: "API 키/시크릿 미입력" }
+  }
+
+  // 광고주 한정 nccAdId 조회 (campaign join). 광고주 횡단 차단.
+  // status='deleted' 도 포함 — 사용자가 deleted 행도 stats 비교할 수 있어야 함.
+  const adRows = await prisma.ad.findMany({
+    where: { adgroup: { campaign: { advertiserId } } },
+    select: { nccAdId: true },
+    take: 5000,
+  })
+  const ids = adRows.map((a) => a.nccAdId)
+
+  if (ids.length === 0) return { ok: true, metrics: [] }
+
+  try {
+    const statsRows = await getStatsChunked(advertiser.customerId, {
+      ids,
+      fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
+      datePreset: period,
+    })
+
+    const out: Array<{ id: string } & AdMetrics> = []
+    for (const r of statsRows) {
+      if (typeof r.id !== "string") continue
+      out.push({
+        id: r.id,
+        impCnt: typeof r.impCnt === "number" ? r.impCnt : 0,
+        clkCnt: typeof r.clkCnt === "number" ? r.clkCnt : 0,
+        ctr: typeof r.ctr === "number" ? r.ctr : 0,
+        cpc: typeof r.cpc === "number" ? r.cpc : 0,
+        salesAmt: typeof r.salesAmt === "number" ? r.salesAmt : 0,
+      })
+    }
+    return { ok: true, metrics: out }
+  } catch (e) {
+    const error =
+      e instanceof NaverSaError
+        ? e.message
+        : e instanceof Error
+          ? e.message
+          : "알 수 없는 오류"
+    console.warn("[fetchAdsStats] failed:", e)
+    return { ok: false, error }
+  }
+}
+

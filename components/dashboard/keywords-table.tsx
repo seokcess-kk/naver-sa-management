@@ -142,6 +142,7 @@ import {
 import {
   bulkActionKeywords,
   bulkUpdateKeywords,
+  fetchKeywordsStats,
   previewBulkAction,
   type BulkActionKeywordsInput,
 } from "@/app/(dashboard)/[advertiserId]/keywords/actions"
@@ -1125,7 +1126,6 @@ export function KeywordsTable({
   adgroups,
   userRole,
   period,
-  statsError,
 }: {
   advertiserId: string
   hasKeys: boolean
@@ -1136,8 +1136,6 @@ export function KeywordsTable({
   userRole: "admin" | "operator" | "viewer"
   /** RSC 가 searchParams.period 파싱 후 전달 (lib/dashboard/metrics). */
   period: AdsPeriod
-  /** stats 호출 실패 시 안내 (toolbar 우측 칩) */
-  statsError: string | null
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -1160,6 +1158,62 @@ export function KeywordsTable({
     },
     [router, pathname, searchParams],
   )
+
+  // -- stats streaming (페이지 진입 후 client useEffect 가 fetchKeywordsStats 호출) -----
+  // 초기엔 metrics: EMPTY_METRICS → 페이지 즉시 표시 → stats 도착 시 keywords 갱신.
+  // staging 로직은 keywordsWithMetrics 를 base 로 사용 (data 일관성).
+  const [keywordsWithMetrics, setKeywordsWithMetrics] = React.useState<KeywordRow[]>(keywords)
+  const [statsLoading, setStatsLoading] = React.useState(true)
+  const [statsError, setStatsError] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    let cancelled = false
+    setStatsLoading(true)
+    setStatsError(null)
+    setKeywordsWithMetrics(keywords)
+
+    if (!hasKeys || keywords.length === 0) {
+      setStatsLoading(false)
+      return
+    }
+
+    fetchKeywordsStats(advertiserId, period)
+      .then((res) => {
+        if (cancelled) return
+        if (res.ok) {
+          const map = new Map(res.metrics.map((m) => [m.id, m]))
+          setKeywordsWithMetrics(
+            keywords.map((k) => {
+              const m = map.get(k.nccKeywordId)
+              return m
+                ? {
+                    ...k,
+                    metrics: {
+                      impCnt: m.impCnt,
+                      clkCnt: m.clkCnt,
+                      ctr: m.ctr,
+                      cpc: m.cpc,
+                      salesAmt: m.salesAmt,
+                    },
+                  }
+                : k
+            }),
+          )
+        } else {
+          setStatsError(res.error)
+        }
+        setStatsLoading(false)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setStatsError(err instanceof Error ? err.message : "stats 조회 실패")
+        setStatsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [advertiserId, period, hasKeys, keywords])
 
   // -- staging state (F-3.2 인라인 편집) --------------------------------------
   const [staging, setStaging] = React.useState<StagingMap>(() => new Map())
@@ -1327,7 +1381,7 @@ export function KeywordsTable({
   ])
 
   const table = useReactTable<KeywordRow>({
-    data: keywords,
+    data: keywordsWithMetrics,
     columns,
     state: { sorting, columnFilters, rowSelection },
     onSortingChange: setSorting,
@@ -1382,20 +1436,20 @@ export function KeywordsTable({
   // -- staging 적용된 row 배열 (모달 / 미리보기) -----------------------------
   const stagingRows = React.useMemo(() => {
     if (staging.size === 0) return []
-    const byId = new Map(keywords.map((k) => [k.id, k]))
+    const byId = new Map(keywordsWithMetrics.map((k) => [k.id, k]))
     const result: KeywordRow[] = []
     for (const id of staging.keys()) {
       const r = byId.get(id)
       if (r) result.push(r)
     }
     return result
-  }, [keywords, staging])
+  }, [keywordsWithMetrics, staging])
 
   // -- F-3.3 다중 선택 + 일괄 액션 ------------------------------------------
   // 선택된 row (필터 후 가시여부 무관, rowSelection 키 기준 — 사용자가 명시 선택).
   const selectedRows = React.useMemo(() => {
     if (Object.keys(rowSelection).length === 0) return []
-    const byId = new Map(keywords.map((k) => [k.id, k]))
+    const byId = new Map(keywordsWithMetrics.map((k) => [k.id, k]))
     const out: KeywordRow[] = []
     for (const id of Object.keys(rowSelection)) {
       if (rowSelection[id] !== true) continue
@@ -1403,7 +1457,7 @@ export function KeywordsTable({
       if (r) out.push(r)
     }
     return out
-  }, [keywords, rowSelection])
+  }, [keywordsWithMetrics, rowSelection])
 
   const selectedCount = selectedRows.length
   const overSelectionLimit = selectedCount > BULK_ACTION_MAX
@@ -1741,7 +1795,12 @@ export function KeywordsTable({
               <SelectItem value="last30days">지난 30일</SelectItem>
             </SelectContent>
           </Select>
-          {statsError ? (
+          {statsLoading ? (
+            <span className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
+              <span className="size-2 animate-pulse rounded-full bg-foreground/40" />
+              지표 불러오는 중...
+            </span>
+          ) : statsError ? (
             <span
               className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900"
               title={statsError}

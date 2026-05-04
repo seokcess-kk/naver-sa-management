@@ -111,6 +111,7 @@ import {
 } from "@/components/forms/bulk-action-modal"
 import {
   bulkActionAds,
+  fetchAdsStats,
   type BulkActionAdsInput,
 } from "@/app/(dashboard)/[advertiserId]/ads/actions"
 import { cn } from "@/lib/utils"
@@ -796,7 +797,6 @@ export function AdsTable({
   adgroups,
   userRole,
   period,
-  statsError,
 }: {
   advertiserId: string
   hasKeys: boolean
@@ -807,8 +807,6 @@ export function AdsTable({
   userRole: "admin" | "operator" | "viewer"
   /** RSC 가 searchParams.period 파싱 후 전달. */
   period: AdsPeriod
-  /** stats 호출 실패 시 안내 (toolbar 우측 칩) */
-  statsError: string | null
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -845,6 +843,59 @@ export function AdsTable({
     Record<string, boolean>
   >({})
   const [bulkAction, setBulkAction] = React.useState<BulkAction | null>(null)
+
+  // -- stats streaming (페이지 진입 후 client useEffect 가 fetchAdsStats 호출) -----
+  // 초기엔 metrics: EMPTY_METRICS → 페이지 즉시 표시 → stats 도착 시 ads 갱신.
+  // ads(props) 변경 시 (router.refresh / period 변경) 재요청.
+  const [adsWithMetrics, setAdsWithMetrics] = React.useState<AdRow[]>(ads)
+  const [statsLoading, setStatsLoading] = React.useState(true)
+  const [statsError, setStatsError] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    let cancelled = false
+    setStatsLoading(true)
+    setStatsError(null)
+    setAdsWithMetrics(ads)
+
+    if (!hasKeys || ads.length === 0) {
+      setStatsLoading(false)
+      return
+    }
+
+    fetchAdsStats(advertiserId, period)
+      .then((res) => {
+        if (cancelled) return
+        if (res.ok) {
+          const map = new Map(res.metrics.map((m) => [m.id, m]))
+          setAdsWithMetrics(
+            ads.map((a) => ({
+              ...a,
+              metrics: map.get(a.nccAdId)
+                ? {
+                    impCnt: map.get(a.nccAdId)!.impCnt,
+                    clkCnt: map.get(a.nccAdId)!.clkCnt,
+                    ctr: map.get(a.nccAdId)!.ctr,
+                    cpc: map.get(a.nccAdId)!.cpc,
+                    salesAmt: map.get(a.nccAdId)!.salesAmt,
+                  }
+                : a.metrics,
+            })),
+          )
+        } else {
+          setStatsError(res.error)
+        }
+        setStatsLoading(false)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setStatsError(err instanceof Error ? err.message : "stats 조회 실패")
+        setStatsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [advertiserId, period, hasKeys, ads])
 
   const onRequestDelete = React.useCallback((row: AdRow) => {
     setDeleteRow(row)
@@ -943,7 +994,7 @@ export function AdsTable({
   ])
 
   const table = useReactTable<AdRow>({
-    data: ads,
+    data: adsWithMetrics,
     columns,
     state: { sorting, columnFilters, rowSelection },
     onSortingChange: setSorting,
@@ -992,7 +1043,7 @@ export function AdsTable({
   // -- F-4.3 다중 선택 + 일괄 액션 ------------------------------------------
   const selectedRows = React.useMemo(() => {
     if (Object.keys(rowSelection).length === 0) return []
-    const byId = new Map(ads.map((a) => [a.id, a]))
+    const byId = new Map(adsWithMetrics.map((a) => [a.id, a]))
     const out: AdRow[] = []
     for (const id of Object.keys(rowSelection)) {
       if (rowSelection[id] !== true) continue
@@ -1000,7 +1051,7 @@ export function AdsTable({
       if (r) out.push(r)
     }
     return out
-  }, [ads, rowSelection])
+  }, [adsWithMetrics, rowSelection])
 
   const selectedCount = selectedRows.length
   const overSelectionLimit = selectedCount > BULK_ACTION_MAX
@@ -1217,7 +1268,12 @@ export function AdsTable({
               <SelectItem value="last30days">지난 30일</SelectItem>
             </SelectContent>
           </Select>
-          {statsError ? (
+          {statsLoading ? (
+            <span className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
+              <span className="size-2 animate-pulse rounded-full bg-foreground/40" />
+              지표 불러오는 중...
+            </span>
+          ) : statsError ? (
             <span
               className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900"
               title={statsError}

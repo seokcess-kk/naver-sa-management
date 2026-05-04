@@ -114,6 +114,7 @@ import {
 } from "@/components/forms/bulk-action-modal"
 import {
   bulkActionAdExtensions,
+  fetchExtensionsStats,
   type BulkActionAdExtensionsInput,
 } from "@/app/(dashboard)/[advertiserId]/extensions/actions"
 import { cn } from "@/lib/utils"
@@ -636,7 +637,6 @@ export function ExtensionsTable({
   adgroups,
   userRole,
   period,
-  statsError,
 }: {
   advertiserId: string
   hasKeys: boolean
@@ -646,8 +646,6 @@ export function ExtensionsTable({
   userRole: "admin" | "operator" | "viewer"
   /** RSC 가 searchParams.period 파싱 후 전달 (lib/dashboard/metrics). */
   period: AdsPeriod
-  /** stats 호출 실패 시 안내 (toolbar 우측 칩) */
-  statsError: string | null
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -682,6 +680,61 @@ export function ExtensionsTable({
     Record<string, boolean>
   >({})
   const [bulkAction, setBulkAction] = React.useState<BulkAction | null>(null)
+
+  // -- stats streaming (페이지 진입 후 client useEffect 가 fetchExtensionsStats 호출) -----
+  // SA Stats 가 nccExtId 단위 미지원일 가능성 큼 → 응답 매칭 없으면 metrics 0 유지 (graceful).
+  const [extensionsWithMetrics, setExtensionsWithMetrics] = React.useState<ExtensionRow[]>(extensions)
+  const [statsLoading, setStatsLoading] = React.useState(true)
+  const [statsError, setStatsError] = React.useState<string | null>(null)
+
+  React.useEffect(() => {
+    let cancelled = false
+    setStatsLoading(true)
+    setStatsError(null)
+    setExtensionsWithMetrics(extensions)
+
+    if (!hasKeys || extensions.length === 0) {
+      setStatsLoading(false)
+      return
+    }
+
+    fetchExtensionsStats(advertiserId, period)
+      .then((res) => {
+        if (cancelled) return
+        if (res.ok) {
+          const map = new Map(res.metrics.map((m) => [m.id, m]))
+          setExtensionsWithMetrics(
+            extensions.map((e) => {
+              const m = map.get(e.nccExtId)
+              return m
+                ? {
+                    ...e,
+                    metrics: {
+                      impCnt: m.impCnt,
+                      clkCnt: m.clkCnt,
+                      ctr: m.ctr,
+                      cpc: m.cpc,
+                      salesAmt: m.salesAmt,
+                    },
+                  }
+                : e
+            }),
+          )
+        } else {
+          setStatsError(res.error)
+        }
+        setStatsLoading(false)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        setStatsError(err instanceof Error ? err.message : "stats 조회 실패")
+        setStatsLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [advertiserId, period, hasKeys, extensions])
 
   const onRequestDelete = React.useCallback((row: ExtensionRow) => {
     setDeleteRow(row)
@@ -771,7 +824,7 @@ export function ExtensionsTable({
   ])
 
   const table = useReactTable<ExtensionRow>({
-    data: extensions,
+    data: extensionsWithMetrics,
     columns,
     state: { sorting, columnFilters, rowSelection },
     onSortingChange: setSorting,
@@ -820,7 +873,7 @@ export function ExtensionsTable({
   // -- 다중 선택 + 일괄 액션 -------------------------------------------------
   const selectedRows = React.useMemo(() => {
     if (Object.keys(rowSelection).length === 0) return []
-    const byId = new Map(extensions.map((e) => [e.id, e]))
+    const byId = new Map(extensionsWithMetrics.map((e) => [e.id, e]))
     const out: ExtensionRow[] = []
     for (const id of Object.keys(rowSelection)) {
       if (rowSelection[id] !== true) continue
@@ -828,7 +881,7 @@ export function ExtensionsTable({
       if (r) out.push(r)
     }
     return out
-  }, [extensions, rowSelection])
+  }, [extensionsWithMetrics, rowSelection])
 
   const selectedCount = selectedRows.length
   const overSelectionLimit = selectedCount > BULK_ACTION_MAX
@@ -1066,7 +1119,12 @@ export function ExtensionsTable({
               <SelectItem value="last30days">지난 30일</SelectItem>
             </SelectContent>
           </Select>
-          {statsError ? (
+          {statsLoading ? (
+            <span className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
+              <span className="size-2 animate-pulse rounded-full bg-foreground/40" />
+              지표 불러오는 중...
+            </span>
+          ) : statsError ? (
             <span
               className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900"
               title={statsError}

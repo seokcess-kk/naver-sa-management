@@ -47,8 +47,6 @@ import {
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
-import { getStatsChunked } from "@/lib/naver-sa/stats"
-import { NaverSaError } from "@/lib/naver-sa/errors"
 import { EMPTY_METRICS, parsePeriod } from "@/lib/dashboard/metrics"
 
 type ExtensionsSearchParams = CampaignScopeSearchParams & {
@@ -101,52 +99,59 @@ export default async function ExtensionsPage({
     throw e
   }
 
-  // raw 컬럼 select 안 함. ownerType=adgroup 한정 + adgroup.campaign.advertiserId join.
-  // type 화이트리스트는 P1 3종 (headline / description / image — F-5.3 추가).
-  const rows = await prisma.adExtension.findMany({
-    where: {
-      ownerType: "adgroup",
-      adgroup: adgroupWhere,
-      type: { in: ["headline", "description", "image"] },
-    },
-    select: {
-      id: true,
-      nccExtId: true,
-      ownerId: true,
-      type: true,
-      payload: true,
-      inspectStatus: true,
-      inspectMemo: true,
-      status: true,
-      updatedAt: true,
-      adgroup: {
-        select: {
-          id: true,
-          name: true,
-          nccAdgroupId: true,
-          campaign: { select: { id: true, name: true } },
+  // 3개 prisma 쿼리 병렬 실행 (서로 독립).
+  //   - rows:             메인 확장소재 데이터 (ownerType=adgroup, P1 3종)
+  //   - adgroupRows:      F-5.4 추가 모달 광고그룹 옵션
+  //   - syncCampaignRows: F-5.1/F-5.2 동기화 캠페인 필터
+  // raw 컬럼 select 안 함. 광고주 횡단 차단: adgroup.campaign.advertiserId join.
+  const [rows, adgroupRows, syncCampaignRows] = await Promise.all([
+    prisma.adExtension.findMany({
+      where: {
+        ownerType: "adgroup",
+        adgroup: adgroupWhere,
+        type: { in: ["headline", "description", "image"] },
+      },
+      select: {
+        id: true,
+        nccExtId: true,
+        ownerId: true,
+        type: true,
+        payload: true,
+        inspectStatus: true,
+        inspectMemo: true,
+        status: true,
+        updatedAt: true,
+        adgroup: {
+          select: {
+            id: true,
+            name: true,
+            nccAdgroupId: true,
+            campaign: { select: { id: true, name: true } },
+          },
         },
       },
-    },
-    orderBy: { updatedAt: "desc" },
-    take: 5000, // F-5.x 가상 스크롤 5천 행 안전 상한
-  })
-
-  // F-5.4 추가 모달 — 광고그룹 옵션 (status='deleted' 제외, 광고주 한정).
-  // 광고주 횡단 차단: where: { campaign: { advertiserId } }
-  const adgroupRows = await prisma.adGroup.findMany({
-    where: {
-      ...adgroupWhere,
-      status: { not: "deleted" },
-    },
-    select: {
-      id: true,
-      nccAdgroupId: true,
-      name: true,
-      campaign: { select: { id: true, name: true } },
-    },
-    orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
-  })
+      orderBy: { updatedAt: "desc" },
+      take: 5000, // F-5.x 가상 스크롤 5천 행 안전 상한
+    }),
+    prisma.adGroup.findMany({
+      where: {
+        ...adgroupWhere,
+        status: { not: "deleted" },
+      },
+      select: {
+        id: true,
+        nccAdgroupId: true,
+        name: true,
+        campaign: { select: { id: true, name: true } },
+      },
+      orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+    }),
+    prisma.campaign.findMany({
+      where: { advertiserId, status: { not: "deleted" } },
+      select: { id: true, name: true, nccCampaignId: true, status: true },
+      orderBy: { name: "asc" },
+    }),
+  ])
 
   const adgroups: ExtensionAdgroupOption[] = adgroupRows.map((a) => ({
     id: a.id,
@@ -155,54 +160,14 @@ export default async function ExtensionsPage({
     campaign: { id: a.campaign.id, name: a.campaign.name },
   }))
 
-  // F-5.1 / F-5.2 동기화 캠페인 필터 — 광고주 산하 캠페인 prefetch.
-  // status='deleted' 는 옵션에서 제외 (인라인 동기화 의미 없음).
-  const syncCampaignRows = await prisma.campaign.findMany({
-    where: { advertiserId, status: { not: "deleted" } },
-    select: { id: true, name: true, nccCampaignId: true, status: true },
-    orderBy: { name: "asc" },
-  })
   const syncCampaigns = syncCampaignRows.map((c) => ({
     id: c.id,
     name: c.name,
     nccCampaignId: c.nccCampaignId,
-    // status 는 prisma enum (on/off/deleted). 컴포넌트와 동일 union.
     status: c.status as "on" | "off" | "deleted",
   }))
 
-  // 확장소재별 stats 조회 — ads/keywords 와 동일 패턴.
-  // 단, 네이버 SA Stats 가 nccExtId 단위 조회 미지원일 가능성:
-  //   호출 자체는 성공해도 응답에 매칭 row 없음 → metrics 모두 0 으로 표시 (graceful).
-  //   응답 자체가 400 / 검증 실패면 statsError 노출.
-  const nccExtIds = rows.map((e) => e.nccExtId)
-  const metricsMap = new Map<
-    string,
-    { impCnt: number; clkCnt: number; ctr: number; cpc: number; salesAmt: number }
-  >()
-  let statsError: string | null = null
-  if (advertiser.hasKeys && nccExtIds.length > 0) {
-    try {
-      const statsRows = await getStatsChunked(advertiser.customerId, {
-        ids: nccExtIds,
-        fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
-        datePreset: period,
-      })
-      for (const r of statsRows) {
-        if (typeof r.id !== "string") continue
-        metricsMap.set(r.id, {
-          impCnt: typeof r.impCnt === "number" ? r.impCnt : 0,
-          clkCnt: typeof r.clkCnt === "number" ? r.clkCnt : 0,
-          ctr: typeof r.ctr === "number" ? r.ctr : 0,
-          cpc: typeof r.cpc === "number" ? r.cpc : 0,
-          salesAmt: typeof r.salesAmt === "number" ? r.salesAmt : 0,
-        })
-      }
-    } catch (e) {
-      statsError =
-        e instanceof NaverSaError ? e.message : e instanceof Error ? e.message : "알 수 없는 오류"
-      console.warn("[extensions/page] getStatsChunked failed:", e)
-    }
-  }
+  // stats 호출은 RSC 에서 제외 — 클라이언트(ExtensionsTable) 가 useEffect 로 fetchExtensionsStats 호출 (streaming).
 
   // RSC → 클라이언트 직렬화. Date → ISO 문자열. ExtensionRow shape 매핑.
   // adgroup 은 항상 동반 (where 에서 ownerType=adgroup + adgroup join 필수 통과).
@@ -228,7 +193,7 @@ export default async function ExtensionsPage({
           name: e.adgroup!.campaign.name,
         },
       },
-      metrics: metricsMap.get(e.nccExtId) ?? EMPTY_METRICS,
+      metrics: EMPTY_METRICS,
     }))
 
   return (
@@ -268,7 +233,6 @@ export default async function ExtensionsPage({
         adgroups={adgroups}
         userRole={userRole}
         period={period}
-        statsError={statsError}
       />
     </div>
   )

@@ -68,6 +68,8 @@ import {
   type AdExtensionType as SaAdExtensionType,
 } from "@/lib/naver-sa/ad-extensions"
 import { NaverSaError, NaverSaValidationError } from "@/lib/naver-sa/errors"
+import { getStatsChunked } from "@/lib/naver-sa/stats"
+import type { AdMetrics, AdsPeriod } from "@/lib/dashboard/metrics"
 import type {
   AdExtensionStatus,
   AdExtensionType,
@@ -1678,5 +1680,71 @@ export async function uploadImage(
     storagePath,
     publicUrl: pubData.publicUrl,
     size: buffer.length,
+  }
+}
+
+// =============================================================================
+// fetchExtensionsStats — client streaming (Suspense 대안)
+// =============================================================================
+
+/**
+ * 확장소재별 stats 조회 (광고주 단위 batch).
+ *
+ * 주의: 네이버 SA Stats 가 nccExtId 단위 미지원일 가능성. 호출 자체는 통과해도
+ *       응답 매칭 row 가 없어 모든 metrics 가 0 일 수 있음 (graceful).
+ */
+export type FetchExtensionsStatsResult =
+  | { ok: true; metrics: Array<{ id: string } & AdMetrics> }
+  | { ok: false; error: string }
+
+export async function fetchExtensionsStats(
+  advertiserId: string,
+  period: AdsPeriod,
+): Promise<FetchExtensionsStatsResult> {
+  const { advertiser } = await getCurrentAdvertiser(advertiserId)
+  if (!advertiser.hasKeys) {
+    return { ok: false, error: "API 키/시크릿 미입력" }
+  }
+
+  const extRows = await prisma.adExtension.findMany({
+    where: {
+      ownerType: "adgroup",
+      adgroup: { campaign: { advertiserId } },
+      type: { in: ["headline", "description", "image"] },
+    },
+    select: { nccExtId: true },
+    take: 5000,
+  })
+  const ids = extRows.map((e) => e.nccExtId)
+  if (ids.length === 0) return { ok: true, metrics: [] }
+
+  try {
+    const statsRows = await getStatsChunked(advertiser.customerId, {
+      ids,
+      fields: ["impCnt", "clkCnt", "ctr", "cpc", "salesAmt"],
+      datePreset: period,
+    })
+    const out: Array<{ id: string } & AdMetrics> = []
+    for (const r of statsRows) {
+      if (typeof r.id !== "string") continue
+      out.push({
+        id: r.id,
+        impCnt: typeof r.impCnt === "number" ? r.impCnt : 0,
+        clkCnt: typeof r.clkCnt === "number" ? r.clkCnt : 0,
+        ctr: typeof r.ctr === "number" ? r.ctr : 0,
+        cpc: typeof r.cpc === "number" ? r.cpc : 0,
+        salesAmt: typeof r.salesAmt === "number" ? r.salesAmt : 0,
+      })
+    }
+    return { ok: true, metrics: out }
+  } catch (e) {
+    const error =
+      e instanceof NaverSaError
+        ? e.message
+        : e instanceof Error
+          ? e.message
+          : "알 수 없는 오류"
+    console.warn("[fetchExtensionsStats] failed:", e)
+    return { ok: false, error }
   }
 }
