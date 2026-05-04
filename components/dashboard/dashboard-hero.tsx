@@ -6,16 +6,16 @@
  * 책임:
  *   - 좌: 광고주명 + cid (작게)
  *   - 중: 비즈머니 + 잠금 상태 (인라인)
- *   - 우: API 키 미설정 배지(있을 때) + 마지막 동기화 배지 + 글로벌 새로고침 버튼
+ *   - 우: API 키 미설정 배지(있을 때) + 구조 데이터 동기화 상태 + 글로벌 새로고침 버튼
  *
  * 새로고침 버튼:
  *   - router.refresh() 만 호출 → RSC 전체 재호출 → KPI / 차트 / TOP / 비즈머니 모두 갱신.
  *   - 별도 Server Action 호출 X (단순화).
  *   - useTransition pending 으로 RSC 재구성 중 spinner 표시.
  *
- * lastSyncAt 표시:
- *   - 5종(campaigns/adgroups/keywords/ads/extensions) 중 가장 오래된 시각을 채택.
- *   - 1개라도 누락이면 "동기화 이력 없음" 표시(LastSyncBadge 분기).
+ * 구조 데이터 동기화 표시:
+ *   - 헤더는 5종(campaigns/adgroups/keywords/ads/extensions) 중 가장 오래된 시각을 요약.
+ *   - 드롭다운에서 5종 동기화 시간을 모두 표시해 "화면 새로고침" 과 "구조 동기화" 를 분리.
  *
  * 비즈머니:
  *   - initialConnection.ok 일 때만 잔액 + 잠금 노출.
@@ -33,10 +33,17 @@ import {
   BanknoteIcon,
   LockIcon,
   AlertCircleIcon,
+  ClockIcon,
+  ChevronDownIcon,
+  AlertTriangleIcon,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
-import { LastSyncBadge } from "@/components/dashboard/last-sync-badge"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import type { CheckConnectionResult } from "@/app/(dashboard)/[advertiserId]/actions"
 
@@ -56,12 +63,20 @@ export type DashboardHeroProps = {
 }
 
 const SYNC_KINDS = [
-  "campaigns",
-  "adgroups",
-  "keywords",
-  "ads",
-  "extensions",
+  { kind: "campaigns", label: "캠페인" },
+  { kind: "adgroups", label: "광고그룹" },
+  { kind: "keywords", label: "키워드" },
+  { kind: "ads", label: "소재" },
+  { kind: "extensions", label: "확장소재" },
 ] as const
+
+type SyncTone = "none" | "fresh" | "warn" | "danger"
+
+type SyncDisplay = {
+  tone: SyncTone
+  label: string
+  title?: string
+}
 
 /**
  * 5종 sync kind 중 가장 오래된 ISO 반환.
@@ -73,7 +88,7 @@ function pickOldestSync(map: Record<string, string>): string | undefined {
   let oldestTs: number | null = null
   let oldestIso: string | undefined
   for (const k of SYNC_KINDS) {
-    const iso = map[k]
+    const iso = map[k.kind]
     if (!iso) continue
     const t = Date.parse(iso)
     if (Number.isNaN(t)) continue
@@ -83,6 +98,138 @@ function pickOldestSync(map: Record<string, string>): string | undefined {
     }
   }
   return oldestIso
+}
+
+function formatSyncDisplay(
+  syncedAt: string | undefined,
+  now: number,
+  staleMinutes = 60,
+): SyncDisplay {
+  if (!syncedAt) {
+    return { tone: "none", label: "이력 없음" }
+  }
+
+  const ts = Date.parse(syncedAt)
+  if (Number.isNaN(ts)) {
+    return { tone: "none", label: "시각 알 수 없음" }
+  }
+
+  const diffMin = Math.floor((now - ts) / 60_000)
+  const rtf = new Intl.RelativeTimeFormat("ko", { numeric: "auto" })
+  const title = new Date(ts).toLocaleString("ko-KR")
+
+  if (diffMin < 1) {
+    return { tone: "fresh", label: "방금 전", title }
+  }
+
+  if (diffMin < 60) {
+    return {
+      tone: "fresh",
+      label: rtf.format(-diffMin, "minute"),
+      title,
+    }
+  }
+
+  if (diffMin < 24 * 60) {
+    const tone: SyncTone = diffMin >= staleMinutes ? "warn" : "fresh"
+    return {
+      tone,
+      label: rtf.format(-Math.floor(diffMin / 60), "hour"),
+      title,
+    }
+  }
+
+  return {
+    tone: "danger",
+    label: rtf.format(-Math.floor(diffMin / (24 * 60)), "day"),
+    title,
+  }
+}
+
+const SYNC_TONE_STYLES: Record<SyncTone, string> = {
+  none: "text-muted-foreground",
+  fresh: "text-muted-foreground",
+  warn: "text-amber-700 dark:text-amber-400",
+  danger: "text-destructive",
+}
+
+function StructureSyncStatus({
+  lastSyncAt,
+}: {
+  lastSyncAt: Record<string, string>
+}) {
+  const [now, setNow] = React.useState<number>(() => Date.now())
+
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      setNow(Date.now())
+    }, 60_000)
+    return () => clearInterval(id)
+  }, [])
+
+  const oldestSyncIso = pickOldestSync(lastSyncAt)
+  const summary = formatSyncDisplay(oldestSyncIso, now)
+  const SummaryIcon =
+    summary.tone === "warn" || summary.tone === "danger"
+      ? AlertTriangleIcon
+      : ClockIcon
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        className={cn(
+          "group/button inline-flex h-7 max-w-full shrink-0 items-center justify-center gap-1 rounded-[min(var(--radius-md),12px)] rounded-lg border border-border bg-background bg-clip-padding px-2.5 text-[0.8rem] font-medium whitespace-nowrap transition-all outline-none select-none hover:bg-muted hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+        )}
+        aria-label={`광고 구조 동기화 상태: ${summary.label}`}
+      >
+        <SummaryIcon
+          className={cn("size-3.5", SYNC_TONE_STYLES[summary.tone])}
+        />
+        <span className="truncate text-xs">
+          구조 데이터: <span className="font-medium">{summary.label}</span>
+        </span>
+        <ChevronDownIcon className="size-3.5 text-muted-foreground" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        className="w-72 p-2"
+        sideOffset={6}
+      >
+        <div className="px-1.5 py-1">
+          <div className="text-sm font-medium">광고 구조 동기화</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            헤더 상태는 가장 오래된 항목 기준입니다.
+          </div>
+        </div>
+        <div className="mt-1 space-y-0.5 rounded-md border bg-muted/30 p-1">
+          {SYNC_KINDS.map((item) => {
+            const display = formatSyncDisplay(lastSyncAt[item.kind], now)
+            return (
+              <div
+                key={item.kind}
+                className="grid grid-cols-[5rem_minmax(0,1fr)] items-center gap-2 rounded px-1.5 py-1 text-xs"
+              >
+                <span className="text-muted-foreground">{item.label}</span>
+                <span
+                  className={cn(
+                    "min-w-0 truncate text-right font-medium",
+                    SYNC_TONE_STYLES[display.tone],
+                  )}
+                  title={display.title}
+                >
+                  {display.label}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-2 px-1.5 pb-0.5 text-[11px] text-muted-foreground">
+          <span>정기 동기화</span>
+          <span className="font-medium text-foreground/80">매시간 15분</span>
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }
 
 export function DashboardHero({
@@ -98,8 +245,6 @@ export function DashboardHero({
       router.refresh()
     })
   }
-
-  const oldestSyncIso = pickOldestSync(lastSyncAt)
 
   const conn =
     initialConnection && initialConnection.ok ? initialConnection : null
@@ -171,7 +316,7 @@ export function DashboardHero({
           </Link>
         ) : null}
 
-        <LastSyncBadge syncedAt={oldestSyncIso} showHint={false} />
+        <StructureSyncStatus lastSyncAt={lastSyncAt} />
 
         <Button
           size="sm"
