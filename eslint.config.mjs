@@ -13,6 +13,13 @@ const eslintConfig = defineConfig([
     "build/**",
     "next-env.d.ts",
   ]),
+  // Test 파일에서는 mock / partial input 위해 any 허용 — 운영 코드 룰만 strict.
+  {
+    files: ["**/*.test.ts", "**/*.test.tsx", "tests/**/*.ts", "tests/**/*.tsx"],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
+    },
+  },
 ]);
 
 export default eslintConfig;
