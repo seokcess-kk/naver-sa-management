@@ -968,4 +968,50 @@ model SearchTermReport {
 // P2 엔티티 (선언 보류 — 작업 시점에 추가)
 // =============================================================================
 // model RankObservation { ... } // 시간별 순위 관측 (StatHourly 와 통합 검토)
-// model LlmCallLog      { ... } // LLM 호출 비용
+
+// =============================================================================
+// F-13 — LLM 호출 비용 추적 (Phase F.2)
+// =============================================================================
+// 본 PR 은 schema 만 추가 (LLM 호출 자체는 ANTHROPIC_API_KEY 결정 후 별도 PR).
+//
+// 적재 정책:
+//   - 동일 입력 캐시 hit 시에도 row 1건 추가 (cost=0, fromCache=true) — 호출 빈도 추적
+//   - inputHash: SHA-256(prompt + model + params) — 캐시 키 + 디버깅
+//   - cost: USD 정밀 (Decimal) — Anthropic 가격표 기준 호출 시점 산출
+//   - purpose: "bid_suggestion_reason" / "rejection_classify" / "daily_summary" 등 호출자 분류
+//
+// retention:
+//   - 90일 보관 권고 (비용 추적은 월 단위 집계로 충분). cleanup cron 후속 PR.
+//
+// privacy:
+//   - prompt 본문 미저장 — inputHash 만. 시크릿/PII 누설 차단.
+//   - response 본문도 미저장 — 토큰 수만 기록.
+model LlmCallLog {
+  id           String   @id @default(cuid())
+  /// 호출 목적 (코드 상수 / Zod literal — bid_suggestion_reason 등)
+  purpose      String
+  /// 사용 모델 (예: "claude-sonnet-4-6", "claude-haiku-4-5-20251001")
+  model        String
+  /// SHA-256(prompt + model + params) — 캐시 키 + 동일 입력 추적
+  inputHash    String
+  /// 입력 토큰 수 (Anthropic API usage.input_tokens)
+  tokensIn     Int      @default(0)
+  /// 출력 토큰 수 (Anthropic API usage.output_tokens)
+  tokensOut    Int      @default(0)
+  /// 호출 비용 (USD). Decimal(10, 6) — 0.000001 USD 정밀.
+  costUsd      Decimal  @default(0) @db.Decimal(10, 6)
+  /// 캐시 hit 여부. true 면 cost=0 / tokensIn=tokensOut=0 가능.
+  fromCache    Boolean  @default(false)
+  /// 호출 결과 분류 (success / error / blocked) — 운영 모니터.
+  result       String   @default("success")
+  /// 에러 메시지 (result='error' 시 채움). 시크릿 평문 X.
+  errorMessage String?  @db.VarChar(500)
+  createdAt    DateTime @default(now())
+
+  // 비용 집계 (월별 / 모델별 / purpose 별)
+  @@index([createdAt])
+  @@index([model, createdAt])
+  @@index([purpose, createdAt])
+  // 캐시 hit 검사 (inputHash 단일 조회)
+  @@index([inputHash])
+}
