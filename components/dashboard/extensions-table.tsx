@@ -550,7 +550,7 @@ function ExtensionMetricsFooter({ rows }: { rows: Row<ExtensionRow>[] }) {
   )
   if (rows.length === 0) return null
   return (
-    <tfoot className="sticky bottom-0 z-10 border-t-2 bg-muted/40 text-sm font-medium">
+    <tfoot className="sticky bottom-0 z-10 border-t-2 bg-background text-sm font-medium shadow-[0_-2px_8px_-2px_rgba(0,0,0,0.08)]">
       <tr>
         <td className="px-3 py-2.5" />
         <td className="px-3 py-2.5 text-xs text-muted-foreground" colSpan={5}>
