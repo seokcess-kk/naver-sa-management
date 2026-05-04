@@ -27,6 +27,7 @@ const sections: DashboardSection[] = [
   { href: "/bid-inbox", label: "비딩 Inbox" },
   { href: "/targeting", label: "타게팅" },
   { href: "/marginal-utility", label: "한계효용" },
+  { href: "/search-term-import", label: "검색어 분석" },
 ]
 
 export function DashboardSectionNav({
