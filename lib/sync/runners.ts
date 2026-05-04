@@ -69,6 +69,44 @@ import {
 } from "@/lib/sync/mappers"
 
 // =============================================================================
+// 헬퍼 — 품질지수 추출
+// =============================================================================
+
+/**
+ * 네이버 응답의 nccQi 필드에서 품질지수(1~7)를 추출.
+ *
+ * 응답 shape 변동 가능 (Java/Python 샘플 / 실 응답에서 다음 패턴 관찰):
+ *   - number 직접 (예: 5)
+ *   - { qiGrade: number } / { qualityScore: number } / { qScoreEstm: number } / { score: number }
+ *
+ * 추출 실패 또는 1~7 범위 밖 → null. 호출자가 update 컬럼 미포함 처리(기존 값 보존).
+ *
+ * Phase A.3 — 응답 미포함 광고주는 qualityScore 미적재(null)가 정상.
+ */
+export function extractQualityScore(nccQi: unknown): number | null {
+  if (typeof nccQi === "number") {
+    return clampQualityScore(nccQi)
+  }
+  if (nccQi !== null && typeof nccQi === "object") {
+    const obj = nccQi as Record<string, unknown>
+    const candidate =
+      obj.qiGrade ?? obj.qualityScore ?? obj.qScoreEstm ?? obj.score
+    if (typeof candidate === "number") {
+      return clampQualityScore(candidate)
+    }
+  }
+  return null
+}
+
+function clampQualityScore(n: number): number | null {
+  if (!Number.isFinite(n)) return null
+  const i = Math.round(n)
+  // 네이버 SA 품질지수는 1~7 막대 (공식 기준). 범위 밖은 응답 오류로 간주 → null.
+  if (i < 1 || i > 7) return null
+  return i
+}
+
+// =============================================================================
 // 결과 타입
 // =============================================================================
 
@@ -393,11 +431,16 @@ async function runKeywordsSync(
         const anyK = k as unknown as {
           matchType?: string
           recentAvgRnk?: number | string | null
+          nccQi?: unknown
         }
         const matchTypeVal =
           typeof anyK.matchType === "string" && anyK.matchType.length > 0
             ? anyK.matchType.toUpperCase()
             : null
+
+        // 품질지수 (qualityScore) — 응답 shape 변동 가능 (nccQi: number | { qiGrade } | { qualityScore } 등)
+        // 응답에 추출 가능한 값이 없으면 null → 기존 값 보존(update 시 컬럼 미포함).
+        const qualityScoreVal = extractQualityScore(anyK.nccQi)
 
         const rawJson = k as unknown as Prisma.InputJsonValue
 
@@ -412,6 +455,8 @@ async function runKeywordsSync(
           status: mappedStatus,
           inspectStatus: mappedInspect,
           raw: rawJson,
+          qualityScore: qualityScoreVal,
+          qualityScoreUpdatedAt: qualityScoreVal !== null ? new Date() : null,
         }
 
         const baseUpdateData: {
@@ -424,6 +469,8 @@ async function runKeywordsSync(
           inspectStatus: InspectStatus
           raw: Prisma.InputJsonValue
           matchType?: string
+          qualityScore?: number
+          qualityScoreUpdatedAt?: Date
         } = {
           adgroupId: dbAdgroupId,
           keyword: k.keyword,
@@ -436,6 +483,11 @@ async function runKeywordsSync(
         }
         if (matchTypeVal !== null) {
           baseUpdateData.matchType = matchTypeVal
+        }
+        // qualityScore 응답 추출 성공 시에만 update — 응답 미포함 시 기존 값 유지.
+        if (qualityScoreVal !== null) {
+          baseUpdateData.qualityScore = qualityScoreVal
+          baseUpdateData.qualityScoreUpdatedAt = new Date()
         }
 
         await prisma.keyword.upsert({
