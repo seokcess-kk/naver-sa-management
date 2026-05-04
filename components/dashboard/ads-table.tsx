@@ -1019,9 +1019,12 @@ export function AdsTable({
   const virtualRows = rowVirtualizer.getVirtualItems()
   const totalSize = rowVirtualizer.getTotalSize()
   const paddingTop = virtualRows.length > 0 ? virtualRows[0].start : 0
+  // sticky tfoot 높이(약 48px) 만큼 padding-bottom 에 추가 — 마지막 가시 행이
+  // sticky footer 뒤에 가려지지 않도록 빈 공간 확보.
+  const STICKY_FOOTER_HEIGHT = 48
   const paddingBottom =
     virtualRows.length > 0
-      ? totalSize - virtualRows[virtualRows.length - 1].end
+      ? totalSize - virtualRows[virtualRows.length - 1].end + STICKY_FOOTER_HEIGHT
       : 0
 
   function resetFilters() {
@@ -1352,7 +1355,9 @@ export function AdsTable({
       {/* 가상 스크롤 테이블 */}
       <div
         ref={parentRef}
-        className="relative max-h-[70vh] overflow-auto rounded-lg border"
+        // 외부(페이지) 스크롤 발생 회피 — viewport 높이에서 PageHeader / nav / toolbar / 액션바 합 (~280px) 차감.
+        // dvh 사용 — 모바일 chrome address bar 보정.
+        className="relative max-h-[calc(100dvh-280px)] min-h-[320px] overflow-auto rounded-lg border"
       >
         {ads.length === 0 ? (
           <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
