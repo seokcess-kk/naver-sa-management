@@ -41,7 +41,7 @@
 
 import * as React from "react"
 import { toast } from "sonner"
-import { CopyIcon } from "lucide-react"
+import { CopyIcon, AlertTriangleIcon, InfoIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -67,6 +67,12 @@ import {
   createAdsBatch,
   type CreateAdsBatchResult,
 } from "@/app/(dashboard)/[advertiserId]/ads/actions"
+import {
+  lintCopyFields,
+  hasBlockingIssues,
+  type LintIssue,
+  type LintIndustry,
+} from "@/lib/copy-policy/lint"
 
 // =============================================================================
 // 타입
@@ -121,6 +127,14 @@ export function AdsAddModal({
   //   ON  → userLock=false / OFF → userLock=true
   const [startOn, setStartOn] = React.useState<boolean>(true)
 
+  // -- copy-policy lint state ------------------------------------------------
+  // industry: 광고주 업종 — lint 룰 분기. 기본 'general'.
+  // lintIssues: 제출 시점에 채워짐. error severity 1건+ 차단, warn 은 confirm.
+  const [industry, setIndustry] = React.useState<LintIndustry>("general")
+  const [lintIssues, setLintIssues] = React.useState<
+    Array<LintIssue & { field: string }>
+  >([])
+
   // -- 입력 검증 -------------------------------------------------------------
   const trimmedHead = headline.trim()
   const trimmedDesc = description.trim()
@@ -143,6 +157,29 @@ export function AdsAddModal({
   // -- 제출 -------------------------------------------------------------------
   async function handleSubmit() {
     if (!formValid) return
+
+    // 1. copy-policy lint 검사 — headline / description (URL 은 정책 lint 무관)
+    const fields = { headline: trimmedHead, description: trimmedDesc }
+    const issues = lintCopyFields(fields, industry)
+    setLintIssues(issues)
+
+    // 2. error severity 1건+ → 등록 차단
+    if (hasBlockingIssues(issues)) {
+      toast.error("표현 검수 룰 위반 — 본문을 수정 후 다시 시도하세요.")
+      return
+    }
+
+    // 3. warn severity 1건+ → 사용자 확인 (계속 진행 여부)
+    const warnings = issues.filter((i) => i.severity === "warn")
+    if (warnings.length > 0) {
+      const ok = window.confirm(
+        `경고 ${warnings.length}건 — ${warnings
+          .map((w) => w.match)
+          .join(", ")}. 계속 등록하시겠어요?`,
+      )
+      if (!ok) return
+    }
+
     setStep("submitting")
     try {
       // TEXT_45 ad 본문 — 네이버 SA sample 기준 구조.
@@ -209,6 +246,9 @@ export function AdsAddModal({
             setMobileFinal={setMobileFinal}
             startOn={startOn}
             setStartOn={setStartOn}
+            industry={industry}
+            setIndustry={setIndustry}
+            lintIssues={lintIssues}
             headlineValid={headlineValid}
             descriptionValid={descriptionValid}
             pcValid={pcValid}
@@ -263,6 +303,9 @@ function FormView({
   setMobileFinal,
   startOn,
   setStartOn,
+  industry,
+  setIndustry,
+  lintIssues,
   headlineValid,
   descriptionValid,
   pcValid,
@@ -282,11 +325,16 @@ function FormView({
   setMobileFinal: (v: string) => void
   startOn: boolean
   setStartOn: (v: boolean) => void
+  industry: LintIndustry
+  setIndustry: (v: LintIndustry) => void
+  lintIssues: Array<LintIssue & { field: string }>
   headlineValid: boolean
   descriptionValid: boolean
   pcValid: boolean
   mobileValid: boolean
 }) {
+  const errorIssues = lintIssues.filter((i) => i.severity === "error")
+  const warnIssues = lintIssues.filter((i) => i.severity === "warn")
   return (
     <div className="flex flex-col gap-4">
       {/* 광고그룹 */}
@@ -323,6 +371,28 @@ function FormView({
             광고그룹을 선택하세요.
           </p>
         )}
+      </div>
+
+      {/* 업종 (lint 룰 적용) — copy-policy 검사용 */}
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="ad-industry-select">업종 (lint 룰 적용)</Label>
+        <Select
+          value={industry}
+          onValueChange={(v) => setIndustry((v ?? "general") as LintIndustry)}
+        >
+          <SelectTrigger id="ad-industry-select">
+            <SelectValue placeholder="업종을 선택하세요" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="general">일반</SelectItem>
+            <SelectItem value="medical">의료</SelectItem>
+            <SelectItem value="finance">금융</SelectItem>
+            <SelectItem value="health_food">건강기능식품</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-[11px] text-muted-foreground">
+          업종에 따라 표현 검수 룰이 추가 적용됩니다.
+        </p>
       </div>
 
       {/* 소재 타입 — 본 PR 고정 (TEXT_45) */}
@@ -462,6 +532,60 @@ function FormView({
           ON 으로 시작 (체크 해제 시 OFF)
         </Label>
       </div>
+
+      {/* 표현 검수 lint 결과 — submit 시 채워짐. error 차단 / warn 경고 */}
+      {lintIssues.length > 0 && (
+        <div className="flex flex-col gap-2">
+          {errorIssues.length > 0 && (
+            <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-destructive">
+                <AlertTriangleIcon className="size-4" />
+                표현 검수 룰 위반 ({errorIssues.length}건) — 수정 후 다시 시도
+              </div>
+              <ul className="mt-2 flex flex-col gap-1 text-xs text-destructive">
+                {errorIssues.map((i, idx) => (
+                  <li
+                    key={`err-${idx}-${i.ruleId}`}
+                    className="flex flex-wrap items-baseline gap-1"
+                  >
+                    <code className="rounded bg-destructive/10 px-1 font-mono text-[10px]">
+                      [{i.field}]
+                    </code>
+                    <code className="rounded bg-destructive/10 px-1 font-mono text-[10px]">
+                      {i.match}
+                    </code>
+                    <span>→ {i.message}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {warnIssues.length > 0 && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 dark:border-amber-900/40 dark:bg-amber-900/10">
+              <div className="flex items-center gap-1.5 text-sm font-medium text-amber-900 dark:text-amber-300">
+                <InfoIcon className="size-4" />
+                경고 ({warnIssues.length}건) — 등록 시 확인 필요
+              </div>
+              <ul className="mt-2 flex flex-col gap-1 text-xs text-amber-900 dark:text-amber-300">
+                {warnIssues.map((i, idx) => (
+                  <li
+                    key={`warn-${idx}-${i.ruleId}`}
+                    className="flex flex-wrap items-baseline gap-1"
+                  >
+                    <code className="rounded bg-amber-200/40 px-1 font-mono text-[10px]">
+                      [{i.field}]
+                    </code>
+                    <code className="rounded bg-amber-200/40 px-1 font-mono text-[10px]">
+                      {i.match}
+                    </code>
+                    <span>→ {i.message}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
