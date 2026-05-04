@@ -47,6 +47,11 @@ import {
   evaluateCpcSurge,
   evaluateImpressionsDrop,
   evaluateBudgetPace,
+  evaluateRankDeviation,
+  evaluateMobileFirstPage,
+  evaluateOptimizationSummary,
+  evaluateSuggestionInbox,
+  evaluateQualityStagnation,
   type AlertCandidate,
   type EvalContext,
 } from "@/lib/alerts/evaluators"
@@ -214,6 +219,50 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
             id: rule.id,
             type: rule.type,
             params: params as { deviationPct?: number; minHour?: number },
+          })
+          break
+        case "rank_deviation":
+          candidates = await evaluateRankDeviation(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as { tolerance?: number; maxCandidates?: number },
+          })
+          break
+        case "mobile_first_page":
+          candidates = await evaluateMobileFirstPage(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as {
+              rankThreshold?: number
+              minClicks?: number
+              maxCandidates?: number
+            },
+          })
+          break
+        case "optimization_summary":
+          candidates = await evaluateOptimizationSummary(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as { dailyHourKst?: number },
+          })
+          break
+        case "suggestion_inbox":
+          candidates = await evaluateSuggestionInbox(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as { minNew?: number; withinHours?: number },
+          })
+          break
+        case "quality_stagnation":
+          candidates = await evaluateQualityStagnation(ctx, {
+            id: rule.id,
+            type: rule.type,
+            params: params as {
+              threshold7d?: number
+              threshold14d?: number
+              threshold30d?: number
+              maxCandidates?: number
+            },
           })
           break
         default:

@@ -92,6 +92,36 @@ const ALERT_TYPES: { value: AlertRuleType; label: string; description: string }[
     label: "예산 페이스 이상 (budget_pace)",
     description: "현재 시각 기준 예상 페이스 대비 N%p 이상 초과 소진 (기본 +30%p)",
   },
+  {
+    value: "rank_deviation",
+    label: "목표 순위 이탈 (rank_deviation)",
+    description:
+      "BiddingPolicy 등록 키워드의 평균 노출 순위가 목표 ±N에서 벗어남 (기본 ±2)",
+  },
+  {
+    value: "mobile_first_page",
+    label: "모바일 첫 페이지 이탈 (mobile_first_page)",
+    description:
+      "평균 순위 임계(기본 5위) 초과 + 7일 클릭 표본(기본 50) 충분한 키워드. 강한 신호로만 사용",
+  },
+  {
+    value: "optimization_summary",
+    label: "자동 비딩 일일 요약 (optimization_summary)",
+    description:
+      "어제(KST) OptimizationRun 결과 집계. 매일 dailyHourKst(기본 9시) 1회 발송",
+  },
+  {
+    value: "suggestion_inbox",
+    label: "Inbox 권고 누적 (suggestion_inbox)",
+    description:
+      "최근 N시간(기본 24h) 내 신규 BidSuggestion이 임계(기본 5) 이상이면 알림",
+  },
+  {
+    value: "quality_stagnation",
+    label: "품질지수 정체 (quality_stagnation)",
+    description:
+      "Keyword.qualityScore 7/14/30일 정체 단계별 알림 (기본 4/5/6 미만)",
+  },
 ]
 
 const DEFAULT_THRESHOLDS = [50, 80, 100]

@@ -842,3 +842,480 @@ export async function evaluateBudgetPace(
 
   return candidates
 }
+
+// =============================================================================
+// 8. rank_deviation — 목표 순위 이탈 (F-12.1, BiddingPolicy 등록 키워드 한정)
+// =============================================================================
+
+/** rank_deviation rule.params shape. */
+export type RankDeviationParams = {
+  /** 목표 순위 ±N 이탈 임계. 기본 2 (운영 일반론). 1..10. */
+  tolerance?: number
+  /** 한 번에 보고할 최대 후보 수. 기본 20. 1..200. */
+  maxCandidates?: number
+}
+
+/**
+ * BiddingPolicy 등록 키워드 + Keyword.recentAvgRnk 가 목표 ±N 이탈 시 알림.
+ *
+ * 주의 (사용자 검토 반영):
+ *   - "모바일 5위 밖 = 미노출" 같은 절대 임계 X — 운영자 등록 정책 기준
+ *   - Keyword.recentAvgRnk 는 device 무관 단일값 — PC/MOBILE 분리는 후속 PR
+ *   - BiddingPolicy.device 기준 PC/MOBILE 별 row → 둘 다 비교 (둘 다 이탈하면 같은 키워드 2건 가능)
+ *
+ * muteKey: `rank_deviation:${nccKeywordId}:${device}` — 키워드+device 1시간 1회.
+ */
+export async function evaluateRankDeviation(
+  ctx: EvalContext,
+  rule: RuleSlice<RankDeviationParams>,
+): Promise<AlertCandidate[]> {
+  const rawTol = rule.params?.tolerance
+  const tolerance =
+    typeof rawTol === "number" && Number.isFinite(rawTol) && rawTol >= 1 && rawTol <= 10
+      ? Math.floor(rawTol)
+      : 2
+  const rawMax = rule.params?.maxCandidates
+  const maxCandidates =
+    typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax >= 1 && rawMax <= 200
+      ? Math.floor(rawMax)
+      : 20
+
+  // 활성 정책 + 키워드 join (recentAvgRnk / status / userLock)
+  const policies = await prisma.biddingPolicy.findMany({
+    where: {
+      advertiserId: ctx.advertiserId,
+      enabled: true,
+      keyword: {
+        status: { not: "deleted" },
+        userLock: false,
+        recentAvgRnk: { not: null },
+      },
+    },
+    select: {
+      id: true,
+      device: true,
+      targetRank: true,
+      keyword: {
+        select: {
+          nccKeywordId: true,
+          keyword: true,
+          recentAvgRnk: true,
+        },
+      },
+    },
+    take: maxCandidates * 2, // 컷 전 여유
+  })
+
+  const candidates: AlertCandidate[] = []
+  for (const p of policies) {
+    const rank = p.keyword.recentAvgRnk
+    if (rank == null) continue
+    const current = Number(rank)
+    const diff = Math.abs(current - p.targetRank)
+    if (diff <= tolerance) continue
+
+    // critical: 이탈량이 tolerance 의 2배 이상 (예: 목표 1, 현재 5+)
+    const severity =
+      diff >= tolerance * 2 ? "warn" : "info"
+
+    candidates.push({
+      ruleType: "rank_deviation",
+      severity,
+      title: `목표 순위 이탈 — ${p.keyword.keyword} (${p.device})`,
+      body: `목표 ${p.targetRank}위, 현재 평균 ${current.toFixed(1)}위 (이탈 ${diff > 0 ? "+" : ""}${(current - p.targetRank).toFixed(1)})`,
+      meta: {
+        advertiserId: ctx.advertiserId,
+        nccKeywordId: p.keyword.nccKeywordId,
+        keyword: p.keyword.keyword,
+        device: p.device,
+        targetRank: p.targetRank,
+        currentRank: Number(current.toFixed(2)),
+        deviation: Number((current - p.targetRank).toFixed(2)),
+      },
+      muteKey: `rank_deviation:${p.keyword.nccKeywordId}:${p.device}`,
+    })
+  }
+
+  if (candidates.length > maxCandidates) return candidates.slice(0, maxCandidates)
+  return candidates
+}
+
+// =============================================================================
+// 9. mobile_first_page — 모바일 첫 페이지 진입 이탈 (F-12.2, 강한 신호로만)
+// =============================================================================
+
+/** mobile_first_page rule.params shape. */
+export type MobileFirstPageParams = {
+  /** 평균 순위 임계 (이 위면 알림). 기본 5 (모바일 첫 화면 5개 슬롯). 1..50. */
+  rankThreshold?: number
+  /** 7일 클릭 표본 임계. 기본 50 (신뢰도). 1..10000. */
+  minClicks?: number
+  /** 한 번에 보고할 최대 후보 수. 기본 20. 1..200. */
+  maxCandidates?: number
+}
+
+/**
+ * 평균 노출 순위가 임계(기본 5) 초과 + 7일 클릭 표본 충분(기본 50) 키워드 알림.
+ *
+ * 주의 (사용자 검토 반영):
+ *   - "모바일 5위 밖 = 미노출"은 경험칙 — 절대 규칙 X. 본 평가기는 강한 **신호**로 사용
+ *   - Keyword.recentAvgRnk 는 device 무관 단일값 — 디바이스 분리 데이터는 후속 PR
+ *   - 클릭 표본 부족 키워드는 침묵 (신뢰 없는 알림 차단)
+ *
+ * muteKey: `mobile_first_page:${nccKeywordId}`
+ */
+export async function evaluateMobileFirstPage(
+  ctx: EvalContext,
+  rule: RuleSlice<MobileFirstPageParams>,
+): Promise<AlertCandidate[]> {
+  const rawRank = rule.params?.rankThreshold
+  const rankThreshold =
+    typeof rawRank === "number" && Number.isFinite(rawRank) && rawRank >= 1 && rawRank <= 50
+      ? rawRank
+      : 5
+  const rawClicks = rule.params?.minClicks
+  const minClicks =
+    typeof rawClicks === "number" && Number.isFinite(rawClicks) && rawClicks >= 1 && rawClicks <= 10000
+      ? Math.floor(rawClicks)
+      : 50
+  const rawMax = rule.params?.maxCandidates
+  const maxCandidates =
+    typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax >= 1 && rawMax <= 200
+      ? Math.floor(rawMax)
+      : 20
+
+  // 광고주의 활성 키워드 + recentAvgRnk > threshold
+  const keywords = await prisma.keyword.findMany({
+    where: {
+      adgroup: { campaign: { advertiserId: ctx.advertiserId } },
+      status: { not: "deleted" },
+      userLock: false,
+      recentAvgRnk: { gt: rankThreshold },
+    },
+    select: {
+      id: true,
+      nccKeywordId: true,
+      keyword: true,
+      recentAvgRnk: true,
+    },
+    take: maxCandidates * 3,
+  })
+  if (keywords.length === 0) return []
+
+  // 7일 클릭 표본 (StatDaily level='keyword' 합산) — 광고주 baseline 확보된 환경 가정
+  const since = new Date()
+  since.setUTCDate(since.getUTCDate() - 7)
+  const stats = await prisma.statDaily.groupBy({
+    by: ["refId"],
+    where: {
+      advertiserId: ctx.advertiserId,
+      level: "keyword",
+      date: { gte: since },
+      refId: { in: keywords.map((k) => k.nccKeywordId) },
+    },
+    _sum: { clicks: true },
+  })
+  const clicksByNccId = new Map(stats.map((s) => [s.refId, s._sum.clicks ?? 0]))
+
+  const candidates: AlertCandidate[] = []
+  for (const k of keywords) {
+    const clicks = clicksByNccId.get(k.nccKeywordId) ?? 0
+    if (clicks < minClicks) continue
+    const rank = Number(k.recentAvgRnk)
+    candidates.push({
+      ruleType: "mobile_first_page",
+      severity: "warn",
+      title: `5위 밖 — ${k.keyword}`,
+      body: `평균 ${rank.toFixed(1)}위 (모바일 첫 화면 임계 ${rankThreshold} 초과). 7일 클릭 ${clicks}건 표본.`,
+      meta: {
+        advertiserId: ctx.advertiserId,
+        nccKeywordId: k.nccKeywordId,
+        keyword: k.keyword,
+        currentRank: Number(rank.toFixed(2)),
+        clicks7d: clicks,
+        rankThreshold,
+      },
+      muteKey: `mobile_first_page:${k.nccKeywordId}`,
+    })
+  }
+
+  if (candidates.length > maxCandidates) return candidates.slice(0, maxCandidates)
+  return candidates
+}
+
+// =============================================================================
+// 10. optimization_summary — 자동 비딩 일일 요약 (F-12.3)
+// =============================================================================
+
+/** optimization_summary rule.params shape. */
+export type OptimizationSummaryParams = {
+  /** KST 기준 보고 시각 (시간). 기본 9 (오전 9시). 0..23. */
+  dailyHourKst?: number
+}
+
+/**
+ * 어제(KST) OptimizationRun 집계 → 광고주별 1건 일일 요약.
+ *
+ * Cron 매시간 호출되지만 KST 현재 시각 != dailyHourKst 면 빈 배열 (시간 게이트).
+ * muteKey 에 yyyy-mm-dd (KST) 포함 — 같은 날 1회 보장.
+ */
+export async function evaluateOptimizationSummary(
+  ctx: EvalContext,
+  rule: RuleSlice<OptimizationSummaryParams>,
+): Promise<AlertCandidate[]> {
+  const rawHour = rule.params?.dailyHourKst
+  const dailyHourKst =
+    typeof rawHour === "number" && Number.isFinite(rawHour) && rawHour >= 0 && rawHour <= 23
+      ? Math.floor(rawHour)
+      : 9
+
+  // 현재 KST 시각 (UTC + 9h)
+  const now = new Date()
+  const kstHour = (now.getUTCHours() + 9) % 24
+  if (kstHour !== dailyHourKst) return []
+
+  // 어제 KST 00:00 ~ 23:59 → UTC 변환 (KST 0시 = UTC 전날 15시)
+  const kstMs = now.getTime() + 9 * 60 * 60 * 1000
+  const kstDateOnly = new Date(kstMs)
+  kstDateOnly.setUTCHours(0, 0, 0, 0)
+  // 어제 KST 0시 (UTC)
+  const yesterdayKstStart = new Date(kstDateOnly.getTime() - 24 * 60 * 60 * 1000 - 9 * 60 * 60 * 1000)
+  const yesterdayKstEnd = new Date(yesterdayKstStart.getTime() + 24 * 60 * 60 * 1000)
+
+  // 어제 OptimizationRun 광고주별 result 집계
+  const runs = await prisma.optimizationRun.groupBy({
+    by: ["result"],
+    where: {
+      advertiserId: ctx.advertiserId,
+      triggeredAt: { gte: yesterdayKstStart, lt: yesterdayKstEnd },
+    },
+    _count: { result: true },
+  })
+
+  if (runs.length === 0) return []
+
+  const counts = {
+    success: 0,
+    skipped_user_lock: 0,
+    skipped_deleted: 0,
+    skipped_guardrail: 0,
+    skipped_no_change: 0,
+    skipped_other: 0,
+    failed: 0,
+  } as Record<string, number>
+  for (const r of runs) {
+    const k = r.result
+    counts[k] = (counts[k] ?? 0) + r._count.result
+  }
+  const total = Object.values(counts).reduce((s, n) => s + n, 0)
+  const success = counts.success ?? 0
+  const failed = counts.failed ?? 0
+  const guardrail = counts.skipped_guardrail ?? 0
+
+  // KST 어제 yyyy-mm-dd 문자열 (mute key)
+  const yyyyMmDd = new Date(yesterdayKstStart.getTime() + 9 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10)
+
+  const severity = failed > 0 ? "warn" : "info"
+
+  return [
+    {
+      ruleType: "optimization_summary",
+      severity,
+      title: `자동 비딩 일일 요약 (${yyyyMmDd})`,
+      body: `총 ${total}건 — 성공 ${success}건 / Guardrail ${guardrail}건 / 실패 ${failed}건.`,
+      meta: {
+        advertiserId: ctx.advertiserId,
+        date: yyyyMmDd,
+        counts,
+        total,
+      },
+      muteKey: `optimization_summary:${ctx.advertiserId}:${yyyyMmDd}`,
+    },
+  ]
+}
+
+// =============================================================================
+// 11. suggestion_inbox — Inbox 신규 BidSuggestion N+ (F-12.4)
+// =============================================================================
+
+/** suggestion_inbox rule.params shape. */
+export type SuggestionInboxParams = {
+  /** 신규 Suggestion 임계. 기본 5건 이상. 1..1000. */
+  minNew?: number
+  /** 룩백 시간 (시간). 기본 24. 1..168. */
+  withinHours?: number
+}
+
+/**
+ * 최근 N시간 (기본 24h) 내 신규 BidSuggestion(status='pending') 카운트가 임계 이상이면 알림.
+ *
+ * muteKey: `suggestion_inbox:${advertiserId}:${yyyy-mm-dd}` — 같은 날 1회 (KST).
+ */
+export async function evaluateSuggestionInbox(
+  ctx: EvalContext,
+  rule: RuleSlice<SuggestionInboxParams>,
+): Promise<AlertCandidate[]> {
+  const rawMin = rule.params?.minNew
+  const minNew =
+    typeof rawMin === "number" && Number.isFinite(rawMin) && rawMin >= 1 && rawMin <= 1000
+      ? Math.floor(rawMin)
+      : 5
+  const rawWithin = rule.params?.withinHours
+  const withinHours =
+    typeof rawWithin === "number" && Number.isFinite(rawWithin) && rawWithin >= 1 && rawWithin <= 168
+      ? Math.floor(rawWithin)
+      : 24
+
+  const since = new Date(Date.now() - withinHours * 60 * 60 * 1000)
+  const count = await prisma.bidSuggestion.count({
+    where: {
+      advertiserId: ctx.advertiserId,
+      status: "pending",
+      createdAt: { gte: since },
+    },
+  })
+
+  if (count < minNew) return []
+
+  const yyyyMmDd = new Date(Date.now() + 9 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10)
+
+  return [
+    {
+      ruleType: "suggestion_inbox",
+      severity: "info",
+      title: `Inbox 권고 ${count}건 신규`,
+      body: `최근 ${withinHours}시간 내 비딩 권고 ${count}건이 누적되었습니다. 검토 후 적용해 주세요.`,
+      meta: {
+        advertiserId: ctx.advertiserId,
+        count,
+        withinHours,
+        minNew,
+      },
+      muteKey: `suggestion_inbox:${ctx.advertiserId}:${yyyyMmDd}`,
+    },
+  ]
+}
+
+// =============================================================================
+// 12. quality_stagnation — 품질지수 정체 (F-12.6, 7/14/30일 단계화)
+// =============================================================================
+
+/** quality_stagnation rule.params shape. */
+export type QualityStagnationParams = {
+  /** 7일 임계 — 4칸 미만이면 알림. 기본 4. 1..7. */
+  threshold7d?: number
+  /** 14일 임계 — 5칸 미만이면 알림. 기본 5. 1..7. */
+  threshold14d?: number
+  /** 30일 임계 — 6칸 미만이면 알림. 기본 6. 1..7. */
+  threshold30d?: number
+  /** 한 번에 보고할 최대 후보 수. 기본 20. 1..200. */
+  maxCandidates?: number
+}
+
+/**
+ * Keyword.qualityScore + qualityScoreUpdatedAt 기준 7/14/30일 정체 키워드 알림.
+ *
+ * 룰:
+ *   - 7일 정체 + qualityScore < threshold7d → critical (소재 교체 권고)
+ *   - 14일 정체 + qualityScore < threshold14d → warn (랜딩 점검 권고)
+ *   - 30일 정체 + qualityScore < threshold30d → warn (입찰 인하 또는 OFF 권고)
+ *
+ * 단계는 가장 오래된 단계 1개만 발생 (스팸 방지). 7일 단계 통과해도 14일·30일 단계로 알림 X.
+ *
+ * 주의 (사용자 검토 반영):
+ *   - "1점 ≈ 14~17% CPC 절감" 같은 정량 수치는 사례·추정 — 본 알림은 신호만
+ *   - 브랜드 / 저검색량 / 고관여 예외 처리는 후속 PR (Keyword.tags 또는 별도 플래그)
+ *
+ * muteKey: `quality_stagnation:${nccKeywordId}:${stage}` — 단계별 1시간 1회.
+ */
+export async function evaluateQualityStagnation(
+  ctx: EvalContext,
+  rule: RuleSlice<QualityStagnationParams>,
+): Promise<AlertCandidate[]> {
+  const t7 = clampInt(rule.params?.threshold7d, 1, 7, 4)
+  const t14 = clampInt(rule.params?.threshold14d, 1, 7, 5)
+  const t30 = clampInt(rule.params?.threshold30d, 1, 7, 6)
+  const maxCandidates = clampInt(rule.params?.maxCandidates, 1, 200, 20)
+
+  const now = Date.now()
+  const since30 = new Date(now - 30 * 24 * 60 * 60 * 1000)
+  const since14 = new Date(now - 14 * 24 * 60 * 60 * 1000)
+  const since7 = new Date(now - 7 * 24 * 60 * 60 * 1000)
+
+  const keywords = await prisma.keyword.findMany({
+    where: {
+      adgroup: { campaign: { advertiserId: ctx.advertiserId } },
+      status: { not: "deleted" },
+      userLock: false,
+      qualityScore: { not: null },
+      qualityScoreUpdatedAt: { not: null, lte: since7 }, // 최소 7일 정체
+    },
+    select: {
+      nccKeywordId: true,
+      keyword: true,
+      qualityScore: true,
+      qualityScoreUpdatedAt: true,
+    },
+    take: maxCandidates * 3,
+  })
+
+  const candidates: AlertCandidate[] = []
+  for (const k of keywords) {
+    if (k.qualityScore == null || k.qualityScoreUpdatedAt == null) continue
+    const updatedAt = k.qualityScoreUpdatedAt
+    const score = k.qualityScore
+
+    let stage: "30d" | "14d" | "7d" | null = null
+    let severity: "info" | "warn" | "critical" = "info"
+    let suggestion = ""
+    if (updatedAt <= since30 && score < t30) {
+      stage = "30d"
+      severity = "warn"
+      suggestion = "입찰 인하 또는 OFF 권고"
+    } else if (updatedAt <= since14 && score < t14) {
+      stage = "14d"
+      severity = "warn"
+      suggestion = "랜딩 점검 권고"
+    } else if (score < t7) {
+      stage = "7d"
+      severity = "critical"
+      suggestion = "소재 교체 권고"
+    }
+    if (stage == null) continue
+
+    candidates.push({
+      ruleType: "quality_stagnation",
+      severity,
+      title: `품질지수 정체 (${stage}) — ${k.keyword}`,
+      body: `품질지수 ${score}/7. ${stage} 정체. ${suggestion}.`,
+      meta: {
+        advertiserId: ctx.advertiserId,
+        nccKeywordId: k.nccKeywordId,
+        keyword: k.keyword,
+        qualityScore: score,
+        qualityScoreUpdatedAt: updatedAt.toISOString(),
+        stage,
+      },
+      muteKey: `quality_stagnation:${k.nccKeywordId}:${stage}`,
+    })
+  }
+
+  if (candidates.length > maxCandidates) return candidates.slice(0, maxCandidates)
+  return candidates
+}
+
+function clampInt(
+  raw: unknown,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback
+  const i = Math.floor(raw)
+  if (i < min || i > max) return fallback
+  return i
+}

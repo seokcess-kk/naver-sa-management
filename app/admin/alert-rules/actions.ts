@@ -34,6 +34,11 @@ export type AlertRuleType =
   | "cpc_surge"
   | "impressions_drop"
   | "budget_pace"
+  | "rank_deviation"
+  | "mobile_first_page"
+  | "optimization_summary"
+  | "suggestion_inbox"
+  | "quality_stagnation"
 
 export type AlertRuleRow = {
   id: string
@@ -67,6 +72,11 @@ const alertRuleTypeSchema = z.enum([
   "cpc_surge",
   "impressions_drop",
   "budget_pace",
+  "rank_deviation",
+  "mobile_first_page",
+  "optimization_summary",
+  "suggestion_inbox",
+  "quality_stagnation",
 ])
 
 /**
@@ -131,6 +141,48 @@ const budgetPaceParamsSchema = z
   })
   .strict()
 
+const rankDeviationParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    tolerance: z.number().int().min(1).max(10).optional(),
+    maxCandidates: z.number().int().min(1).max(200).optional(),
+  })
+  .strict()
+
+const mobileFirstPageParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    rankThreshold: z.number().min(1).max(50).optional(),
+    minClicks: z.number().int().min(1).max(10000).optional(),
+    maxCandidates: z.number().int().min(1).max(200).optional(),
+  })
+  .strict()
+
+const optimizationSummaryParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    dailyHourKst: z.number().int().min(0).max(23).optional(),
+  })
+  .strict()
+
+const suggestionInboxParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    minNew: z.number().int().min(1).max(1000).optional(),
+    withinHours: z.number().int().min(1).max(168).optional(),
+  })
+  .strict()
+
+const qualityStagnationParamsSchema = z
+  .object({
+    advertiserId: advertiserIdSchema,
+    threshold7d: z.number().int().min(1).max(7).optional(),
+    threshold14d: z.number().int().min(1).max(7).optional(),
+    threshold30d: z.number().int().min(1).max(7).optional(),
+    maxCandidates: z.number().int().min(1).max(200).optional(),
+  })
+  .strict()
+
 /** params 검증을 type 에 따라 분기. */
 function validateParams(
   type: AlertRuleType,
@@ -158,6 +210,21 @@ function validateParams(
       break
     case "budget_pace":
       parsed = budgetPaceParamsSchema.safeParse(params)
+      break
+    case "rank_deviation":
+      parsed = rankDeviationParamsSchema.safeParse(params)
+      break
+    case "mobile_first_page":
+      parsed = mobileFirstPageParamsSchema.safeParse(params)
+      break
+    case "optimization_summary":
+      parsed = optimizationSummaryParamsSchema.safeParse(params)
+      break
+    case "suggestion_inbox":
+      parsed = suggestionInboxParamsSchema.safeParse(params)
+      break
+    case "quality_stagnation":
+      parsed = qualityStagnationParamsSchema.safeParse(params)
       break
     default:
       return { ok: false, error: `미지원 type: ${type}` }
