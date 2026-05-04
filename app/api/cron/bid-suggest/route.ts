@@ -1,0 +1,359 @@
+/**
+ * Vercel Cron 핸들러 — 입찰 권고 (Phase B.2)
+ *
+ * 목적:
+ *   - 광고주별 비용 TOP N 키워드에 대해 한계효용 권고 → BidSuggestion(Inbox) 적재
+ *   - 자동 SA 변경 X — 운영자 승인 후 ChangeBatch 흐름으로 적용 (Phase B.3 UI)
+ *
+ * 매시간 실행. cron 등록 (vercel.json):
+ *   { "path": "/api/cron/bid-suggest", "schedule": "20 * * * *" }
+ *   - 분 20 — alerts(0) / batch(매분) / stat-hourly(5) / auto-bidding(10) / sync-all(15) 와 분리
+ *   - Authorization: Bearer ${CRON_SECRET} 자동 부착
+ *
+ * 동작:
+ *   1. CRON_SECRET 검증 (불일치 시 401)
+ *   2. 활성 광고주 조회 (status='active' AND BidAutomationConfig.mode != 'off' [없으면 inbox 폴백])
+ *   3. 광고주 직렬:
+ *      a. KeywordPerformanceProfile 로드 (없으면 skip — baseline cron 가 채울 때까지 대기)
+ *      b. BidAutomationConfig 로드 (없으면 default mode='inbox')
+ *      c. BiddingPolicy.enabled=true 키워드 nccKeywordId 셋 (자동 실행 키워드 제외 — auto-bidding cron 책임)
+ *      d. StatDaily 7d groupBy(refId) sum(cost) desc TOP N
+ *      e. Keyword 매핑 (nccKeywordId → id / bidAmt / userLock / status)
+ *      f. 각 키워드:
+ *         - userLock=true / status='deleted' → skip
+ *         - useGroupBidAmt=true → skip (명시 입찰만)
+ *         - decideMarginalSuggestion
+ *         - suggest → upsertSuggestion (pending 1개 보장)
+ *         - hold + 'low_confidence_data' 아님 → 기존 pending dismiss
+ *   4. JSON 응답 (광고주별 통계)
+ *
+ * 정책:
+ *   - BidSuggestion 키워드별 active pending engineSource='bid' 1개만 (코드 강제)
+ *   - expiresAt = +7d 기본
+ *   - SA 호출 0 — Estimate 활용은 후속 PR (Phase B 정련)
+ *   - BiddingPolicy 등록 키워드 제외 — auto-bidding cron 이 자동 실행 대상
+ *
+ * Vercel maxDuration:
+ *   - Pro 900s 한도 → 800. 광고주 N <= ~13 + TOP 100 키워드 직렬 가정.
+ *   - 광고주 수 증가 시 슬라이스(`BID_SUGGEST_ADVERTISER_SLICE`) 도입 후속 PR.
+ *
+ * SPEC: SPEC v0.2.1 F-11.2 + plan(graceful-sparking-graham) Phase B.2
+ */
+
+import { NextRequest, NextResponse } from "next/server"
+
+import { prisma } from "@/lib/db/prisma"
+import { scrubString } from "@/lib/crypto/scrub-string"
+import {
+  decideMarginalSuggestion,
+  type AdvertiserBaselineInput,
+  type AutomationTargets,
+  type KeywordPerfInput,
+} from "@/lib/auto-bidding/marginal-score"
+import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
+
+export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
+export const maxDuration = 800
+
+// =============================================================================
+// 응답 타입 / 상수
+// =============================================================================
+
+const TOP_N = Number(process.env.BID_SUGGEST_TOP_N ?? "100")
+const STATS_WINDOW_DAYS = 7
+const SUGGESTION_TTL_DAYS = 7
+
+type CronError = {
+  advertiserId: string
+  keywordId?: string
+  message: string
+}
+
+type CronResponse = {
+  ok: boolean
+  advertisersTotal: number
+  advertisersOk: number
+  advertisersSkipped: number
+  keywordsScanned: number
+  suggestionsCreated: number
+  suggestionsUpdated: number
+  suggestionsDismissed: number
+  ts: string
+  errors: CronError[]
+  error?: string
+}
+
+function safeError(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  return scrubString(raw).slice(0, 500)
+}
+
+function addDays(base: Date, days: number): Date {
+  const d = new Date(base)
+  d.setUTCDate(d.getUTCDate() + days)
+  return d
+}
+
+// =============================================================================
+// 광고주 1명 처리
+// =============================================================================
+
+type AdvertiserStats = {
+  scanned: number
+  created: number
+  updated: number
+  dismissed: number
+}
+
+async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats> {
+  const stats: AdvertiserStats = {
+    scanned: 0,
+    created: 0,
+    updated: 0,
+    dismissed: 0,
+  }
+
+  // -- a. baseline 로드 -----------------------------------------------------
+  const kpp = await prisma.keywordPerformanceProfile.findUnique({
+    where: { advertiserId },
+  })
+  if (!kpp || kpp.dataDays === 0) {
+    return stats // baseline 없음 — 다음 cron 까지 대기 (silent skip)
+  }
+  const baseline: AdvertiserBaselineInput = {
+    avgCtr: kpp.avgCtr,
+    avgCvr: kpp.avgCvr,
+    avgCpc: kpp.avgCpc,
+  }
+
+  // -- b. automation config 로드 (없거나 off 면 skip — 운영자 명시 활성화 필요) ---
+  const cfg = await prisma.bidAutomationConfig.findUnique({
+    where: { advertiserId },
+  })
+  if (!cfg || cfg.mode === "off") {
+    return stats
+  }
+  const targets: AutomationTargets = {
+    targetCpa: cfg?.targetCpa ?? null,
+    targetRoas: cfg?.targetRoas ?? null,
+  }
+
+  // -- c. BiddingPolicy 등록 키워드 (자동 실행 대상 — 본 cron 제외) -----------
+  const policyKeywords = await prisma.biddingPolicy.findMany({
+    where: { advertiserId, enabled: true },
+    select: { keywordId: true },
+  })
+  const policyKeywordIds = new Set(policyKeywords.map((p) => p.keywordId))
+
+  // -- d. TOP N — StatDaily level='keyword' 7일 cost 큰 순 -------------------
+  const since = addDays(new Date(), -STATS_WINDOW_DAYS)
+  const top = await prisma.statDaily.groupBy({
+    by: ["refId"],
+    where: {
+      advertiserId,
+      level: "keyword",
+      date: { gte: since },
+    },
+    _sum: {
+      impressions: true,
+      clicks: true,
+      cost: true,
+      conversions: true,
+      revenue: true,
+    },
+    orderBy: { _sum: { cost: "desc" } },
+    take: TOP_N,
+  })
+
+  if (top.length === 0) {
+    return stats // 데이터 없음
+  }
+
+  // -- e. Keyword 매핑 -------------------------------------------------------
+  const nccIds = top.map((t) => t.refId)
+  const keywords = await prisma.keyword.findMany({
+    where: {
+      nccKeywordId: { in: nccIds },
+      status: { not: "deleted" },
+    },
+    select: {
+      id: true,
+      nccKeywordId: true,
+      bidAmt: true,
+      useGroupBidAmt: true,
+      userLock: true,
+      adgroup: { select: { id: true } },
+    },
+  })
+  const keywordMap = new Map(keywords.map((k) => [k.nccKeywordId, k]))
+
+  // -- f. 각 키워드 처리 -----------------------------------------------------
+  const expiresAt = addDays(new Date(), SUGGESTION_TTL_DAYS)
+
+  for (const row of top) {
+    stats.scanned++
+    const k = keywordMap.get(row.refId)
+    if (!k) continue
+    if (k.userLock) continue
+    if (policyKeywordIds.has(k.id)) continue
+    if (k.useGroupBidAmt || k.bidAmt == null || k.bidAmt <= 0) continue
+
+    const sum = row._sum
+    const keywordPerf: KeywordPerfInput = {
+      keywordId: k.id,
+      nccKeywordId: k.nccKeywordId,
+      currentBid: k.bidAmt,
+      clicks7d: sum.clicks ?? 0,
+      impressions7d: sum.impressions ?? 0,
+      cost7d: sum.cost ? Number(sum.cost) : 0,
+      conversions7d: sum.conversions ?? null,
+      revenue7d: sum.revenue ? Number(sum.revenue) : null,
+    }
+
+    const decision = decideMarginalSuggestion({
+      keyword: keywordPerf,
+      baseline,
+      targets,
+    })
+
+    if (decision.decision === "suggest") {
+      // pending 1개 보장 — 있으면 update, 없으면 create.
+      const existing = await prisma.bidSuggestion.findFirst({
+        where: {
+          keywordId: k.id,
+          engineSource: "bid",
+          status: "pending",
+        },
+        select: { id: true },
+      })
+      const data = {
+        advertiserId,
+        keywordId: k.id,
+        adgroupId: k.adgroup.id,
+        engineSource: "bid" as const,
+        action: decision.action as unknown as Prisma.InputJsonValue,
+        reason: decision.reason,
+        severity: decision.severity,
+        status: "pending" as const,
+        expiresAt,
+      }
+      if (existing) {
+        await prisma.bidSuggestion.update({
+          where: { id: existing.id },
+          data: {
+            action: data.action,
+            reason: data.reason,
+            severity: data.severity,
+            expiresAt,
+          },
+        })
+        stats.updated++
+      } else {
+        await prisma.bidSuggestion.create({ data })
+        stats.created++
+      }
+    } else {
+      // hold — low_confidence_data 외에는 기존 pending dismiss
+      if (decision.reason !== "low_confidence_data") {
+        const r = await prisma.bidSuggestion.updateMany({
+          where: {
+            keywordId: k.id,
+            engineSource: "bid",
+            status: "pending",
+          },
+          data: { status: "dismissed" },
+        })
+        stats.dismissed += r.count
+      }
+    }
+  }
+
+  return stats
+}
+
+// =============================================================================
+// 핵심 진입점
+// =============================================================================
+
+export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>> {
+  const ts = new Date().toISOString()
+
+  // -- 1. CRON_SECRET 검증 ---------------------------------------------------
+  const cronSecret = process.env.CRON_SECRET
+  const auth = req.headers.get("authorization") ?? ""
+  if (!cronSecret || auth !== `Bearer ${cronSecret}`) {
+    return NextResponse.json(
+      {
+        ok: false,
+        advertisersTotal: 0,
+        advertisersOk: 0,
+        advertisersSkipped: 0,
+        keywordsScanned: 0,
+        suggestionsCreated: 0,
+        suggestionsUpdated: 0,
+        suggestionsDismissed: 0,
+        ts,
+        errors: [],
+        error: "unauthorized",
+      },
+      { status: 401 },
+    )
+  }
+
+  // -- 2. 활성 광고주 (mode='off' 제외 — config 없으면 default inbox 처리) ---
+  const advertisers = await prisma.advertiser.findMany({
+    where: { status: "active" },
+    select: {
+      id: true,
+      bidAutomationConfig: { select: { mode: true } },
+    },
+    orderBy: { id: "asc" },
+  })
+  // config 없거나 mode='off' 광고주 사전 제외 — processAdvertiser 가 한 번 더 가드.
+  const eligible = advertisers.filter(
+    (a) =>
+      a.bidAutomationConfig != null &&
+      a.bidAutomationConfig.mode !== "off",
+  )
+
+  // -- 3. 광고주 직렬 처리 ---------------------------------------------------
+  let advertisersOk = 0
+  let advertisersSkipped = 0
+  let keywordsScanned = 0
+  let suggestionsCreated = 0
+  let suggestionsUpdated = 0
+  let suggestionsDismissed = 0
+  const errors: CronError[] = []
+
+  for (const adv of eligible) {
+    try {
+      const r = await processAdvertiser(adv.id)
+      keywordsScanned += r.scanned
+      suggestionsCreated += r.created
+      suggestionsUpdated += r.updated
+      suggestionsDismissed += r.dismissed
+      if (r.scanned > 0) advertisersOk++
+      else advertisersSkipped++
+    } catch (e) {
+      const message = safeError(e)
+      errors.push({ advertiserId: adv.id, message })
+      console.error(
+        `[cron/bid-suggest] advertiser=${adv.id} failed: ${message}`,
+      )
+    }
+  }
+
+  return NextResponse.json({
+    ok: true,
+    advertisersTotal: eligible.length,
+    advertisersOk,
+    advertisersSkipped,
+    keywordsScanned,
+    suggestionsCreated,
+    suggestionsUpdated,
+    suggestionsDismissed,
+    ts,
+    errors,
+  })
+}
