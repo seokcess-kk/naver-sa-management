@@ -47,4 +47,5 @@ _workspace/
 
 # Claude Code 런타임 (락파일·예약 작업 등)
 .claude/scheduled_tasks.lock
+.claude/settings.local.json
 .env*.local

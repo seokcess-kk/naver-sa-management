@@ -33,3 +33,17 @@ curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/stat
 $secret = (Get-Content .env.local | Select-String "^CRON_SECRET=").ToString().Split("=")[1]
 curl.exe -H "Authorization: Bearer $secret" http://localhost:3000/api/cron/stat-daily
 ```
+
+## Telegram 채널 점검
+
+`.env.local` 의 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` 가 정상인지 확인:
+
+```bash
+# 봇이 받은 최근 메시지에서 chat.id 조회 (CHAT_ID 분실/재확인용)
+pnpm dlx tsx scripts/get-telegram-chat-id.ts
+
+# log + telegram 채널에 샘플 3건 (info / warn / critical) 발송
+pnpm dlx tsx scripts/send-test-telegram.ts
+```
+
+`get-telegram-chat-id.ts`: webhook 미설정 봇 한정. 운영에서는 호출 X.
