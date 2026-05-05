@@ -20,6 +20,7 @@
 
 import { logChannel } from "@/lib/notifier/log"
 import { emailChannel } from "@/lib/notifier/email"
+import { telegramChannel } from "@/lib/notifier/telegram"
 import type {
   NotificationChannel,
   NotificationPayload,
@@ -38,11 +39,15 @@ export type {
  * - log 채널: 항상 포함
  * - email 채널: RESEND_API_KEY 가 있을 때만 (env 없으면 stub 채널 자체를 추가하지 않음 — dispatch 결과
  *   배열을 단순화).
+ * - telegram 채널: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID 둘 다 있을 때만.
  */
 export function getChannels(): NotificationChannel[] {
   const channels: NotificationChannel[] = [logChannel]
   if (process.env.RESEND_API_KEY) {
     channels.push(emailChannel)
+  }
+  if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+    channels.push(telegramChannel)
   }
   return channels
 }

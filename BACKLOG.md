@@ -23,12 +23,8 @@
 - **D.4 추가 게이트**: 검색어 → 광고그룹 매핑 정책 결정 (자동 추정 / 사용자 row별 선택 / 1그룹씩 업로드)
 - **제외키워드 SA endpoint**: 별도 확인 필요 (현재 `lib/naver-sa/keywords.ts`에 함수 X)
 
-### LLM 분석 보조 (F.3~F.5 — ANTHROPIC_API_KEY 결정 대기)
-- 인프라(F.1 lint + F.1.5 폼 통합 + F.2 LlmCallLog) 완료
-- API 키 발급 + 월 비용 + 모델 결정 후 재개
-- 사용처: BidSuggestion reason enrich / 검수 반려 분류 / 일일 운영 요약 (F-13.2)
-
-### NotificationChannel 정식 활성화 (이메일)
-- `lib/notifier/email.ts` 코드 완성 — `RESEND_API_KEY` env 추가 시 자동 활성
+### NotificationChannel 정식 채널 결정
+- **Telegram** (`lib/notifier/telegram.ts`) — `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` 추가 시 자동 활성. Bot API 직접 호출, 외부 SDK 없음
+- **Email** (`lib/notifier/email.ts`) — Resend SDK 호출은 stub 상태. `RESEND_API_KEY` 추가 + stub 코드 활성화 필요
 - Slack 채널은 비대상 결정 (`48439c9` 제거)
 - 카카오 알림톡은 별도 NotificationChannel 구현 필요 (후속)

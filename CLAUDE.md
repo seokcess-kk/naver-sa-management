@@ -169,8 +169,11 @@ NAVER_SA_BASE_URL               # https://api.searchad.naver.com 등
 UPSTASH_REDIS_REST_URL
 UPSTASH_REDIS_REST_TOKEN
 
-# 알림 (개발 임시)
-RESEND_API_KEY
+# 알림 (둘 다 optional — 있으면 자동 활성)
+RESEND_API_KEY                  # 이메일 (현재 stub — Resend 호출 코드 활성화 필요)
+ALERT_EMAIL_TO
+TELEGRAM_BOT_TOKEN              # 텔레그램 (Bot API 직접 호출, 외부 SDK 없음)
+TELEGRAM_CHAT_ID
 
 # 모니터링
 SENTRY_DSN
