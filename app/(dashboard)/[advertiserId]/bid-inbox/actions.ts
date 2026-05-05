@@ -41,6 +41,11 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import { enrichBidReason } from "@/lib/llm/bid-reason"
+import type {
+  DecisionMetrics,
+  SuggestAction,
+} from "@/lib/auto-bidding/marginal-score"
 import type { Prisma as PrismaTypes } from "@/lib/generated/prisma/client"
 import type {
   BidSuggestionSeverity,
@@ -87,6 +92,8 @@ export type BidSuggestionAction = {
   suggestedBid: number
   deltaPct: number
   direction: "up" | "down"
+  /** F.4 enrich 결과 — 1회만 저장. 존재 시 클라이언트는 LLM 호출 X. */
+  llmEnrichedReason?: string
 }
 
 export type ListOptions = {
@@ -483,7 +490,240 @@ export async function approveBidSuggestions(
 }
 
 // =============================================================================
-// 3. dismissBidSuggestions
+// 3. enrichSuggestionReason — LLM 보강 (Phase F.4 lazy on-demand)
+// =============================================================================
+
+export type EnrichResult = {
+  text: string
+  usedLlm: boolean
+  /** 이미 enrich 된 결과 재반환 — LLM 재호출 X. */
+  cached: boolean
+}
+
+const STATS_WINDOW_DAYS_FOR_ENRICH = 7
+
+/**
+ * 단건 BidSuggestion reason 을 LLM 으로 보강.
+ *
+ * 흐름:
+ *   1. 권한 검증 (operator+ — read-only 에 가까우나 비용 발생 호출이라 viewer 차단)
+ *   2. BidSuggestion 로드 (status='pending', advertiserId 일치, engineSource='bid')
+ *   3. 이미 action.llmEnrichedReason 존재 → 그대로 반환 (LLM 재호출 방지)
+ *   4. Keyword + StatDaily 7일 누적 재계산 → DecisionMetrics 재구성
+ *      · cron 이 metrics 를 적재하지 않아 본 시점 재계산 필수
+ *   5. enrichBidReason 호출
+ *   6. 성공 → action JSON 에 llmEnrichedReason 저장 (재호출 방지) + AuditLog
+ *
+ * 비용 안전:
+ *   - 1건 1회만 호출 (재호출 방지) — 텍스트가 만족스럽지 않아도 재시도 X
+ *   - 광고주 1명 100건 enrich = 100 × $0.005 = $0.5 → 월 $2 / 광고주
+ *   - LLM_MONTHLY_BUDGET_USD env 한도 도달 시 callLlmWithFallback 이 폴백
+ *
+ * 비대상:
+ *   - engineSource ≠ 'bid' (quality / targeting / budget) — 후속 PR 별도 prompt
+ *   - 일괄 enrich (다중 선택) — 비용 폭증 방지 차원에서 의도적 단건만
+ */
+export async function enrichSuggestionReason(
+  advertiserId: string,
+  suggestionId: string,
+): Promise<ActionResult<EnrichResult>> {
+  // -- 입력 검증 --
+  try {
+    advertiserIdSchema.parse(advertiserId)
+    z.string().trim().min(1).max(128).parse(suggestionId)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `잘못된 입력: ${msg}` }
+  }
+
+  // -- 권한 검증 (viewer 차단 — 비용 발생 호출) --
+  const { user } = await getCurrentAdvertiser(advertiserId)
+  if (user.role === "viewer") {
+    return { ok: false, error: "권한 부족 (viewer 는 AI 설명 불가)" }
+  }
+
+  // -- BidSuggestion 로드 (pending + advertiser + bid 엔진 한정) --
+  const suggestion = await prisma.bidSuggestion.findFirst({
+    where: {
+      id: suggestionId,
+      advertiserId,
+      status: "pending",
+      engineSource: "bid",
+    },
+    select: {
+      id: true,
+      keywordId: true,
+      action: true,
+      reason: true,
+    },
+  })
+  if (!suggestion) {
+    return {
+      ok: false,
+      error:
+        "권고를 찾을 수 없습니다 (이미 처리되었거나 'bid' 엔진이 아님 — quality/targeting/budget 은 후속 PR)",
+    }
+  }
+
+  // -- 이미 enrich 된 결과 → 재사용 (LLM 재호출 방지) --
+  const actionRaw = suggestion.action as Record<string, unknown> | null
+  if (
+    actionRaw &&
+    typeof actionRaw === "object" &&
+    typeof actionRaw.llmEnrichedReason === "string" &&
+    actionRaw.llmEnrichedReason.length > 0
+  ) {
+    return {
+      ok: true,
+      data: {
+        text: actionRaw.llmEnrichedReason,
+        usedLlm: true,
+        cached: true,
+      },
+    }
+  }
+
+  // -- 키워드 + 7일 stats 재계산 (cron 미적재 metrics 재구성) --
+  if (!suggestion.keywordId) {
+    return {
+      ok: false,
+      error: "키워드 미연결 권고 — bid 엔진은 키워드가 필수",
+    }
+  }
+
+  const keyword = await prisma.keyword.findFirst({
+    where: {
+      id: suggestion.keywordId,
+      adgroup: { campaign: { advertiserId } },
+    },
+    select: {
+      keyword: true,
+      nccKeywordId: true,
+    },
+  })
+  if (!keyword) {
+    return { ok: false, error: "키워드 미존재 (광고주 일치 X)" }
+  }
+
+  const since = new Date()
+  since.setUTCDate(since.getUTCDate() - STATS_WINDOW_DAYS_FOR_ENRICH)
+
+  const agg = await prisma.statDaily.aggregate({
+    where: {
+      advertiserId,
+      level: "keyword",
+      refId: keyword.nccKeywordId,
+      date: { gte: since },
+    },
+    _sum: {
+      clicks: true,
+      cost: true,
+      conversions: true,
+      revenue: true,
+    },
+  })
+
+  const clicks7d = agg._sum.clicks ?? 0
+  const cost7d = agg._sum.cost ? Number(agg._sum.cost) : 0
+  const conversions7d = agg._sum.conversions ?? null
+  const revenue7d = agg._sum.revenue ? Number(agg._sum.revenue) : null
+
+  const currentRoas =
+    cost7d > 0 && revenue7d != null && revenue7d > 0
+      ? revenue7d / cost7d
+      : null
+  const currentCpa =
+    conversions7d != null && conversions7d > 0 && cost7d > 0
+      ? cost7d / conversions7d
+      : null
+  const keywordCpc = clicks7d > 0 ? cost7d / clicks7d : null
+
+  const metrics: DecisionMetrics = {
+    clicks7d,
+    cost7d,
+    revenue7d,
+    currentRoas,
+    currentCpa,
+    keywordCpc,
+  }
+
+  const action = actionRaw as unknown as SuggestAction
+  if (
+    !action ||
+    typeof action.currentBid !== "number" ||
+    typeof action.suggestedBid !== "number"
+  ) {
+    return {
+      ok: false,
+      error: "권고 액션 shape 불일치 — 'bid' 엔진 SuggestAction 필요",
+    }
+  }
+
+  // -- LLM 호출 (폴백 포함) --
+  const enriched = await enrichBidReason({
+    searchTerm: keyword.keyword,
+    suggestion: {
+      currentBid: action.currentBid,
+      suggestedBid: action.suggestedBid,
+      deltaPct: action.deltaPct,
+      direction: action.direction,
+    },
+    metrics,
+    defaultReason: suggestion.reason,
+  })
+
+  // -- 폴백 (usedLlm=false) — 저장 X (LLM 미호출 = 보존할 새 텍스트 없음) --
+  if (!enriched.usedLlm) {
+    return {
+      ok: true,
+      data: {
+        text: enriched.text,
+        usedLlm: false,
+        cached: false,
+      },
+    }
+  }
+
+  // -- 성공 → action JSON 에 보존 + AuditLog --
+  const newAction: PrismaTypes.InputJsonValue = {
+    ...(actionRaw ?? {}),
+    llmEnrichedReason: enriched.text,
+  } as PrismaTypes.InputJsonValue
+
+  await prisma.bidSuggestion.update({
+    where: { id: suggestion.id },
+    data: { action: newAction },
+  })
+
+  await logAudit({
+    userId: user.id,
+    action: "bid_suggestion.enrich",
+    targetType: "BidSuggestion",
+    targetId: suggestion.id,
+    before: null,
+    after: {
+      advertiserId,
+      suggestionId: suggestion.id,
+      usedLlm: true,
+      // LLM 응답 본문은 prompt 파생물 — AuditLog 에는 길이만 (privacy)
+      enrichedTextLength: enriched.text.length,
+    },
+  })
+
+  revalidatePath(`/${advertiserId}/bid-inbox`)
+
+  return {
+    ok: true,
+    data: {
+      text: enriched.text,
+      usedLlm: true,
+      cached: false,
+    },
+  }
+}
+
+// =============================================================================
+// 4. dismissBidSuggestions
 // =============================================================================
 
 export type DismissResult = {

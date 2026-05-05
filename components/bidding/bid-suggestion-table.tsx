@@ -30,6 +30,9 @@ import {
   XCircleIcon,
   ArrowUpIcon,
   ArrowDownIcon,
+  SparklesIcon,
+  Loader2Icon,
+  InfoIcon,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -61,6 +64,7 @@ import {
 import {
   approveBidSuggestions,
   dismissBidSuggestions,
+  enrichSuggestionReason,
   type BidSuggestionRow,
 } from "@/app/(dashboard)/[advertiserId]/bid-inbox/actions"
 import { cn } from "@/lib/utils"
@@ -116,6 +120,16 @@ export function BidSuggestionTable({
   const [submitting, setSubmitting] = React.useState(false)
   const [resultDialog, setResultDialog] =
     React.useState<ApproveResult | null>(null)
+
+  // F.4 — 상세 모달 (행 클릭 → AI 설명 보강)
+  const [detailRow, setDetailRow] = React.useState<BidSuggestionRow | null>(
+    null,
+  )
+  // suggestionId → enriched text (클라이언트 메모리 캐시 — 모달 재오픈 시 재호출 방지)
+  const [enrichedMap, setEnrichedMap] = React.useState<Map<string, string>>(
+    () => new Map(),
+  )
+  const [enrichingId, setEnrichingId] = React.useState<string | null>(null)
 
   // 필터 적용
   const filtered = React.useMemo(() => {
@@ -214,6 +228,45 @@ export function BidSuggestionTable({
       toast.error(`거부 오류: ${msg}`)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  // -- F.4 enrich (lazy) -----------------------------------------------------
+  async function handleEnrich(row: BidSuggestionRow) {
+    // 이미 클라이언트 캐시 / 서버 보존 텍스트 있으면 호출 스킵
+    if (enrichedMap.has(row.id)) return
+    if (row.action.llmEnrichedReason) return
+    if (row.engineSource !== "bid") {
+      toast.error("'bid' 엔진만 AI 설명 가능 — 후속 PR")
+      return
+    }
+    setEnrichingId(row.id)
+    try {
+      const res = await enrichSuggestionReason(advertiserId, row.id)
+      if (!res.ok) {
+        toast.error(`AI 설명 실패: ${res.error}`)
+        return
+      }
+      // usedLlm=false (폴백) 도 텍스트는 받지만 캐시 보존 X — 다음 시도에서 재호출
+      if (res.data.usedLlm) {
+        setEnrichedMap((prev) => {
+          const next = new Map(prev)
+          next.set(row.id, res.data.text)
+          return next
+        })
+        if (!res.data.cached) {
+          toast.success("AI 설명 보강 완료")
+        }
+      } else {
+        toast.warning(
+          "AI 설명 사용 불가 — 정형 사유로 표시 (API 키 미설정 또는 월 한도 도달)",
+        )
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      toast.error(`AI 설명 오류: ${msg}`)
+    } finally {
+      setEnrichingId(null)
     }
   }
 
@@ -388,6 +441,7 @@ export function BidSuggestionTable({
                   row={s}
                   selected={selectedIds.has(s.id)}
                   onToggle={() => toggleOne(s.id)}
+                  onOpenDetail={() => setDetailRow(s)}
                   canMutate={canMutate}
                 />
               ))}
@@ -550,6 +604,37 @@ export function BidSuggestionTable({
         </DialogContent>
       </Dialog>
 
+      {/* 상세 모달 (F.4 — AI 설명 보강) */}
+      <Dialog
+        open={detailRow !== null}
+        onOpenChange={(o) => !o && setDetailRow(null)}
+      >
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>권고 상세</DialogTitle>
+            <DialogDescription>
+              정형 사유 + AI 자연어 설명 (필요 시 호출).
+            </DialogDescription>
+          </DialogHeader>
+          {detailRow && (
+            <DetailContent
+              row={detailRow}
+              enriched={
+                detailRow.action.llmEnrichedReason ??
+                enrichedMap.get(detailRow.id) ??
+                null
+              }
+              enriching={enrichingId === detailRow.id}
+              canEnrich={canMutate && detailRow.engineSource === "bid"}
+              onEnrich={() => handleEnrich(detailRow)}
+            />
+          )}
+          <DialogFooter>
+            <Button onClick={() => setDetailRow(null)}>닫기</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* 적용 결과 다이얼로그 */}
       <Dialog
         open={resultDialog !== null}
@@ -610,20 +695,29 @@ function SuggestionRow({
   row,
   selected,
   onToggle,
+  onOpenDetail,
   canMutate,
 }: {
   row: BidSuggestionRow
   selected: boolean
   onToggle: () => void
+  onOpenDetail: () => void
   canMutate: boolean
 }) {
   const k = row.keyword
   // 적용 불가 케이스 시각 구분
   const invalid =
     !k || k.userLock || k.useGroupBidAmt || k.status === "deleted"
+  // 행 클릭 → 상세. 단, 체크박스 셀 클릭은 stopPropagation 으로 처리.
   return (
-    <TableRow className={cn(invalid && "bg-amber-50/40 dark:bg-amber-950/10")}>
-      <TableCell>
+    <TableRow
+      className={cn(
+        "cursor-pointer hover:bg-muted/30",
+        invalid && "bg-amber-50/40 dark:bg-amber-950/10",
+      )}
+      onClick={onOpenDetail}
+    >
+      <TableCell onClick={(e) => e.stopPropagation()}>
         <Checkbox
           checked={selected}
           onCheckedChange={onToggle}
@@ -693,6 +787,138 @@ function SuggestionRow({
         {formatDate(row.createdAt)}
       </TableCell>
     </TableRow>
+  )
+}
+
+// =============================================================================
+// 상세 모달 컨텐츠 (F.4)
+// =============================================================================
+
+function DetailContent({
+  row,
+  enriched,
+  enriching,
+  canEnrich,
+  onEnrich,
+}: {
+  row: BidSuggestionRow
+  /** 서버 보존 또는 클라이언트 캐시 — null 이면 미보강 (버튼 노출) */
+  enriched: string | null
+  enriching: boolean
+  canEnrich: boolean
+  onEnrich: () => void
+}) {
+  const k = row.keyword
+  const isUp = row.action.direction === "up"
+  return (
+    <div className="space-y-4">
+      {/* 기본 정보 */}
+      <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+          <div>
+            <span className="text-muted-foreground">키워드</span>
+            <span className="ml-2 font-medium">{k?.text ?? "—"}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">엔진</span>
+            <span className="ml-2">
+              <EngineBadge engine={row.engineSource} />
+            </span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">광고그룹</span>
+            <span className="ml-2">{k?.adgroupName ?? "—"}</span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">severity</span>
+            <span className="ml-2">
+              <SeverityBadge severity={row.severity} />
+            </span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">현재 입찰가</span>
+            <span className="ml-2 font-mono">
+              {formatBid(row.action.currentBid)}원
+            </span>
+          </div>
+          <div>
+            <span className="text-muted-foreground">권고 입찰가</span>
+            <span
+              className={cn(
+                "ml-2 font-mono",
+                isUp
+                  ? "text-emerald-600 dark:text-emerald-400"
+                  : "text-amber-700 dark:text-amber-400",
+              )}
+            >
+              {formatBid(row.action.suggestedBid)}원 ({isUp ? "+" : "-"}
+              {row.action.deltaPct}%)
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* 정형 reason */}
+      <div>
+        <div className="mb-1 text-xs font-medium text-muted-foreground">
+          정형 사유 (시스템)
+        </div>
+        <div className="rounded-md border bg-background px-3 py-2 text-sm whitespace-pre-wrap">
+          {row.reason}
+        </div>
+      </div>
+
+      {/* AI 설명 영역 */}
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <span className="text-xs font-medium text-muted-foreground">
+            AI 설명 (보강)
+          </span>
+          {!enriched && canEnrich && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onEnrich}
+              disabled={enriching}
+              className="h-7 gap-1.5"
+            >
+              {enriching ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <SparklesIcon className="size-3.5" />
+              )}
+              {enriching ? "호출 중..." : "AI 설명 보기"}
+            </Button>
+          )}
+        </div>
+        {enriched ? (
+          <div className="rounded-md border border-sky-200 bg-sky-50/50 px-3 py-2 text-sm whitespace-pre-wrap dark:border-sky-900/50 dark:bg-sky-950/20">
+            {enriched}
+          </div>
+        ) : canEnrich ? (
+          <div className="rounded-md border border-dashed bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
+            <div className="flex items-start gap-1.5">
+              <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
+              <div>
+                <p>
+                  Claude Haiku 4.5 호출로 정형 사유를 자연어 2~3 문장으로
+                  보강합니다. 호출 1회당 약 $0.001 ~ $0.005 USD 발생합니다.
+                </p>
+                <p className="mt-1">
+                  결과는 권고에 영구 보존되며 재호출되지 않습니다 (비용 안전).
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            {row.engineSource !== "bid"
+              ? "'bid' 엔진 권고만 AI 설명 지원 (quality / targeting / budget 은 후속 PR)"
+              : "viewer 권한은 AI 설명 호출 불가 (비용 발생)"}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
