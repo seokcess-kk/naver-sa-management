@@ -128,6 +128,12 @@ const ALERT_TYPES: { value: AlertRuleType; label: string; description: string }[
     description:
       "어제(KST) 일예산 100% 이상 소진 캠페인 카운트. 광고주 단위 1일 1건 일일 요약",
   },
+  {
+    value: "llm_daily_summary",
+    label: "일일 운영 요약 (llm_daily_summary)",
+    description:
+      "매일 KST 09:00 LLM(Sonnet)이 어제 운영 결과(자동 비딩/Inbox/알림)를 1단락 요약. ANTHROPIC_API_KEY 없으면 정형 텍스트 폴백",
+  },
 ]
 
 const DEFAULT_THRESHOLDS = [50, 80, 100]

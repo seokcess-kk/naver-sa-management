@@ -40,6 +40,7 @@ export type AlertRuleType =
   | "suggestion_inbox"
   | "quality_stagnation"
   | "budget_pacing"
+  | "llm_daily_summary"
 
 export type AlertRuleRow = {
   id: string
@@ -79,6 +80,7 @@ const alertRuleTypeSchema = z.enum([
   "suggestion_inbox",
   "quality_stagnation",
   "budget_pacing",
+  "llm_daily_summary",
 ])
 
 /**
@@ -193,6 +195,15 @@ const budgetPacingParamsSchema = z
   })
   .strict()
 
+// llm_daily_summary 는 광고주 무관 단일 룰 — cron 이 활성 광고주 모두 처리.
+// advertiserId 는 의미 없으므로 default sentinel 사용 가능 (또는 빈 문자열).
+const llmDailySummaryParamsSchema = z
+  .object({
+    // 호환 위해 advertiserId 받지만 의미 없음 (cron 이 모든 활성 광고주 처리)
+    advertiserId: advertiserIdSchema,
+  })
+  .strict()
+
 /** params 검증을 type 에 따라 분기. */
 function validateParams(
   type: AlertRuleType,
@@ -238,6 +249,9 @@ function validateParams(
       break
     case "budget_pacing":
       parsed = budgetPacingParamsSchema.safeParse(params)
+      break
+    case "llm_daily_summary":
+      parsed = llmDailySummaryParamsSchema.safeParse(params)
       break
     default:
       return { ok: false, error: `미지원 type: ${type}` }
