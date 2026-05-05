@@ -12,6 +12,17 @@
   - `keywords-table.tsx` toolbar 우측 statsLoading/statsError 배지 자리 예약 (`min-w-[120px]` + invisible placeholder). streaming 종료 시 옆 "총 N건" 텍스트 시프트 제거.
 - **재측정 필요**: production 배포 후 Lighthouse Desktop 재실행 → CLS ≤ 0.1 도달 여부 확인. 미도달 시 footer / virtualizer 영역 추가 진단.
 
+## 운영 측정 후 결정
+
+### 동기화 시간 한계 — 1차 개선 완료, 측정 trigger 대기
+- **현황 (2026-05-05)**: keywords / ads / extensions sync 에 1차 개선 적용
+  - `lib/sync/concurrency.ts` 신규 — `getAdgroupChunkSize()` (env `SYNC_ADGROUP_CHUNK_SIZE`, 기본 5, clamp [1,20]) / `mapWithConcurrency` / `logSyncTiming`
+  - 광고그룹 chunk N 병렬 listAPI + chunk 내부 upsert UPSERT_CONCURRENCY=10 병렬화 (Supabase pool 안전선 내, 5천 행 ~150s → ~15s 추정)
+  - keywords / ads action + cron runners 양쪽 적용. extensions 는 catch 분기 정밀해서 timing 로깅만
+  - 종료 시 `[sync.{kind}] totalMs=...` 로그 — `totalMs > 0.8 × maxDuration(300s) = 240s` 시 ⚠ 표시
+- **2차 트리거**: 운영 로그에서 ⚠ 240s 초과 광고주 지속 발생 시 ChangeBatch + Chunk Executor (SPEC 3.5) 이관
+- **운영 튜닝 옵션**: `SYNC_ADGROUP_CHUNK_SIZE` env 조정 (Rate Limit 한도 / 응답 시간 측정 후)
+
 ## 외부 의존 보류
 
 ### 검색어 보고서 자동화 (D.4 — 운영팀 협의 대기)

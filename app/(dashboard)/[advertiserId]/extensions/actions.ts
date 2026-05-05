@@ -56,6 +56,7 @@ import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser, assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
 import { recordSyncAt } from "@/lib/sync/last-sync-at"
+import { logSyncTiming } from "@/lib/sync/concurrency"
 import { getAdminSupabase } from "@/lib/supabase/admin"
 import {
   createAdExtensions,
@@ -173,8 +174,11 @@ function isUnsupportedExtensionTypeError(e: unknown): boolean {
  *
  * 본 액션은 "조회 → 적재" 만 — 외부 변경 X → ChangeBatch 미사용.
  *
- * TODO: 광고그룹 200개 + type 2종 동기화 시 Vercel 함수 시간 한계 부딪힐 수 있음.
- *       현 시점은 단순 동기 처리. 측정 후 ChangeBatch + Chunk Executor (SPEC 3.5) 이관.
+ * 시간 한계 (BACKLOG: 동기화 시간 한계):
+ *   - extensions 는 광고그룹 단위 sequential listAdExtensions (catch 분기 정밀해서
+ *     keywords/ads 처럼 chunk 병렬화 미적용 — 변경 위험 대비 가치 낮음).
+ *   - 종료 시 logSyncTiming 으로 totalMs 출력 — 240s 초과 지속 발생 시
+ *     ChangeBatch + Chunk Executor (SPEC 3.5) 이관 트리거.
  */
 export async function syncAdExtensions(
   advertiserId: string,
@@ -442,13 +446,23 @@ export async function syncAdExtensions(
 
   revalidatePath(`/${advertiserId}/extensions`)
 
+  const totalMs = Date.now() - start
+  logSyncTiming({
+    kind: "extensions",
+    advertiserId,
+    totalMs,
+    scannedAdgroups,
+    upserts: synced,
+    maxDurationMs: 300_000,
+  })
+
   return {
     ok: true,
     synced,
     scannedAdgroups,
     skipped,
     unsupportedAdgroupTypes,
-    durationMs: Date.now() - start,
+    durationMs: totalMs,
   }
 }
 

@@ -60,6 +60,11 @@ import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import { buildAdFields, extractAdType } from "@/lib/sync/ad-fields"
 import {
+  getAdgroupChunkSize,
+  mapWithConcurrency,
+  UPSERT_CONCURRENCY,
+} from "@/lib/sync/concurrency"
+import {
   mapAdGroupStatus,
   mapAdStatus,
   mapCampaignStatus,
@@ -380,9 +385,8 @@ async function runKeywordsSync(
   let skipped = 0
   let scannedAdgroups = 0
 
-  // 광고그룹 chunk 5 병렬화 (Rate Limit 토큰 버킷이 광고주별 큐잉 → 자동 wait).
-  // N=50 기준 기존 순차 ~15초 → ~3초 수준 (약 5배 단축).
-  const CHUNK_SIZE = 5
+  // 광고그룹 chunk N(env SYNC_ADGROUP_CHUNK_SIZE, 기본 5) 병렬화.
+  const CHUNK_SIZE = getAdgroupChunkSize()
 
   for (let i = 0; i < adgroups.length; i += CHUNK_SIZE) {
     const slice = adgroups.slice(i, i + CHUNK_SIZE)
@@ -413,11 +417,14 @@ async function runKeywordsSync(
       }
       const remote: SaKeyword[] = r.value
 
-      for (const k of remote) {
+      // chunk 내부 keyword upsert 도 UPSERT_CONCURRENCY=10 병렬화.
+      const upsertResults = await mapWithConcurrency(
+        remote,
+        UPSERT_CONCURRENCY,
+        async (k): Promise<"ok" | "skip"> => {
         const dbAdgroupId = adgroupIdMap.get(k.nccAdgroupId)
         if (!dbAdgroupId) {
-          skipped++
-          continue
+          return "skip"
         }
 
         const mappedStatus = mapKeywordStatus(k)
@@ -495,7 +502,13 @@ async function runKeywordsSync(
           create: baseCreateData,
           update: baseUpdateData,
         })
-        syncedKeywords++
+        return "ok"
+      },
+      )
+
+      for (const r of upsertResults) {
+        if (r === "ok") syncedKeywords++
+        else skipped++
       }
 
       scannedAdgroups++
@@ -546,8 +559,8 @@ async function runAdsSync(
   let skipped = 0
   let scannedAdgroups = 0
 
-  // 광고그룹 chunk 5 병렬화 (Rate Limit 토큰 버킷이 광고주별 큐잉 → 자동 wait).
-  const CHUNK_SIZE = 5
+  // 광고그룹 chunk N(env SYNC_ADGROUP_CHUNK_SIZE, 기본 5) 병렬화.
+  const CHUNK_SIZE = getAdgroupChunkSize()
 
   for (let i = 0; i < adgroups.length; i += CHUNK_SIZE) {
     const slice = adgroups.slice(i, i + CHUNK_SIZE)
@@ -577,11 +590,14 @@ async function runAdsSync(
       }
       const remote: SaAd[] = r.value
 
-      for (const a of remote) {
+      // chunk 내부 ad upsert 도 UPSERT_CONCURRENCY=10 병렬화.
+      const upsertResults = await mapWithConcurrency(
+        remote,
+        UPSERT_CONCURRENCY,
+        async (a): Promise<"ok" | "skip"> => {
         const dbAdgroupId = adgroupIdMap.get(a.nccAdgroupId)
         if (!dbAdgroupId) {
-          skipped++
-          continue
+          return "skip"
         }
 
         const mappedStatus = mapAdStatus(a)
@@ -651,7 +667,13 @@ async function runAdsSync(
           create: baseCreateData,
           update: baseUpdateData,
         })
-        syncedAds++
+        return "ok"
+      },
+      )
+
+      for (const r of upsertResults) {
+        if (r === "ok") syncedAds++
+        else skipped++
       }
 
       scannedAdgroups++

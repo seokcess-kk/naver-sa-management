@@ -1,10 +1,7 @@
 /**
- * adgroups/actions.ts 헬퍼 단위 테스트.
+ * lib/adgroups/userlock.ts 단위 테스트.
  *
- * 본 파일은 Server Action 본체(bulkUpdateAdgroups / syncAdgroups) 통합 테스트는 담당 X.
- * 외부 의존(prisma / SA / auth) 없는 순수 헬퍼 — extractActualUserLock — 만 검증.
- *
- * SPEC TODO(F-6.4 롤백 정확도) 1차 적용:
+ * SPEC F-6.4 롤백 정확도 1차:
  *   - SA 응답의 `userLock` 이 `raw` 에 보존되어 있으면 그 값 신뢰
  *   - 없으면 `status==='off'` 폴백 (기존 단순화 표현식)
  *   - PAUSED + userLock=false 광고그룹의 before 가 잘못 true 로 기록되던 시나리오 회귀 방지
@@ -12,7 +9,7 @@
 
 import { describe, expect, it } from "vitest"
 
-import { extractActualUserLock } from "./actions"
+import { extractActualUserLock } from "./userlock"
 import type { AdGroupStatus } from "@/lib/generated/prisma/client"
 
 describe("extractActualUserLock — F-6.4 롤백 정확도 1차", () => {

@@ -51,6 +51,12 @@ import { getCurrentAdvertiser, assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
 import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import {
+  getAdgroupChunkSize,
+  logSyncTiming,
+  mapWithConcurrency,
+  UPSERT_CONCURRENCY,
+} from "@/lib/sync/concurrency"
+import {
   createAds,
   deleteAd,
   listAds,
@@ -109,8 +115,11 @@ export type SyncAdsOptions = {
  *
  * 본 액션은 "조회 → 적재" 만 — 외부 변경 X → ChangeBatch 미사용 (정책상 OK).
  *
- * TODO: 광고그룹 200개 + 다수 소재 동기화 시 Vercel 함수 시간 한계 부딪힐 수 있음.
- *       현 시점은 단순 동기 처리. 측정 후 ChangeBatch + Chunk Executor (SPEC 3.5) 이관.
+ * 시간 한계 (BACKLOG: 동기화 시간 한계 / 1차 개선):
+ *   - 광고그룹 chunk N(env SYNC_ADGROUP_CHUNK_SIZE, 기본 5) 병렬 listAds
+ *     + chunk 내부 ad upsert UPSERT_CONCURRENCY=10 병렬화 (Supabase pool 안전선 내).
+ *   - 종료 시 logSyncTiming 으로 totalMs 출력 — totalMs > maxDuration*0.8 (240s) 지속 발생 시
+ *     ChangeBatch + Chunk Executor (SPEC 3.5) 이관 트리거.
  */
 export async function syncAds(
   advertiserId: string,
@@ -175,17 +184,14 @@ export async function syncAds(
   )
 
   // -- 광고그룹 단위 listAds 반복 ---------------------------------------------
-  // SA 소재 조회는 광고그룹 단위만 제공. 광고그룹 N개 → 호출 N번.
-  // 부분 실패 허용 (Promise.allSettled): 단일 광고그룹 실패는 다른 광고그룹 동기화에 영향 X.
-  //
-  // 성능: 광고그룹 chunk 5 병렬 호출 (Rate Limit 토큰 버킷이 광고주별 큐잉 → 자동 wait).
-  //   - N=50 기준 기존 순차 ~15초 → chunk 5 병렬 ~3초 수준 (약 5배 단축).
-  //   - DB upsert 는 chunk 결과 매핑 후 sequential — connection pool 보호.
+  // 1차 개선 (BACKLOG: 동기화 시간 한계):
+  //   - 광고그룹 chunk N(env SYNC_ADGROUP_CHUNK_SIZE, 기본 5) 병렬 listAds.
+  //   - chunk 결과 도착 즉시 ad upsert 도 UPSERT_CONCURRENCY=10 병렬화.
   let syncedAds = 0
   let skipped = 0
   let scannedAdgroups = 0
 
-  const CHUNK_SIZE = 5
+  const CHUNK_SIZE = getAdgroupChunkSize()
 
   try {
     for (let i = 0; i < adgroups.length; i += CHUNK_SIZE) {
@@ -217,17 +223,18 @@ export async function syncAds(
         }
         const remote: SaAd[] = r.value
 
-        // -- upsert 루프 ------------------------------------------------------
-        for (const a of remote) {
+        // -- upsert 병렬 (UPSERT_CONCURRENCY) -------------------------------
+        const upsertResults = await mapWithConcurrency(
+          remote,
+          UPSERT_CONCURRENCY,
+          async (a): Promise<"ok" | "skip"> => {
           const dbAdgroupId = adgroupIdMap.get(a.nccAdgroupId)
           if (!dbAdgroupId) {
-            // 광고그룹이 DB 에 없음 (광고그룹 미동기화 또는 삭제됨) → skip + 카운트.
-            skipped++
             console.warn(
               `[syncAds] skip nccAdId=${a.nccAdId}: ` +
                 `parent nccAdgroupId=${a.nccAdgroupId} not found in DB`,
             )
-            continue
+            return "skip"
           }
 
           const mappedStatus = mapAdStatus(a)
@@ -303,7 +310,13 @@ export async function syncAds(
             create: baseCreateData,
             update: baseUpdateData,
           })
-          syncedAds++
+          return "ok"
+        },
+        )
+
+        for (const r of upsertResults) {
+          if (r === "ok") syncedAds++
+          else skipped++
         }
 
         scannedAdgroups++
@@ -338,12 +351,22 @@ export async function syncAds(
 
   revalidatePath(`/${advertiserId}/ads`)
 
+  const totalMs = Date.now() - start
+  logSyncTiming({
+    kind: "ads",
+    advertiserId,
+    totalMs,
+    scannedAdgroups,
+    upserts: syncedAds,
+    maxDurationMs: 300_000,
+  })
+
   return {
     ok: true,
     syncedAds,
     scannedAdgroups,
     skipped,
-    durationMs: Date.now() - start,
+    durationMs: totalMs,
   }
 }
 
