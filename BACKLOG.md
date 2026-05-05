@@ -4,13 +4,16 @@
 
 ## UX 품질
 
-### CLS 0.216 — 키워드 페이지 (15K행) — 1차 개선 (재측정 대기)
-- **측정일**: 2026-05-04 (Lighthouse Desktop, production build, 광고주 렌트박스 15,027행)
-- **이전 현황**: LCP 1.2s / TBT 80ms 통과. CLS 0.216 (Web Vitals "Needs Improvement", 0.1~0.25)
-- **1차 적용 (2026-05-05)**:
-  - 키워드 한정 `loading.tsx` 신규 — 공통 fallback 의 body=h-64(256px) → 실제 페이지 구조(toolbar 2줄 + 액션바 2줄 + `max-h-[calc(100dvh-280px)] min-h-[320px]` 테이블)와 매칭. loading→page swap 시 body 확장 시프트 제거.
-  - `keywords-table.tsx` toolbar 우측 statsLoading/statsError 배지 자리 예약 (`min-w-[120px]` + invisible placeholder). streaming 종료 시 옆 "총 N건" 텍스트 시프트 제거.
-- **재측정 필요**: production 배포 후 Lighthouse Desktop 재실행 → CLS ≤ 0.1 도달 여부 확인. 미도달 시 footer / virtualizer 영역 추가 진단.
+### TBT 290ms — 키워드 페이지 (15K행) — Needs Improvement
+- **측정일**: 2026-05-05 (Lighthouse Desktop, production build, 같은 광고주 15K행)
+- **현황**: Web Vitals 핵심 3종 모두 Good (FCP 0.5s / LCP 1.3s / CLS 0 / SI 2.2s). TBT 290ms 만 "Needs Improvement" (목표 < 200ms)
+- **이전 대비**: 80ms → 290ms (3.6배). loading→page swap 시 client streaming(stats useEffect) + virtualizer 첫 measurement + staging Map 초기화 등 client side work 누적이 원인 추정
+- **개선 후보 (착수 시)**:
+  - `keywords-table.tsx` 의 useMemo / useCallback dependency 점검 (불필요한 재계산)
+  - virtualizer measureElement 호출 횟수 측정 (overScan 조정)
+  - stats useEffect를 React Suspense + use() 로 전환 (Next 16 + React 19 패턴)
+  - 큰 dependency 배열을 가진 useEffect 분할
+- **우선순위**: 낮음. 운영 사용성 영향 거의 없음 (인터랙션 직전 0.3초 추가 blocking). 다른 이슈 우선 처리 후 검토
 
 ## 운영 검증 대기
 
