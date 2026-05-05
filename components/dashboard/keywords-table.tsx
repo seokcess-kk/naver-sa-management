@@ -1798,19 +1798,27 @@ export function KeywordsTable({
               <SelectItem value="last30days">지난 30일</SelectItem>
             </SelectContent>
           </Select>
-          {statsLoading ? (
-            <span className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
-              <span className="size-2 animate-pulse rounded-full bg-foreground/40" />
-              지표 불러오는 중...
-            </span>
-          ) : statsError ? (
-            <span
-              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900"
-              title={statsError}
-            >
-              지표 조회 실패 — 동기화 후 재시도
-            </span>
-          ) : null}
+          {/* 지표 상태 배지 — 자리 예약(min-w + invisible) 으로 streaming 시 시프트 방지. */}
+          <div className="min-w-[120px]">
+            {statsLoading ? (
+              <span className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
+                <span className="size-2 animate-pulse rounded-full bg-foreground/40" />
+                지표 불러오는 중...
+              </span>
+            ) : statsError ? (
+              <span
+                className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-900"
+                title={statsError}
+              >
+                지표 조회 실패 — 동기화 후 재시도
+              </span>
+            ) : (
+              <span className="invisible inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px]">
+                <span className="size-2 rounded-full bg-foreground/40" />
+                지표 불러오는 중...
+              </span>
+            )}
+          </div>
           <span className="text-xs text-muted-foreground">
             총 {keywords.length.toLocaleString()}건
             {rows.length !== keywords.length && (

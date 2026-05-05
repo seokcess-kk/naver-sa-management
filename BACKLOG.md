@@ -4,13 +4,13 @@
 
 ## UX 품질
 
-### CLS 0.216 — 키워드 페이지 (15K행)
+### CLS 0.216 — 키워드 페이지 (15K행) — 1차 개선 (재측정 대기)
 - **측정일**: 2026-05-04 (Lighthouse Desktop, production build, 광고주 렌트박스 15,027행)
-- **현황**: LCP 1.2s / TBT 80ms 통과. CLS 0.216 (Web Vitals "Needs Improvement", 0.1~0.25)
-- **추정 원인**: client streaming(`b6d9f32`) 으로 데이터가 늦게 채워질 때 footer 합계·지표 영역이 시프트. 키워드 행 자체는 colgroup `table-layout: fixed`로 고정.
-- **확인 방법**: Chrome DevTools → Performance Insights → Layout shifts 패널에서 시프트 요소 식별
-- **개선안 후보**: 합계 footer / 5개 지표 컬럼 헤더의 자리 예약(min-height·skeleton placeholder), streaming fallback 영역 사이즈 고정
-- **목표**: CLS ≤ 0.1
+- **이전 현황**: LCP 1.2s / TBT 80ms 통과. CLS 0.216 (Web Vitals "Needs Improvement", 0.1~0.25)
+- **1차 적용 (2026-05-05)**:
+  - 키워드 한정 `loading.tsx` 신규 — 공통 fallback 의 body=h-64(256px) → 실제 페이지 구조(toolbar 2줄 + 액션바 2줄 + `max-h-[calc(100dvh-280px)] min-h-[320px]` 테이블)와 매칭. loading→page swap 시 body 확장 시프트 제거.
+  - `keywords-table.tsx` toolbar 우측 statsLoading/statsError 배지 자리 예약 (`min-w-[120px]` + invisible placeholder). streaming 종료 시 옆 "총 N건" 텍스트 시프트 제거.
+- **재측정 필요**: production 배포 후 Lighthouse Desktop 재실행 → CLS ≤ 0.1 도달 여부 확인. 미도달 시 footer / virtualizer 영역 추가 진단.
 
 ## 외부 의존 보류
 
