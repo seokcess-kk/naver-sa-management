@@ -70,13 +70,22 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   analyzeSearchTermCsv,
   saveSearchTermReport,
+  enqueueSearchTermPromote,
   type AnalyzeSearchTermCsvResult,
   type ClassificationItem,
 } from "@/app/(dashboard)/[advertiserId]/search-term-import/actions"
 import { cn } from "@/lib/utils"
+
+export type AdgroupOption = {
+  id: string
+  name: string
+  status: "on" | "off" | "deleted"
+  campaignName: string
+}
 
 // =============================================================================
 // 타입
@@ -105,14 +114,45 @@ export function SearchTermImportClient({
   userRole,
   baselineForDisplay,
   defaultWeekStart,
+  adgroupOptions,
 }: {
   advertiserId: string
   userRole: "admin" | "operator" | "viewer"
   baselineForDisplay: BaselineForDisplay
   defaultWeekStart: string // yyyy-mm-dd
+  adgroupOptions: AdgroupOption[]
 }) {
   const router = useRouter()
   const canMutate = userRole === "admin" || userRole === "operator"
+
+  // -- 신규 후보 탭 — 행별 광고그룹 매핑 / 선택 / 큐 적재 dimmed --------------
+  // searchTerm 키로 (multi-tenant 같은 행이 두 번 표시되지 않음 — classify 가 unique 보장).
+  const [adgroupBySearchTerm, setAdgroupBySearchTerm] = React.useState<
+    Map<string, string>
+  >(new Map())
+  const [selectedSearchTerms, setSelectedSearchTerms] = React.useState<
+    Set<string>
+  >(new Set())
+  const [enqueuedSearchTerms, setEnqueuedSearchTerms] = React.useState<
+    Set<string>
+  >(new Set())
+  const [enqueuing, setEnqueuing] = React.useState(false)
+
+  function setAdgroupFor(searchTerm: string, adgroupId: string) {
+    setAdgroupBySearchTerm((prev) => {
+      const next = new Map(prev)
+      next.set(searchTerm, adgroupId)
+      return next
+    })
+  }
+  function toggleSelected(searchTerm: string) {
+    setSelectedSearchTerms((prev) => {
+      const next = new Set(prev)
+      if (next.has(searchTerm)) next.delete(searchTerm)
+      else next.add(searchTerm)
+      return next
+    })
+  }
 
   // -- 파일 / 분석 상태 ------------------------------------------------------
   const [file, setFile] = React.useState<File | null>(null)
@@ -178,6 +218,73 @@ export function SearchTermImportClient({
       toast.error(`분석 오류: ${msg}`)
     } finally {
       setAnalyzing(false)
+    }
+  }
+
+  async function handleEnqueuePromote() {
+    if (!result) return
+    if (selectedSearchTerms.size === 0) return
+
+    // 광고그룹 미선택 차단
+    const items: Array<{
+      searchTerm: string
+      adgroupId: string
+      metrics: ClassificationItem["metrics"]
+    }> = []
+    const missingAdgroup: string[] = []
+    for (const c of result.classifications) {
+      if (c.classification !== "new") continue
+      if (!selectedSearchTerms.has(c.searchTerm)) continue
+      if (enqueuedSearchTerms.has(c.searchTerm)) continue // 이미 dimmed
+      const adgroupId = adgroupBySearchTerm.get(c.searchTerm)
+      if (!adgroupId) {
+        missingAdgroup.push(c.searchTerm)
+        continue
+      }
+      items.push({
+        searchTerm: c.searchTerm,
+        adgroupId,
+        metrics: c.metrics,
+      })
+    }
+
+    if (missingAdgroup.length > 0) {
+      toast.error(
+        `광고그룹 미선택 ${missingAdgroup.length}건 — 행별 dropdown 으로 광고그룹을 먼저 지정하세요.`,
+      )
+      return
+    }
+    if (items.length === 0) {
+      toast.error("적재할 항목이 없습니다 (이미 처리됨 / 미선택).")
+      return
+    }
+
+    setEnqueuing(true)
+    try {
+      const res = await enqueueSearchTermPromote(advertiserId, items)
+      if (!res.ok) {
+        toast.error(`큐 적재 실패: ${res.error}`)
+        return
+      }
+      const { createdCount, blockedCount, skippedCount } = res.data
+      toast.success(
+        `승인 큐 적재 — 신규 ${createdCount}건` +
+          (skippedCount > 0 ? ` · 중복 ${skippedCount}건` : "") +
+          (blockedCount > 0 ? ` · 차단 ${blockedCount}건` : ""),
+      )
+      // 적재 완료 행 dimmed 처리 + 선택 해제
+      setEnqueuedSearchTerms((prev) => {
+        const next = new Set(prev)
+        for (const i of items) next.add(i.searchTerm)
+        return next
+      })
+      setSelectedSearchTerms(new Set())
+      router.refresh()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      toast.error(`큐 적재 오류: ${msg}`)
+    } finally {
+      setEnqueuing(false)
     }
   }
 
@@ -364,8 +471,28 @@ export function SearchTermImportClient({
                 </TabsList>
 
                 <TabsContent value="new">
-                  <ResultTable
+                  <NewCandidatesTable
                     rows={sortedNew}
+                    adgroupOptions={adgroupOptions}
+                    adgroupBySearchTerm={adgroupBySearchTerm}
+                    onSetAdgroup={setAdgroupFor}
+                    selectedSearchTerms={selectedSearchTerms}
+                    onToggleSelected={toggleSelected}
+                    onToggleAll={(checked) => {
+                      setSelectedSearchTerms((prev) => {
+                        const next = new Set(prev)
+                        for (const r of sortedNew) {
+                          if (enqueuedSearchTerms.has(r.searchTerm)) continue
+                          if (checked) next.add(r.searchTerm)
+                          else next.delete(r.searchTerm)
+                        }
+                        return next
+                      })
+                    }}
+                    enqueuedSearchTerms={enqueuedSearchTerms}
+                    canMutate={canMutate}
+                    enqueuing={enqueuing}
+                    onEnqueue={handleEnqueuePromote}
                     emptyMessage="신규 후보가 없습니다 — 트래픽 임계(노출 50+ 클릭 3+) 또는 전환 1+ 기준 미달."
                   />
                 </TabsContent>
@@ -374,6 +501,9 @@ export function SearchTermImportClient({
                     rows={sortedExclude}
                     emptyMessage="제외 후보가 없습니다 — 노출 100+ 클릭 0 또는 클릭 10+ 전환 0 + CPA 매우 높음 기준."
                   />
+                  <div className="mt-3 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                    제외 키워드 등록 흐름은 본 PR 비대상입니다 (네이버 SA endpoint 미확인 — 후속 PR).
+                  </div>
                 </TabsContent>
               </Tabs>
 
@@ -684,6 +814,218 @@ function ResultTable({
           ))}
         </TableBody>
       </Table>
+    </div>
+  )
+}
+
+function NewCandidatesTable({
+  rows,
+  adgroupOptions,
+  adgroupBySearchTerm,
+  onSetAdgroup,
+  selectedSearchTerms,
+  onToggleSelected,
+  onToggleAll,
+  enqueuedSearchTerms,
+  canMutate,
+  enqueuing,
+  onEnqueue,
+  emptyMessage,
+}: {
+  rows: ClassificationItem[]
+  adgroupOptions: AdgroupOption[]
+  adgroupBySearchTerm: Map<string, string>
+  onSetAdgroup: (searchTerm: string, adgroupId: string) => void
+  selectedSearchTerms: Set<string>
+  onToggleSelected: (searchTerm: string) => void
+  onToggleAll: (checked: boolean) => void
+  enqueuedSearchTerms: Set<string>
+  canMutate: boolean
+  enqueuing: boolean
+  onEnqueue: () => void
+  emptyMessage: string
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="rounded-md border bg-muted/20 px-4 py-12 text-center text-xs text-muted-foreground">
+        {emptyMessage}
+      </div>
+    )
+  }
+
+  // 선택 가능 행 (이미 적재된 행 제외)
+  const selectableRows = rows.filter(
+    (r) => !enqueuedSearchTerms.has(r.searchTerm),
+  )
+  const allSelectableSelected =
+    selectableRows.length > 0 &&
+    selectableRows.every((r) => selectedSearchTerms.has(r.searchTerm))
+  const someSelectableSelected =
+    selectableRows.some((r) => selectedSearchTerms.has(r.searchTerm)) &&
+    !allSelectableSelected
+
+  const selectedCount = selectedSearchTerms.size
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* 헤더 액션 */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="text-xs text-muted-foreground">
+          신규 후보 <strong className="text-foreground">{rows.length}</strong>건
+          {selectedCount > 0 ? (
+            <>
+              {" "}/ 선택 <strong className="text-foreground">{selectedCount}</strong>건
+            </>
+          ) : null}
+          {enqueuedSearchTerms.size > 0 ? (
+            <>
+              {" "}/ 적재 완료{" "}
+              <strong className="text-foreground">
+                {enqueuedSearchTerms.size}
+              </strong>건
+            </>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2">
+          {canMutate ? (
+            <Button
+              size="sm"
+              disabled={selectedCount === 0 || enqueuing}
+              onClick={onEnqueue}
+            >
+              {enqueuing
+                ? "적재 중..."
+                : `선택한 ${selectedCount}건을 승인 큐로`}
+            </Button>
+          ) : (
+            <span className="text-xs text-muted-foreground">
+              (viewer 는 큐 적재 불가)
+            </span>
+          )}
+        </div>
+      </div>
+
+      {adgroupOptions.length === 0 && (
+        <div className="rounded-md border border-amber-300 bg-amber-50/40 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+          활성 광고그룹이 없습니다. 광고그룹을 먼저 동기화/생성하세요.
+        </div>
+      )}
+
+      <div className="rounded-md border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-10">
+                <Checkbox
+                  checked={allSelectableSelected}
+                  indeterminate={someSelectableSelected}
+                  onCheckedChange={(v) => onToggleAll(Boolean(v))}
+                  disabled={!canMutate || selectableRows.length === 0}
+                  aria-label="신규 후보 전체 선택"
+                />
+              </TableHead>
+              <TableHead>검색어</TableHead>
+              <TableHead className="w-64">광고그룹</TableHead>
+              <TableHead className="w-24 text-right">노출</TableHead>
+              <TableHead className="w-24 text-right">클릭</TableHead>
+              <TableHead className="w-20 text-right">CTR</TableHead>
+              <TableHead className="w-28 text-right">비용</TableHead>
+              <TableHead className="w-24 text-right">CPC</TableHead>
+              <TableHead className="w-20 text-right">전환</TableHead>
+              <TableHead className="w-44">사유</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((r) => {
+              const enqueued = enqueuedSearchTerms.has(r.searchTerm)
+              const selected = selectedSearchTerms.has(r.searchTerm)
+              const adgroupId = adgroupBySearchTerm.get(r.searchTerm) ?? ""
+              return (
+                <TableRow
+                  key={`new-${r.searchTerm}`}
+                  className={cn(enqueued && "opacity-50")}
+                >
+                  <TableCell>
+                    <Checkbox
+                      checked={selected}
+                      onCheckedChange={() => onToggleSelected(r.searchTerm)}
+                      disabled={!canMutate || enqueued}
+                      aria-label="선택"
+                    />
+                  </TableCell>
+                  <TableCell className="max-w-xs">
+                    <div
+                      className="truncate text-sm font-medium"
+                      title={r.searchTerm}
+                    >
+                      {r.searchTerm}
+                    </div>
+                    {enqueued && (
+                      <span className="text-[10px] text-emerald-700 dark:text-emerald-400">
+                        승인 큐 적재됨
+                      </span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <Select
+                      value={adgroupId}
+                      onValueChange={(v) => {
+                        // base-ui Select onValueChange 시그니처: string | null.
+                        // SelectItem 만 넣으므로 null 비도달이지만 타입 보호.
+                        if (v !== null) onSetAdgroup(r.searchTerm, v)
+                      }}
+                      disabled={
+                        !canMutate || enqueued || adgroupOptions.length === 0
+                      }
+                    >
+                      <SelectTrigger className="h-8 w-full">
+                        <SelectValue placeholder="광고그룹 선택" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {adgroupOptions.map((g) => (
+                          <SelectItem key={g.id} value={g.id}>
+                            <span className="truncate">
+                              {g.campaignName} / {g.name}
+                              {g.status === "off" ? " (off)" : ""}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs">
+                    {r.metrics.impressions.toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs">
+                    {r.metrics.clicks.toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs">
+                    {r.metrics.ctr !== null
+                      ? `${r.metrics.ctr.toFixed(2)}%`
+                      : "—"}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs">
+                    {Math.round(r.metrics.cost).toLocaleString()}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs">
+                    {r.metrics.cpc !== null
+                      ? r.metrics.cpc.toLocaleString()
+                      : "—"}
+                  </TableCell>
+                  <TableCell className="text-right font-mono text-xs">
+                    {r.metrics.conversions !== null
+                      ? r.metrics.conversions.toLocaleString()
+                      : "—"}
+                  </TableCell>
+                  <TableCell>
+                    <ReasonBadge reasonCode={r.reasonCode} />
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </div>
     </div>
   )
 }

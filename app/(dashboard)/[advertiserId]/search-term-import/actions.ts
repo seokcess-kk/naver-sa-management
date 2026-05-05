@@ -26,6 +26,7 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import type { Prisma as PrismaTypes } from "@/lib/generated/prisma/client"
 import {
   parseSearchTermCsv,
   csvTextSchema,
@@ -382,6 +383,196 @@ export async function saveSearchTermReport(
       rowCount: parsed.rows.length,
       classificationCount: parsed.classifications.length,
       upserted: existing !== null,
+    },
+  }
+}
+
+// =============================================================================
+// 3. enqueueSearchTermPromote — 신규 키워드 후보 → ApprovalQueue 적재
+// =============================================================================
+//
+// Phase D.4 진입부:
+//   - D.3 분석 결과에서 "신규 후보" 행을 사용자가 선택 + 광고그룹 매핑 후 큐에 적재.
+//   - kind='search_term_promote', status='pending' 으로 적재 — 광고주의 ApprovalQueue
+//     페이지에서 일괄 승인 흐름이 진행됨.
+//
+// 안전장치:
+//   - operator+ (viewer 차단)
+//   - 광고그룹 광고주 한정 검증 — adgroup.campaign.advertiserId == advertiserId
+//   - 광고그룹 status='deleted' 차단
+//   - (advertiserId, searchTerm, adgroupId) pending 중복 차단 — 동일 항목 재적재 시 skip
+//   - 키워드 텍스트 길이 한도 — 본 액션 내 50자 제한 (네이버 SA 가정. 호출부 차단도 권장)
+//
+// AuditLog: action="approval_queue.enqueue", targetType="ApprovalQueue"
+
+const promoteItemMetricsSchema = z.object({
+  impressions: z.number(),
+  clicks: z.number(),
+  cost: z.number(),
+  conversions: z.number().nullable(),
+  ctr: z.number().nullable(),
+  cpc: z.number().nullable(),
+  cpa: z.number().nullable(),
+})
+
+const promoteItemSchema = z.object({
+  searchTerm: z.string().trim().min(1).max(50),
+  adgroupId: z.string().trim().min(1).max(128),
+  metrics: promoteItemMetricsSchema,
+})
+
+const promoteInputSchema = z.array(promoteItemSchema).min(1).max(2000)
+
+export type EnqueueSearchTermPromoteInput = z.infer<
+  typeof promoteInputSchema
+>
+
+export type EnqueueSearchTermPromoteResult = {
+  /** 새로 적재된 ApprovalQueue 행 수. */
+  createdCount: number
+  /** 입력 중 광고그룹 미존재 / status=deleted 등으로 차단된 수. */
+  blockedCount: number
+  /** 입력 중 동일 (advertiserId, searchTerm, adgroupId) pending 이 이미 존재해 skip 된 수. */
+  skippedCount: number
+}
+
+/**
+ * 신규 키워드 후보를 ApprovalQueue 에 일괄 적재.
+ *
+ * payload shape (스키마 주석 일관):
+ *   { searchTerm, adgroupId, metrics: { impressions, clicks, cost, conversions, ctr, cpc, cpa } }
+ */
+export async function enqueueSearchTermPromote(
+  advertiserId: string,
+  items: EnqueueSearchTermPromoteInput,
+): Promise<ActionResult<EnqueueSearchTermPromoteResult>> {
+  // -- 입력 검증 ------------------------------------------------------------
+  let parsed: EnqueueSearchTermPromoteInput
+  try {
+    advertiserIdSchema.parse(advertiserId)
+    parsed = promoteInputSchema.parse(items)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `잘못된 입력: ${msg}` }
+  }
+
+  // -- 권한 ----------------------------------------------------------------
+  const { user } = await getCurrentAdvertiser(advertiserId)
+  if (user.role === "viewer") {
+    return { ok: false, error: "권한 부족 (viewer)" }
+  }
+
+  // -- 광고그룹 광고주 한정 검증 -----------------------------------------
+  const adgroupIds = Array.from(new Set(parsed.map((i) => i.adgroupId)))
+  const adgroups = await prisma.adGroup.findMany({
+    where: {
+      id: { in: adgroupIds },
+      campaign: { advertiserId },
+    },
+    select: { id: true, status: true },
+  })
+  const adgroupValid = new Map(
+    adgroups.filter((a) => a.status !== "deleted").map((a) => [a.id, true]),
+  )
+
+  // -- pending 중복 검사 -----------------------------------------------------
+  // 동일 (advertiserId, kind, payload.searchTerm, payload.adgroupId) 가 pending 이면 skip.
+  // payload 는 JSON 컬럼이라 Prisma 의 in 비교 직접 불가 → 광고주 + kind + pending 행 전체
+  // 로드 후 메모리 set 비교. 운영 데이터 < 5000 행 가정 (큐 stale 누적 후속 cleanup PR).
+  const existingPending = await prisma.approvalQueue.findMany({
+    where: {
+      advertiserId,
+      kind: "search_term_promote",
+      status: "pending",
+    },
+    select: { payload: true },
+  })
+  const existingKeys = new Set<string>()
+  for (const e of existingPending) {
+    const p = e.payload as { searchTerm?: string; adgroupId?: string } | null
+    if (p && p.searchTerm && p.adgroupId) {
+      existingKeys.add(`${p.searchTerm}\u0000${p.adgroupId}`)
+    }
+  }
+
+  // -- seed 산출 ------------------------------------------------------------
+  let blockedCount = 0
+  let skippedCount = 0
+  const seeds: Array<{
+    advertiserId: string
+    kind: "search_term_promote"
+    payload: PrismaTypes.InputJsonValue
+    status: "pending"
+  }> = []
+
+  for (const item of parsed) {
+    if (!adgroupValid.has(item.adgroupId)) {
+      blockedCount++
+      continue
+    }
+    const key = `${item.searchTerm}\u0000${item.adgroupId}`
+    if (existingKeys.has(key)) {
+      skippedCount++
+      continue
+    }
+    existingKeys.add(key) // 같은 batch 내 중복도 차단
+    seeds.push({
+      advertiserId,
+      kind: "search_term_promote",
+      payload: {
+        searchTerm: item.searchTerm,
+        adgroupId: item.adgroupId,
+        metrics: {
+          impressions: item.metrics.impressions,
+          clicks: item.metrics.clicks,
+          cost: item.metrics.cost,
+          conversions: item.metrics.conversions,
+          ctr: item.metrics.ctr,
+          cpc: item.metrics.cpc,
+          cpa: item.metrics.cpa,
+        },
+      } satisfies PrismaTypes.InputJsonValue,
+      status: "pending",
+    })
+  }
+
+  if (seeds.length === 0) {
+    return {
+      ok: false,
+      error: `적재할 항목이 없습니다 (차단 ${blockedCount}건 / 중복 ${skippedCount}건)`,
+    }
+  }
+
+  // -- createMany ------------------------------------------------------------
+  const result = await prisma.approvalQueue.createMany({
+    data: seeds,
+  })
+
+  // -- AuditLog -------------------------------------------------------------
+  await logAudit({
+    userId: user.id,
+    action: "approval_queue.enqueue",
+    targetType: "ApprovalQueue",
+    targetId: null,
+    before: null,
+    after: {
+      advertiserId,
+      kind: "search_term_promote",
+      count: result.count,
+      blockedCount,
+      skippedCount,
+    },
+  })
+
+  revalidatePath(`/${advertiserId}/search-term-import`)
+  revalidatePath(`/${advertiserId}/approval-queue`)
+
+  return {
+    ok: true,
+    data: {
+      createdCount: result.count,
+      blockedCount,
+      skippedCount,
     },
   }
 }

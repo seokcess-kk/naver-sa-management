@@ -6,7 +6,7 @@
  *   2. lease 획득 — UPDATE ... WHERE id = (SELECT FOR UPDATE SKIP LOCKED ...)
  *      - status IN ('pending','running')
  *      - leaseExpiresAt IS NULL OR < now()  ← IS NULL 조건 필수 (신규 pending 픽업)
- *      - action IN ('keyword.csv','bid_inbox.apply')  ← 화이트리스트 (다른 액션은 동기 처리 그대로)
+ *      - action IN ('keyword.csv','bid_inbox.apply','approval_queue.apply')  ← 화이트리스트
  *      - ORDER BY createdAt ASC LIMIT 1
  *   3. ChangeItem.status='pending' 100건씩 픽업 (cursor 아닌 status 정렬)
  *   4. 각 item → applyChange (lib/batch/apply.ts) → done / failed 적재
@@ -76,8 +76,9 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
   // SPEC 3.5 패턴: UPDATE 의 WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED LIMIT 1)
   // - IS NULL 조건 필수 (신규 pending 행 픽업)
   // - action 화이트리스트:
-  //     · 'keyword.csv'     — F-3.4 CSV 일괄 가져오기
-  //     · 'bid_inbox.apply' — F-11.4 Phase B.3 Inbox 일괄 적용 (Keyword UPDATE 만)
+  //     · 'keyword.csv'         — F-3.4 CSV 일괄 가져오기
+  //     · 'bid_inbox.apply'     — F-11.4 Phase B.3 Inbox 일괄 적용 (Keyword UPDATE 만)
+  //     · 'approval_queue.apply' — F-12 D.4 ApprovalQueue 승인 (Keyword CREATE — search_term_promote)
   //   다른 액션은 동기 처리(Server Action 안에서 SA 호출) 그대로 두어 보호.
   const acquired = await prisma.$queryRaw<{ id: string }[]>`
     UPDATE "ChangeBatch"
@@ -88,7 +89,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
      WHERE "id" = (
        SELECT "id" FROM "ChangeBatch"
         WHERE "status" IN ('pending','running')
-          AND "action" IN ('keyword.csv','bid_inbox.apply')
+          AND "action" IN ('keyword.csv','bid_inbox.apply','approval_queue.apply')
           AND ("leaseExpiresAt" IS NULL OR "leaseExpiresAt" < now())
         ORDER BY "createdAt" ASC
         LIMIT 1

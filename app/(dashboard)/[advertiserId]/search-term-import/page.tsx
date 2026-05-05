@@ -54,18 +54,44 @@ export default async function SearchTermImportPage({
     throw e
   }
 
-  // -- KPP baseline (안내용) -------------------------------------------------
-  // 실제 분류 시점에는 actions.ts 가 다시 조회해 사용 — 페이지 렌더 시점은 안내 표시용만.
-  const kpp = await prisma.keywordPerformanceProfile.findUnique({
-    where: { advertiserId },
-    select: {
-      avgCtr: true,
-      avgCvr: true,
-      avgCpc: true,
-      dataDays: true,
-      refreshedAt: true,
-    },
-  })
+  // -- KPP baseline + 광고그룹 옵션 병렬 조회 --------------------------------
+  // 광고그룹 옵션: D.4 신규 후보 row 별 dropdown 채우기용.
+  //   - 광고주 한정 (campaign.advertiserId == advertiserId)
+  //   - 활성만 (status != 'deleted'). off 도 노출 — 캠페인 일시 정지 중에도 검색어 매핑 가능.
+  //   - 캠페인명도 prop 으로 전달 (UI label "캠페인 / 광고그룹" 노출용)
+  const [kpp, adgroupOptionsRaw] = await Promise.all([
+    prisma.keywordPerformanceProfile.findUnique({
+      where: { advertiserId },
+      select: {
+        avgCtr: true,
+        avgCvr: true,
+        avgCpc: true,
+        dataDays: true,
+        refreshedAt: true,
+      },
+    }),
+    prisma.adGroup.findMany({
+      where: {
+        campaign: { advertiserId },
+        status: { not: "deleted" },
+      },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        campaign: { select: { name: true } },
+      },
+      orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+      take: 1000,
+    }),
+  ])
+
+  const adgroupOptions = adgroupOptionsRaw.map((g) => ({
+    id: g.id,
+    name: g.name,
+    status: g.status,
+    campaignName: g.campaign.name,
+  }))
 
   const baselineForDisplay = kpp
     ? {
@@ -98,6 +124,7 @@ export default async function SearchTermImportPage({
         userRole={userRole}
         baselineForDisplay={baselineForDisplay}
         defaultWeekStart={todayMondayKst}
+        adgroupOptions={adgroupOptions}
       />
     </div>
   )

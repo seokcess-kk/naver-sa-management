@@ -28,6 +28,7 @@ const sections: DashboardSection[] = [
   { href: "/targeting", label: "타게팅" },
   { href: "/marginal-utility", label: "한계효용" },
   { href: "/search-term-import", label: "검색어 분석" },
+  { href: "/approval-queue", label: "승인 큐" },
 ]
 
 export function DashboardSectionNav({
