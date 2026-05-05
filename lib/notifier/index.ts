@@ -4,7 +4,7 @@
  * 정책:
  *   - 호출자는 항상 dispatch() 만 사용. 채널 구현체 직접 호출 금지
  *   - log 채널은 항상 활성화 (env 의존 없음 — 운영 가시성 보장)
- *   - email 채널은 RESEND_API_KEY 환경 변수가 있을 때만 시도 (없으면 추가하지 않음)
+ *   - telegram 채널은 TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID 둘 다 있을 때만
  *   - 한 채널 throw 가 다른 채널 발송을 막지 않게 Promise.all 내부에서 catch
  *   - "ok" 의 정의: 활성화된 채널 중 1개 이상 성공 (log 가 항상 성공하므로 사실상 always true 이지만,
  *     log 까지 throw 하면 false 가 됨 — 의도된 동작)
@@ -16,10 +16,13 @@
  * 시크릿 운영:
  *   - payload.meta 에 시크릿 평문 X (호출부 책임)
  *   - dispatch.results 는 AlertEvent.payload 에 적재됨 — DB sanitize 통과 가정
+ *
+ * 비대상 (사용자 결정 — 추후 요청 시 추가):
+ *   - 이메일 (Resend) — 필요 시 lib/notifier/email.ts 신규 + getChannels 분기
+ *   - 카카오 알림톡 — 벤더(Bizppurio / Aligo / NHN Cloud / Solapi) 결정 후 별도 채널
  */
 
 import { logChannel } from "@/lib/notifier/log"
-import { emailChannel } from "@/lib/notifier/email"
 import { telegramChannel } from "@/lib/notifier/telegram"
 import type {
   NotificationChannel,
@@ -37,15 +40,10 @@ export type {
  * 활성화된 채널 목록 결정.
  *
  * - log 채널: 항상 포함
- * - email 채널: RESEND_API_KEY 가 있을 때만 (env 없으면 stub 채널 자체를 추가하지 않음 — dispatch 결과
- *   배열을 단순화).
- * - telegram 채널: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID 둘 다 있을 때만.
+ * - telegram 채널: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID 둘 다 있을 때만
  */
 export function getChannels(): NotificationChannel[] {
   const channels: NotificationChannel[] = [logChannel]
-  if (process.env.RESEND_API_KEY) {
-    channels.push(emailChannel)
-  }
   if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
     channels.push(telegramChannel)
   }

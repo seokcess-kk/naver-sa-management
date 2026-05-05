@@ -45,11 +45,15 @@ import { logAudit } from "@/lib/audit/log"
 import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import {
   listAdgroups,
+  listAdgroupTargets,
   updateAdgroupsBulk,
+  updateAdgroupTargets,
   type AdGroup as SaAdGroup,
   type AdgroupBulkUpdateItem,
+  type AdgroupTarget,
 } from "@/lib/naver-sa/adgroups"
 import { NaverSaError } from "@/lib/naver-sa/errors"
+import { mapWithConcurrency } from "@/lib/sync/concurrency"
 import type { AdGroupStatus } from "@/lib/generated/prisma/client"
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 import { extractActualUserLock } from "@/lib/adgroups/userlock"
@@ -480,8 +484,8 @@ export async function bulkUpdateAdgroups(
           pcChannelOn: change.pcChannelOn ?? dbG.pcChannelOn,
           mblChannelOn: change.mblChannelOn ?? dbG.mblChannelOn,
         } as Prisma.InputJsonValue
-        // channel 액션은 itemsForApi 에 push 하지 않는다 — 아래에서 명시적 throw.
-        // (SA 채널 키 ON/OFF 표현이 미확정. 본 PR에서는 호출 자체를 막아 사용자에 명시.)
+        // channel 은 광고그룹별 Targets API (GET → 수정 → PUT) 흐름이라
+        // itemsForApi(updateAdgroupsBulk) 미사용. 아래 channel 분기에서 별도 처리.
         break
     }
 
@@ -502,36 +506,88 @@ export async function bulkUpdateAdgroups(
   // fields 매핑:
   //   toggle  → "userLock"
   //   bid     → "bidAmt"
-  //   channel → SA 필드명 미확정 (TODO) → 본 PR 에서 명시적 throw
+  //   channel → 광고그룹별 Targets API (GET /targets → PC_MOBILE_TARGET 수정 → PUT)
   let success = 0
   let failed = 0
   const results: BulkUpdateAdgroupItemResult[] = []
 
   // ---------------------------------------------------------------------------
-  // TODO(F-2.2 channel): 네이버 SA 의 PC/모바일 매체 ON/OFF 표현 확정 필요.
-  //   현재 lib/naver-sa/adgroups.ts AdGroupSchema 는 pcChannelKey / mobileChannelKey
-  //   문자열로 passthrough 만 두고 있음. 빈 문자열 = OFF 인지, 별도 boolean 필드인지
-  //   샘플 응답 확인 후 다음 사항 확정:
-  //     1) DB 의 pcChannelOn / mblChannelOn 을 SA 필드명으로 어떻게 환산할지
-  //     2) fields 쿼리 파라미터 정확한 값
-  //   본 PR 에서는 의도된 실패로 처리하여 운영 시점에 즉시 발견되도록 한다.
+  // F-2.2 channel — PC/모바일 매체 ON/OFF
+  //   네이버 SA Targets API (java sample 기준):
+  //     - GET /ncc/adgroups/{id}/targets → Target[] (PC_MOBILE_TARGET / TIME / REGIONAL / MEDIA 등)
+  //     - PUT /ncc/adgroups/{id}?fields=targetLocation,targetMedia,targetTime
+  //         body.targets 에 변경된 전체 배열
+  //   광고그룹마다 GET + PUT 2회 호출 — mapWithConcurrency 로 5건 병렬.
+  //   부분 실패 허용 (한 그룹 실패가 다른 그룹 차단 X).
+  //
+  //   ⚠ 운영 검증 미완료: 광고주 1개로 PC/모바일 토글 후 SA 콘솔에서 실제 반영 확인 필수.
+  //   fields 파라미터는 java sample 의 "targetLocation,targetMedia,targetTime" 사용.
+  //   (PC_MOBILE_TARGET 의 정확한 fields 명은 공개 문서에 명시 X — sample 패턴 신뢰).
   // ---------------------------------------------------------------------------
   if (parsed.action === "channel") {
-    const msg =
-      "SA channel 필드 미확정 — 운영 검증 필요 (TODO: lib/naver-sa/adgroups.ts 채널 필드 확정 후 본 액션 재구현)"
-    await prisma.changeItem.updateMany({
-      where: { batchId: batch.id },
-      data: { status: "failed", error: msg.slice(0, 500) },
-    })
-    failed = total
-    for (const aid of adgroupIds) {
-      results.push({ adgroupId: aid, ok: false, error: msg })
+    const channelResults = await mapWithConcurrency(
+      adgroupIds,
+      5,
+      async (aid): Promise<{ aid: string; ok: boolean; error?: string }> => {
+        const dbG = beforeMap.get(aid)!
+        const change = itemsByAdgroupId.get(aid)!
+        const newPc = change.pcChannelOn ?? dbG.pcChannelOn
+        const newMobile = change.mblChannelOn ?? dbG.mblChannelOn
+        try {
+          const currentTargets = await listAdgroupTargets(
+            advertiser.customerId,
+            dbG.nccAdgroupId,
+          )
+          // PC_MOBILE_TARGET 만 교체. 다른 targetTp 는 그대로 유지 (java sample 패턴).
+          const updatedTargets: AdgroupTarget[] = currentTargets.map((t) =>
+            t.targetTp === "PC_MOBILE_TARGET"
+              ? { ...t, target: { pc: newPc, mobile: newMobile } }
+              : t,
+          )
+          // PC_MOBILE_TARGET 이 응답에 없는 광고그룹은 새로 추가.
+          if (!currentTargets.some((t) => t.targetTp === "PC_MOBILE_TARGET")) {
+            updatedTargets.push({
+              targetTp: "PC_MOBILE_TARGET",
+              target: { pc: newPc, mobile: newMobile },
+            })
+          }
+          await updateAdgroupTargets(
+            advertiser.customerId,
+            dbG.nccAdgroupId,
+            updatedTargets,
+          )
+          // DB 반영 — pcChannelOn / mblChannelOn boolean.
+          await prisma.adGroup.update({
+            where: { id: dbG.id },
+            data: { pcChannelOn: newPc, mblChannelOn: newMobile },
+          })
+          await prisma.changeItem.updateMany({
+            where: { batchId: batch.id, targetId: dbG.nccAdgroupId },
+            data: { status: "done" },
+          })
+          return { aid, ok: true }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          await prisma.changeItem.updateMany({
+            where: { batchId: batch.id, targetId: dbG.nccAdgroupId },
+            data: { status: "failed", error: msg.slice(0, 500) },
+          })
+          return { aid, ok: false, error: msg }
+        }
+      },
+    )
+
+    for (const r of channelResults) {
+      results.push({ adgroupId: r.aid, ok: r.ok, error: r.error })
+      if (r.ok) success++
+      else failed++
     }
 
+    const finalStatus: "done" | "failed" = success === 0 ? "failed" : "done"
     await prisma.changeBatch.update({
       where: { id: batch.id },
       data: {
-        status: "failed",
+        status: finalStatus,
         processed: total,
         finishedAt: new Date(),
       },
@@ -547,21 +603,13 @@ export async function bulkUpdateAdgroups(
         batchId: batch.id,
         advertiserId,
         total,
-        success: 0,
-        failed: total,
-        note: "channel-field-undecided",
+        success,
+        failed,
       },
     })
 
     revalidatePath(`/${advertiserId}/adgroups`)
-
-    return {
-      batchId: batch.id,
-      total,
-      success: 0,
-      failed,
-      items: results,
-    }
+    return { batchId: batch.id, total, success, failed, items: results }
   }
 
   // toggle / bid — 정상 흐름

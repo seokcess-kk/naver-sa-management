@@ -11,7 +11,7 @@
  *      a. collectDailyStats — 어제(KST) OptimizationRun + BidSuggestion + AlertEvent 집계
  *      b. generateDailySummary — Sonnet 4.6 (폴백 시 정형 텍스트)
  *      c. AlertEvent 적재 (status='sent', payload={ kind:'llm_daily_summary', ... })
- *      d. NotificationChannel dispatch (log 항상 + email RESEND_API_KEY 있을 때)
+ *      d. NotificationChannel dispatch (log 항상 + telegram TELEGRAM_BOT_TOKEN+CHAT_ID 있을 때)
  *
  * 정책 (사용자 검토 + SPEC v0.2.1):
  *   - LLM 분석·설명 전용. Tool Use / 자동 실행 X

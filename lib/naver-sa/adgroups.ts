@@ -242,3 +242,93 @@ export async function updateAdgroupsBulk(
   })
   return parseAdgroupArray(res, { method: "PUT", path, customerId })
 }
+
+// =============================================================================
+// Targets — 광고그룹 매체 ON/OFF / 시간대 / 지역 타게팅 (F-2.2)
+// =============================================================================
+
+/**
+ * SA Target 단건 — `/ncc/adgroups/{id}/targets` 응답 element.
+ *
+ * 공식 java sample (master/java-sample/.../model/Target.java) 기반:
+ *   - targetTp: "PC_MOBILE_TARGET" | "TIME_WEEKLY_TARGET" | "REGIONAL_TARGET" | "MEDIA_TARGET" 등
+ *   - target: targetTp 별 다른 shape (예: PC_MOBILE → { pc: bool, mobile: bool })
+ *
+ * passthrough — 정의 외 필드(nccTargetId / regTm / editTm 등)는 그대로 통과.
+ */
+export const TargetSchema = z
+  .object({
+    targetTp: z.string(),
+    target: z.record(z.string(), z.unknown()),
+  })
+  .passthrough()
+
+export type AdgroupTarget = z.infer<typeof TargetSchema>
+
+/**
+ * PC/모바일 매체 ON/OFF 만 추상화한 alias.
+ *
+ * targetTp="PC_MOBILE_TARGET" 의 target shape:
+ *   { pc: true|false, mobile: true|false }
+ */
+export type PcMobileTarget = { pc: boolean; mobile: boolean }
+
+/**
+ * 광고그룹 타게팅 정보 조회 — GET /ncc/adgroups/{id}/targets.
+ *
+ * 응답: Target[] — PC_MOBILE_TARGET / TIME_WEEKLY_TARGET / REGIONAL_TARGET / MEDIA_TARGET 등.
+ * 호출부가 원하는 targetTp 만 골라 사용.
+ */
+export async function listAdgroupTargets(
+  customerId: string,
+  nccAdgroupId: string,
+): Promise<AdgroupTarget[]> {
+  const path = `/ncc/adgroups/${encodeURIComponent(nccAdgroupId)}/targets`
+  const res = await naverSaClient.request({
+    customerId,
+    method: "GET",
+    path,
+    cache: { kind: "structure", ttl: 600 },
+  })
+  const parsed = z.array(TargetSchema).safeParse(res)
+  if (!parsed.success) {
+    throw new NaverSaValidationError(`GET ${path}: zod validation failed`, {
+      method: "GET",
+      path,
+      customerId,
+      raw: res,
+    })
+  }
+  return parsed.data
+}
+
+/**
+ * 광고그룹 타게팅 일괄 업데이트 — PUT /ncc/adgroups/{id}.
+ *
+ * 패턴 (java sample 기준):
+ *   1. listAdgroupTargets() 로 현재 targets 전체 조회
+ *   2. 변경할 targetTp 의 target 만 새 객체로 덮기 (다른 targetTp 는 그대로 유지)
+ *   3. updateAdgroupTargets(..., 변경된 전체 targets, fields) — body 의 `targets` 필드에 배열 포함
+ *
+ * `fields`: java sample 은 "targetLocation,targetMedia,targetTime" 사용. PC_MOBILE_TARGET 도
+ * 함께 적용되는 형태 (별도 fields 명 미공개 — sample 그대로 사용 권장).
+ */
+export async function updateAdgroupTargets(
+  customerId: string,
+  nccAdgroupId: string,
+  targets: AdgroupTarget[],
+  fields = "targetLocation,targetMedia,targetTime",
+): Promise<AdGroup> {
+  const path = `/ncc/adgroups/${encodeURIComponent(nccAdgroupId)}?fields=${encodeURIComponent(
+    fields,
+  )}`
+  // SA 응답 변경 대비: body 에는 nccAdgroupId + targets 만 포함 (다른 필드는 sample 따라 미포함).
+  const body = { nccAdgroupId, targets }
+  const res = await naverSaClient.request({
+    customerId,
+    method: "PUT",
+    path,
+    body,
+  })
+  return parseAdgroup(res, { method: "PUT", path, customerId })
+}
