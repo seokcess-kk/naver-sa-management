@@ -15,16 +15,6 @@
   - 큰 dependency 배열을 가진 useEffect 분할
 - **우선순위**: 낮음. 운영 사용성 영향 거의 없음 (인터랙션 직전 0.3초 추가 blocking). 다른 이슈 우선 처리 후 검토
 
-## 운영 검증 대기
-
-### F-2.2 PC/모바일 매체 ON/OFF — 코드 활성화 완료 (운영 검증 필요)
-- **2026-05-05**: SA Targets API 매핑 확정 + 코드 활성화
-  - `lib/naver-sa/adgroups.ts`: `listAdgroupTargets` (GET /ncc/adgroups/{id}/targets) + `updateAdgroupTargets` (PUT /ncc/adgroups/{id}?fields=targetLocation,targetMedia,targetTime, body.targets) 신규
-  - `bulkUpdateAdgroups` channel 액션 활성화 — 광고그룹별 GET targets → `PC_MOBILE_TARGET` 만 수정 → PUT (5건 병렬, 부분 실패 허용)
-  - 기존 throw 차단 코드 제거. ChangeBatch + DB pcChannelOn/mblChannelOn 업데이트 정상 흐름
-- **검증 필요**: 운영 광고주 1개로 PC/모바일 4가지 토글(true/true, true/false, false/true, false/false) → SA 콘솔 UI 에서 매체 상태 일치 확인
-- **fields 파라미터 위험**: `targetLocation,targetMedia,targetTime` 은 Java sample 패턴. PC_MOBILE_TARGET 의 정확한 fields 명이 공개 X — 검증 시 다른 target(시간대/지역)이 의도치 않게 변경되는지 확인 필요
-
 ## 운영 측정 후 결정
 
 ### 동기화 시간 한계 — 1차 개선 완료, 측정 trigger 대기
