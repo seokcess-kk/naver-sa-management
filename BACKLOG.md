@@ -11,3 +11,24 @@
 - **확인 방법**: Chrome DevTools → Performance Insights → Layout shifts 패널에서 시프트 요소 식별
 - **개선안 후보**: 합계 footer / 5개 지표 컬럼 헤더의 자리 예약(min-height·skeleton placeholder), streaming fallback 영역 사이즈 고정
 - **목표**: CLS ≤ 0.1
+
+## 외부 의존 보류
+
+### 검색어 보고서 자동화 (D.4 — 운영팀 협의 대기)
+- **확인일**: 2026-05-05
+- **결론**: 네이버 SA 공식 API(`api.searchad.naver.com`)에 검색어 보고서 endpoint 부재
+- **콘솔 내부 endpoint**(`ads.naver.com/apis/sa/api/advanced-report`): 자동화 부적합 — 세션 쿠키 인증 / TOS 위험 / 콘솔 UI 변경 시 깨짐
+- **현재 우회**: D.3 CSV 업로드 도구 (`/[advertiserId]/search-term-import`) — 운영자 수동 다운로드 + 업로드 + 분류 검토
+- **D.4 재개 조건**: 운영팀 협의로 비공개 endpoint 발급 / `MasterReport` API 확인 / 또는 콘솔 내부 endpoint 공식화 권한
+- **D.4 추가 게이트**: 검색어 → 광고그룹 매핑 정책 결정 (자동 추정 / 사용자 row별 선택 / 1그룹씩 업로드)
+- **제외키워드 SA endpoint**: 별도 확인 필요 (현재 `lib/naver-sa/keywords.ts`에 함수 X)
+
+### LLM 분석 보조 (F.3~F.5 — ANTHROPIC_API_KEY 결정 대기)
+- 인프라(F.1 lint + F.1.5 폼 통합 + F.2 LlmCallLog) 완료
+- API 키 발급 + 월 비용 + 모델 결정 후 재개
+- 사용처: BidSuggestion reason enrich / 검수 반려 분류 / 일일 운영 요약 (F-13.2)
+
+### NotificationChannel 정식 활성화 (이메일)
+- `lib/notifier/email.ts` 코드 완성 — `RESEND_API_KEY` env 추가 시 자동 활성
+- Slack 채널은 비대상 결정 (`48439c9` 제거)
+- 카카오 알림톡은 별도 NotificationChannel 구현 필요 (후속)
