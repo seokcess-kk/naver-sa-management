@@ -818,9 +818,11 @@ export function AdsTable({
   // - replace 사용 — 히스토리 누적 방지.
   // - scroll: false — 가상 스크롤 위치 유지.
   // keywords-table 의 동일 패턴.
+  // searchParams reference 가 매 렌더 새로 생성되면 무한 루프 발생 — string 으로 안정화.
+  const searchParamsString = searchParams.toString()
   const updateQuery = React.useCallback(
     (patch: Record<string, string>) => {
-      const next = new URLSearchParams(searchParams.toString())
+      const next = new URLSearchParams(searchParamsString)
       for (const [k, v] of Object.entries(patch)) {
         if (v === "" || v === "ALL") next.delete(k)
         else next.set(k, v)
@@ -828,7 +830,7 @@ export function AdsTable({
       const qs = next.toString()
       router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
     },
-    [router, pathname, searchParams],
+    [router, pathname, searchParamsString],
   )
 
   // -- 모달 state -------------------------------------------------------------
@@ -850,6 +852,13 @@ export function AdsTable({
   const [adsWithMetrics, setAdsWithMetrics] = React.useState<AdRow[]>(ads)
   const [statsLoading, setStatsLoading] = React.useState(true)
   const [statsError, setStatsError] = React.useState<string | null>(null)
+
+  // ads 배열 reference 가 매 렌더 새로 생성되면 effect 무한 재실행. 안정 key 로 전환.
+  const adsKey = React.useMemo(
+    () =>
+      `${ads.length}:${ads[0]?.nccAdId ?? ""}:${ads[ads.length - 1]?.nccAdId ?? ""}`,
+    [ads],
+  )
 
   React.useEffect(() => {
     let cancelled = false
@@ -895,7 +904,8 @@ export function AdsTable({
     return () => {
       cancelled = true
     }
-  }, [advertiserId, period, hasKeys, ads])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ads 는 adsKey 로 대체.
+  }, [advertiserId, period, hasKeys, adsKey])
 
   const onRequestDelete = React.useCallback((row: AdRow) => {
     setDeleteRow(row)
@@ -937,14 +947,15 @@ export function AdsTable({
     { id: "updatedAt", desc: true },
   ])
 
-  // 검색 input debounce 200ms — URL query 도 함께 갱신.
+  // 검색 input debounce 200ms — searchInput 변경에만 반응 (updateQuery 의존성 제외).
   React.useEffect(() => {
     const t = setTimeout(() => {
       setDebouncedSearch(searchInput)
       updateQuery({ q: searchInput })
     }, 200)
     return () => clearTimeout(t)
-  }, [searchInput, updateQuery])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchInput])
 
   // 광고그룹 셀렉트 옵션 — 현재 데이터에 등장하는 광고그룹만 (필터링 한정)
   const adgroupOptions = React.useMemo(() => {

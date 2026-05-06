@@ -1146,9 +1146,14 @@ export function KeywordsTable({
   // - default 값(빈 문자열 / "ALL") 은 query 에서 제거하여 URL 을 깔끔하게 유지.
   // - replace 사용 — 히스토리 누적 방지.
   // - scroll: false — 가상 스크롤 위치 유지.
+  // searchParams 는 useSearchParams() 가 매 렌더 새 reference 를 반환할 수 있어
+  // useCallback dep 에 직접 두면 router.replace → RSC 재요청 → 리렌더 → 다시
+  // updateQuery 재생성 → debounce effect 재실행 무한 루프가 발생한다.
+  // string snapshot 으로 안정화.
+  const searchParamsString = searchParams.toString()
   const updateQuery = React.useCallback(
     (patch: Record<string, string>) => {
-      const next = new URLSearchParams(searchParams.toString())
+      const next = new URLSearchParams(searchParamsString)
       for (const [k, v] of Object.entries(patch)) {
         if (v === "" || v === "ALL") next.delete(k)
         else next.set(k, v)
@@ -1156,7 +1161,7 @@ export function KeywordsTable({
       const qs = next.toString()
       router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
     },
-    [router, pathname, searchParams],
+    [router, pathname, searchParamsString],
   )
 
   // -- stats streaming (페이지 진입 후 client useEffect 가 fetchKeywordsStats 호출) -----
@@ -1165,6 +1170,15 @@ export function KeywordsTable({
   const [keywordsWithMetrics, setKeywordsWithMetrics] = React.useState<KeywordRow[]>(keywords)
   const [statsLoading, setStatsLoading] = React.useState(true)
   const [statsError, setStatsError] = React.useState<string | null>(null)
+
+  // keywords 배열 reference 가 매 렌더 새로 생성되면(부모 RSC 재실행 / HMR / Strict Mode)
+  // useEffect 가 무한 재실행되어 statsLoading=true 가 풀리지 않는다.
+  // 실제 데이터 변경(키워드 추가/삭제 / 재정렬)만 감지하도록 안정 string key 로 dep 전환.
+  const keywordsKey = React.useMemo(
+    () =>
+      `${keywords.length}:${keywords[0]?.nccKeywordId ?? ""}:${keywords[keywords.length - 1]?.nccKeywordId ?? ""}`,
+    [keywords],
+  )
 
   React.useEffect(() => {
     let cancelled = false
@@ -1213,7 +1227,8 @@ export function KeywordsTable({
     return () => {
       cancelled = true
     }
-  }, [advertiserId, period, hasKeys, keywords])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keywords 는 keywordsKey 로 대체. stable key 변경 시에만 재요청.
+  }, [advertiserId, period, hasKeys, keywordsKey])
 
   // -- staging state (F-3.2 인라인 편집) --------------------------------------
   const [staging, setStaging] = React.useState<StagingMap>(() => new Map())
@@ -1326,13 +1341,16 @@ export function KeywordsTable({
   ])
 
   // 검색 input debounce 200ms — URL query 도 함께 갱신.
+  // updateQuery 는 의존성에서 제외 — searchInput 변경에만 반응. updateQuery
+  // closure 내부에 stable searchParamsString 을 사용해 stale 우려 없음.
   React.useEffect(() => {
     const t = setTimeout(() => {
       setDebouncedSearch(searchInput)
       updateQuery({ q: searchInput })
     }, 200)
     return () => clearTimeout(t)
-  }, [searchInput, updateQuery])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchInput])
 
   // 광고그룹 셀렉트 옵션 — props 데이터에서 unique 추출
   const adgroupOptions = React.useMemo(() => {
