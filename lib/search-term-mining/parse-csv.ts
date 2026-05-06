@@ -77,12 +77,14 @@ const HEADER_DICTIONARY: Record<string, StandardKey> = {
   matchtype: "matchType",
   매치타입: "matchType",
   매치유형: "matchType",
+  검색유형: "matchType", // 콘솔 검색어 보고서 한글 헤더
 
   // -- 날짜 --
   ymd: "date",
   date: "date",
   날짜: "date",
   일자: "date",
+  일별: "date", // 콘솔 검색어 보고서 한글 헤더
 
   // -- 노출수 --
   impcnt: "impressions",
@@ -112,9 +114,11 @@ const HEADER_DICTIONARY: Record<string, StandardKey> = {
   conversion: "conversions",
   conv: "conversions",
   전환수: "conversions",
+  총전환수: "conversions", // 콘솔 검색어 보고서 한글 헤더
   전환: "conversions",
   // 보조: purchaseCcnt 도 conversions 로 (콘솔 응답에서 ccnt 미존재 시)
   purchaseccnt: "conversions",
+  구매완료전환수: "conversions",
 }
 
 /** 헤더 1개를 정규화 + 표준 키로 매핑. 미매핑이면 null. */
@@ -230,14 +234,53 @@ export function parseSearchTermCsv(
   }
 
   // -- 2. PapaParse ----------------------------------------------------------
-  const parsed = Papa.parse<Record<string, string>>(text, {
-    header: true,
-    skipEmptyLines: "greedy",
-    dynamicTyping: false,
-    transformHeader: (h) => h.trim(),
-  })
+  // 콘솔 검색어/키워드 보고서는 1행에 메타데이터(`검색어 보고서(2026.05.01.~...),2175052`)
+  // 가 들어 있고 2행이 실제 헤더인 경우가 있다. 첫 시도에서 searchTerm 매핑 실패 시
+  // 1행을 메타로 간주하고 제거 후 1회 재시도한다.
+  const tryParse = (input: string) => {
+    const parsed = Papa.parse<Record<string, string>>(input, {
+      header: true,
+      skipEmptyLines: "greedy",
+      dynamicTyping: false,
+      transformHeader: (h) => h.trim(),
+    })
+    const rawHeaders = (parsed.meta.fields ?? []).map((h) => h.trim())
+    const headerMap: Record<string, StandardKey> = {}
+    const unmappedHeaders: string[] = []
+    for (const h of rawHeaders) {
+      const std = mapHeader(h)
+      if (std) {
+        if (!Object.values(headerMap).includes(std)) {
+          headerMap[h] = std
+        } else {
+          unmappedHeaders.push(`${h} (중복: ${std})`)
+        }
+      } else {
+        unmappedHeaders.push(h)
+      }
+    }
+    return { parsed, rawHeaders, headerMap, unmappedHeaders }
+  }
 
-  const rawHeaders = (parsed.meta.fields ?? []).map((h) => h.trim())
+  let attempt = tryParse(text)
+  let metaSkipped = false
+  if (
+    attempt.rawHeaders.length > 0 &&
+    !Object.values(attempt.headerMap).includes("searchTerm")
+  ) {
+    // 1행 제거 후 재시도 — 첫 줄을 line break 단위로 잘라낸다 (CRLF/LF 모두 처리).
+    const firstBreak = text.search(/\r?\n/u)
+    if (firstBreak >= 0) {
+      const retried = tryParse(text.slice(firstBreak + 1))
+      if (Object.values(retried.headerMap).includes("searchTerm")) {
+        attempt = retried
+        metaSkipped = true
+      }
+    }
+  }
+
+  const { parsed, rawHeaders, headerMap, unmappedHeaders } = attempt
+
   if (rawHeaders.length === 0) {
     return {
       rows: [],
@@ -249,22 +292,7 @@ export function parseSearchTermCsv(
     }
   }
 
-  // -- 3. 헤더 매핑 ----------------------------------------------------------
-  const headerMap: Record<string, StandardKey> = {}
-  const unmappedHeaders: string[] = []
-  for (const h of rawHeaders) {
-    const std = mapHeader(h)
-    if (std) {
-      // 같은 표준 키가 두 헤더에 매핑되면 첫 번째를 우선 (운영 안정성)
-      if (!Object.values(headerMap).includes(std)) {
-        headerMap[h] = std
-      } else {
-        unmappedHeaders.push(`${h} (중복: ${std})`)
-      }
-    } else {
-      unmappedHeaders.push(h)
-    }
-  }
+  void metaSkipped // 향후 진단 로그용 — 현재는 silent skip
 
   const mappedKeys = Object.values(headerMap)
 
