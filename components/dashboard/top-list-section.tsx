@@ -189,7 +189,7 @@ export function TopListSection({
     return (
       <Card size="sm" className="h-full">
         <CardHeader className="border-b">
-          <CardTitle>TOP 5</CardTitle>
+          <CardTitle>상위 5</CardTitle>
           <CardDescription>API 키/시크릿 미입력</CardDescription>
         </CardHeader>
       </Card>

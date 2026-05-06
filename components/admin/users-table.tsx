@@ -265,9 +265,9 @@ export function UsersTable({ users }: { users: UserRow[] }) {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">전체</SelectItem>
-              <SelectItem value="admin">admin</SelectItem>
-              <SelectItem value="operator">operator</SelectItem>
-              <SelectItem value="viewer">viewer</SelectItem>
+              <SelectItem value="admin">관리자 (admin)</SelectItem>
+              <SelectItem value="operator">운영자 (operator)</SelectItem>
+              <SelectItem value="viewer">뷰어 (viewer)</SelectItem>
             </SelectContent>
           </Select>
         </div>

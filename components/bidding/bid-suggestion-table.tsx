@@ -359,12 +359,12 @@ export function BidSuggestionTable({
             <SelectValue placeholder="엔진" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">엔진(전체)</SelectItem>
-            <SelectItem value="bid">bid</SelectItem>
-            <SelectItem value="quality">quality</SelectItem>
-            <SelectItem value="targeting">targeting</SelectItem>
-            <SelectItem value="budget">budget</SelectItem>
-            <SelectItem value="copy_policy">copy_policy</SelectItem>
+            <SelectItem value="all">엔진 (전체)</SelectItem>
+            <SelectItem value="bid">입찰가 (bid)</SelectItem>
+            <SelectItem value="quality">품질 (quality)</SelectItem>
+            <SelectItem value="targeting">타게팅 (targeting)</SelectItem>
+            <SelectItem value="budget">예산 (budget)</SelectItem>
+            <SelectItem value="copy_policy">정책 복제 (copy_policy)</SelectItem>
           </SelectContent>
         </Select>
         <Select
@@ -372,13 +372,13 @@ export function BidSuggestionTable({
           onValueChange={(v) => setSeverityFilter(v as SeverityFilter)}
         >
           <SelectTrigger className="h-8 w-32">
-            <SelectValue placeholder="severity" />
+            <SelectValue placeholder="심각도" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">severity(전체)</SelectItem>
-            <SelectItem value="info">info</SelectItem>
-            <SelectItem value="warn">warn</SelectItem>
-            <SelectItem value="critical">critical</SelectItem>
+            <SelectItem value="all">심각도 (전체)</SelectItem>
+            <SelectItem value="info">정보 (info)</SelectItem>
+            <SelectItem value="warn">경고 (warn)</SelectItem>
+            <SelectItem value="critical">심각 (critical)</SelectItem>
           </SelectContent>
         </Select>
         {(textFilter || engineFilter !== "all" || severityFilter !== "all") && (
@@ -429,7 +429,7 @@ export function BidSuggestionTable({
                 <TableHead className="w-28 text-right">현재 입찰가</TableHead>
                 <TableHead className="w-28 text-right">권고 입찰가</TableHead>
                 <TableHead className="w-20 text-right">Δ%</TableHead>
-                <TableHead className="w-24">severity</TableHead>
+                <TableHead className="w-24">심각도</TableHead>
                 <TableHead>사유</TableHead>
                 <TableHead className="w-32">생성</TableHead>
               </TableRow>
@@ -830,7 +830,7 @@ function DetailContent({
             <span className="ml-2">{k?.adgroupName ?? "—"}</span>
           </div>
           <div>
-            <span className="text-muted-foreground">severity</span>
+            <span className="text-muted-foreground">심각도</span>
             <span className="ml-2">
               <SeverityBadge severity={row.severity} />
             </span>
@@ -926,6 +926,21 @@ function DetailContent({
 // 보조 컴포넌트
 // =============================================================================
 
+// 엔진 / 심각도 한글 라벨 — title 에 영문 코드 (호버 시).
+const ENGINE_LABEL: Record<BidSuggestionRow["engineSource"], string> = {
+  bid: "입찰가",
+  quality: "품질",
+  targeting: "타게팅",
+  budget: "예산",
+  copy_policy: "정책 복제",
+}
+
+const SEVERITY_LABEL: Record<BidSuggestionRow["severity"], string> = {
+  info: "정보",
+  warn: "경고",
+  critical: "심각",
+}
+
 function EngineBadge({
   engine,
 }: {
@@ -945,8 +960,9 @@ function EngineBadge({
         "inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium",
         cls[engine],
       )}
+      title={engine}
     >
-      {engine}
+      {ENGINE_LABEL[engine]}
     </span>
   )
 }
@@ -969,9 +985,10 @@ function SeverityBadge({
         "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium",
         cls[severity],
       )}
+      title={severity}
     >
       <Icon className="size-3" />
-      {severity}
+      {SEVERITY_LABEL[severity]}
     </span>
   )
 }

@@ -314,7 +314,7 @@ export function ApprovalQueueTable({
       {/* 필터 바 */}
       <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-3 py-2">
         <Input
-          placeholder="검색어 / 광고그룹 / kind 검색"
+          placeholder="검색어 / 광고그룹 / 유형 검색"
           value={textFilter}
           onChange={(e) => setTextFilter(e.target.value)}
           className="h-8 max-w-xs"
@@ -324,10 +324,10 @@ export function ApprovalQueueTable({
           onValueChange={(v) => setKindFilter(v as KindFilter)}
         >
           <SelectTrigger className="h-8 w-56">
-            <SelectValue placeholder="kind" />
+            <SelectValue placeholder="유형" />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">kind(전체)</SelectItem>
+            <SelectItem value="all">유형 (전체)</SelectItem>
             <SelectItem value="search_term_promote">
               신규 키워드 등록
             </SelectItem>
