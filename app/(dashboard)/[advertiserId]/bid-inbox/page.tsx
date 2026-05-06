@@ -126,7 +126,7 @@ export default async function BidInboxPage({
   return (
     <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
-        title="비딩 Inbox"
+        title="운영 Inbox"
         helpText={
           <>
             <p className="font-medium text-foreground">사용 방법</p>
@@ -138,7 +138,7 @@ export default async function BidInboxPage({
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
-          { label: "비딩 Inbox" },
+          { label: "운영 Inbox" },
         ]}
       />
 

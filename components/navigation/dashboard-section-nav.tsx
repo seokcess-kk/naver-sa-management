@@ -48,7 +48,7 @@ const advancedGroups: AdvancedGroup[] = [
     label: "비딩",
     sections: [
       { href: "/bidding-policies", label: "비딩 정책" },
-      { href: "/bid-inbox", label: "비딩 Inbox" },
+      { href: "/bid-inbox", label: "운영 Inbox" },
       { href: "/targeting", label: "타게팅" },
     ],
   },

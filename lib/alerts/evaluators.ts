@@ -1188,7 +1188,7 @@ export async function evaluateSuggestionInbox(
       ruleType: "suggestion_inbox",
       severity: "info",
       title: `Inbox 권고 ${count}건 신규`,
-      body: `최근 ${withinHours}시간 내 비딩 권고 ${count}건이 누적되었습니다. 검토 후 적용해 주세요.`,
+      body: `최근 ${withinHours}시간 내 운영 권고 ${count}건이 누적되었습니다. 검토 후 적용해 주세요.`,
       meta: {
         advertiserId: ctx.advertiserId,
         count,
