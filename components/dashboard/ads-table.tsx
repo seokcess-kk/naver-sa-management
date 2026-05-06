@@ -61,6 +61,9 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   ArrowUpDownIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  ListFilterIcon,
   MoreHorizontalIcon,
   InfoIcon,
 } from "lucide-react"
@@ -947,6 +950,15 @@ export function AdsTable({
     { id: "updatedAt", desc: true },
   ])
 
+  // 고급 필터(타입 / 상태 / 검수) 활성 갯수 — 1차 toolbar 의 "필터" 버튼 배지.
+  const advancedActiveCount =
+    (adTypeFilter !== "ALL" ? 1 : 0) +
+    (statusFilter !== "ALL" ? 1 : 0) +
+    (inspectFilter !== "ALL" ? 1 : 0)
+  const [showAdvanced, setShowAdvanced] = React.useState(
+    () => advancedActiveCount > 0,
+  )
+
   // 검색 input debounce 200ms — searchInput 변경에만 반응 (updateQuery 의존성 제외).
   React.useEffect(() => {
     const t = setTimeout(() => {
@@ -1145,7 +1157,7 @@ export function AdsTable({
         </Card>
       )}
 
-      {/* 필터 / 검색 toolbar */}
+      {/* 1차 toolbar — 검색 / 광고그룹(scope) / 필터 펼침 / 초기화 / 우측 기간·지표·카운트 */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
         <Input
           placeholder="소재 본문 / nccAdId 검색..."
@@ -1153,72 +1165,6 @@ export function AdsTable({
           onChange={(e) => setSearchInput(e.target.value)}
           className="h-8 w-72"
         />
-        <Select
-          value={adTypeFilter}
-          onValueChange={(v) => {
-            const next = v ?? "ALL"
-            setAdTypeFilter(next)
-            updateQuery({ type: next })
-          }}
-        >
-          <SelectTrigger className="w-32">
-            <SelectValue placeholder="타입">
-              {(v: string | null) =>
-                !v || v === "ALL" ? "타입 (전체)" : v
-              }
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="ALL">타입 (전체)</SelectItem>
-            {adTypeOptions.map((t) => (
-              <SelectItem key={t} value={t}>
-                {t}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <Select
-          value={statusFilter}
-          onValueChange={(v) => {
-            const next = v ?? "ALL"
-            setStatusFilter(next)
-            updateQuery({ status: next })
-          }}
-        >
-          <SelectTrigger className="w-32">
-            <SelectValue placeholder="상태">
-              {(v: string | null) => STATUS_LABELS[v ?? "ALL"] ?? "상태 (전체)"}
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="ALL">상태 (전체)</SelectItem>
-            <SelectItem value="on">ON</SelectItem>
-            <SelectItem value="off">OFF</SelectItem>
-            <SelectItem value="deleted">삭제됨</SelectItem>
-          </SelectContent>
-        </Select>
-        <Select
-          value={inspectFilter}
-          onValueChange={(v) => {
-            const next = v ?? "ALL"
-            setInspectFilter(next)
-            updateQuery({ inspect: next })
-          }}
-        >
-          <SelectTrigger className="w-32">
-            <SelectValue placeholder="검수">
-              {(v: string | null) =>
-                INSPECT_LABELS[v ?? "ALL"] ?? "검수 (전체)"
-              }
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="ALL">검수 (전체)</SelectItem>
-            <SelectItem value="pending">검수중</SelectItem>
-            <SelectItem value="approved">승인</SelectItem>
-            <SelectItem value="rejected">거절</SelectItem>
-          </SelectContent>
-        </Select>
         <Select
           value={adgroupFilter}
           onValueChange={(v) => {
@@ -1245,6 +1191,22 @@ export function AdsTable({
             ))}
           </SelectContent>
         </Select>
+        <Button
+          size="sm"
+          variant={showAdvanced ? "secondary" : "outline"}
+          onClick={() => setShowAdvanced((v) => !v)}
+          aria-expanded={showAdvanced}
+          aria-controls="ads-advanced-filters"
+        >
+          <ListFilterIcon />
+          필터
+          {advancedActiveCount > 0 ? (
+            <span className="ml-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-foreground/10 px-1 text-[10px] font-medium">
+              {advancedActiveCount}
+            </span>
+          ) : null}
+          {showAdvanced ? <ChevronUpIcon /> : <ChevronDownIcon />}
+        </Button>
         <Button
           size="sm"
           variant="ghost"
@@ -1303,6 +1265,81 @@ export function AdsTable({
           </span>
         </div>
       </div>
+
+      {/* 2차 toolbar — 타입 / 상태 / 검수 (가끔 쓰는 고급 필터). */}
+      {showAdvanced ? (
+        <div
+          id="ads-advanced-filters"
+          className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2"
+        >
+          <Select
+            value={adTypeFilter}
+            onValueChange={(v) => {
+              const next = v ?? "ALL"
+              setAdTypeFilter(next)
+              updateQuery({ type: next })
+            }}
+          >
+            <SelectTrigger className="w-32">
+              <SelectValue placeholder="타입">
+                {(v: string | null) =>
+                  !v || v === "ALL" ? "타입 (전체)" : v
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">타입 (전체)</SelectItem>
+              {adTypeOptions.map((t) => (
+                <SelectItem key={t} value={t}>
+                  {t}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={statusFilter}
+            onValueChange={(v) => {
+              const next = v ?? "ALL"
+              setStatusFilter(next)
+              updateQuery({ status: next })
+            }}
+          >
+            <SelectTrigger className="w-32">
+              <SelectValue placeholder="상태">
+                {(v: string | null) => STATUS_LABELS[v ?? "ALL"] ?? "상태 (전체)"}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">상태 (전체)</SelectItem>
+              <SelectItem value="on">ON</SelectItem>
+              <SelectItem value="off">OFF</SelectItem>
+              <SelectItem value="deleted">삭제됨</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select
+            value={inspectFilter}
+            onValueChange={(v) => {
+              const next = v ?? "ALL"
+              setInspectFilter(next)
+              updateQuery({ inspect: next })
+            }}
+          >
+            <SelectTrigger className="w-32">
+              <SelectValue placeholder="검수">
+                {(v: string | null) =>
+                  INSPECT_LABELS[v ?? "ALL"] ?? "검수 (전체)"
+                }
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="ALL">검수 (전체)</SelectItem>
+              <SelectItem value="pending">검수중</SelectItem>
+              <SelectItem value="approved">승인</SelectItem>
+              <SelectItem value="rejected">거절</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      ) : null}
 
       {/* 다중 선택 일괄 액션 바 (F-4.3) */}
       <div
