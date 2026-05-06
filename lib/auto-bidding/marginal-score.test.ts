@@ -82,6 +82,110 @@ describe("decideMarginalSuggestion — A. 신뢰도", () => {
   })
 })
 
+describe("decideMarginalSuggestion — A2. 노출/비용 가드 (Phase 7)", () => {
+  it("impressions 999 < 1000 → hold low_impressions:*", () => {
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          impressions7d: 999,
+          clicks7d: 60,
+          cost7d: 10_000,
+        } as any,
+        targets: { targetCpa: null, targetRoas: new Prisma.Decimal("4.0") },
+      }),
+    )
+    expect(r.decision).toBe("hold")
+    if (r.decision === "hold") {
+      expect(r.reason).toMatch(/^low_impressions:/)
+    }
+  })
+
+  it("impressions 1000 통과 + cost 0 → hold zero_cost:*", () => {
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          impressions7d: 1000,
+          clicks7d: 60,
+          cost7d: 0,
+        } as any,
+        targets: { targetCpa: null, targetRoas: new Prisma.Decimal("4.0") },
+      }),
+    )
+    expect(r.decision).toBe("hold")
+    if (r.decision === "hold") {
+      expect(r.reason).toMatch(/^zero_cost:/)
+    }
+  })
+
+  it("impressions 1500 + cost 10000 → 가드 통과 (low_impressions/zero_cost hold 아님)", () => {
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          impressions7d: 1500,
+          clicks7d: 60,
+          cost7d: 10_000,
+          revenue7d: 600_000,
+        } as any,
+        targets: { targetCpa: null, targetRoas: new Prisma.Decimal("4.0") },
+      }),
+    )
+    // suggest 또는 다른 hold (band/clamp 등) 분기 진입 — Phase 7 가드는 통과.
+    if (r.decision === "hold") {
+      expect(r.reason).not.toMatch(/^low_impressions:/)
+      expect(r.reason).not.toMatch(/^zero_cost:/)
+    }
+  })
+
+  it("config minImpressionsForConfidence=500 override → impressions 800 통과", () => {
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          impressions7d: 800,
+          clicks7d: 60,
+          cost7d: 10_000,
+          revenue7d: 600_000,
+        } as any,
+        targets: { targetCpa: null, targetRoas: new Prisma.Decimal("4.0") },
+        config: { minImpressionsForConfidence: 500 },
+      }),
+    )
+    if (r.decision === "hold") {
+      expect(r.reason).not.toMatch(/^low_impressions:/)
+    }
+  })
+
+  it("가드 우선순위 — clicks 부족 시 low_confidence_data 우선 (impressions 가드보다 앞)", () => {
+    // clicks 30 < 50 AND impressions 500 < 1000 — 둘 다 위반.
+    // 분기 순서상 clicks 가드 먼저 → low_confidence_data.
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          impressions7d: 500,
+          clicks7d: 30,
+          cost7d: 10_000,
+        } as any,
+      }),
+    )
+    expect(r.decision).toBe("hold")
+    if (r.decision === "hold") expect(r.reason).toBe("low_confidence_data")
+  })
+
+  it("가드 우선순위 — clicks 통과 + impressions 부족 + cost 0 모두 위반 시 impressions 우선", () => {
+    // clicks 60 ≥ 50 통과 → impressions 500 < 1000 위반 → low_impressions 반환.
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          impressions7d: 500,
+          clicks7d: 60,
+          cost7d: 0,
+        } as any,
+      }),
+    )
+    expect(r.decision).toBe("hold")
+    if (r.decision === "hold") expect(r.reason).toMatch(/^low_impressions:/)
+  })
+})
+
 describe("decideMarginalSuggestion — B. ROAS 분기", () => {
   it("ROAS 6.0x ≥ target 4.0x × 1.2(=4.8) → suggest up", () => {
     const r = decideMarginalSuggestion(
@@ -379,6 +483,7 @@ describe("decideMarginalSuggestion — G. confidence", () => {
 describe("decideMarginalSuggestion — H. config 기본값", () => {
   it("DEFAULT_MARGINAL_CONFIG 노출", () => {
     expect(DEFAULT_MARGINAL_CONFIG.minClicksForConfidence).toBe(50)
+    expect(DEFAULT_MARGINAL_CONFIG.minImpressionsForConfidence).toBe(1000)
     expect(DEFAULT_MARGINAL_CONFIG.maxBidChangePct).toBe(15)
     expect(DEFAULT_MARGINAL_CONFIG.bidLowerBound).toBe(70)
     expect(DEFAULT_MARGINAL_CONFIG.bidUpperBound).toBe(100_000)

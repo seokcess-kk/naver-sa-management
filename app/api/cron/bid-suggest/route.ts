@@ -67,6 +67,18 @@ export const maxDuration = 800
 const TOP_N = Number(process.env.BID_SUGGEST_TOP_N ?? "100")
 const STATS_WINDOW_DAYS = 7
 const SUGGESTION_TTL_DAYS = 7
+/**
+ * stat-daily stale 차단 임계 (Phase 7).
+ *
+ * StatDaily 적재가 본 임계 이상 정체된 광고주는 권고 생성 skip — 잘못된 데이터로 권고
+ * 누적되는 사고 방지. 기준은 StatDaily.updatedAt 광고주별 max (recordSyncAt 미적재).
+ *
+ * 임계 30h 근거: stat-daily cron 은 KST 03:00 1회/일 + 광고주별 SA 보고서 빌드 폴링 ~5분.
+ *   - 정상 운영 시 ageHours 가 24h 사이클로 변동 (KST 03:30 직전 ~24h, 직후 ~0).
+ *   - 24h+α (폴링 지연/장애 여유 6h) = 30h 초과 = 전일자 적재 실패 1건만 검출.
+ *   - 임계를 6h 등 짧게 두면 KST 02:00~03:30 슬롯에서 정상 광고주가 매일 stale 처리되는 운영 사고 발생.
+ */
+const STAT_STALENESS_HOURS = 30
 
 type CronError = {
   advertiserId: string
@@ -79,6 +91,8 @@ type CronResponse = {
   advertisersTotal: number
   advertisersOk: number
   advertisersSkipped: number
+  /** stat-daily 적재가 STAT_STALENESS_HOURS 초과로 stale → 권고 생성 skip 카운트 (Phase 7). */
+  advertisersStale: number
   keywordsScanned: number
   budgetCampaignsScanned: number
   suggestionsCreated: number
@@ -123,6 +137,8 @@ type AdvertiserStats = {
   singlesCreated: number
   singlesUpdated: number
   singlesDismissed: number
+  /** stat-daily stale → 본 광고주 진입부 skip (Phase 7). */
+  stale: boolean
 }
 
 type BudgetSuggestionStats = {
@@ -441,6 +457,7 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
     singlesCreated: 0,
     singlesUpdated: 0,
     singlesDismissed: 0,
+    stale: false,
   }
 
   // -- a. automation config 로드 (없거나 off 면 skip — 운영자 명시 활성화 필요) ---
@@ -449,6 +466,26 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
   })
   if (!cfg || cfg.mode === "off") {
     return stats
+  }
+
+  // -- a-2. stat-daily stale 차단 (Phase 7) --------------------------------
+  // 본 cron 은 StatDaily 7d groupBy 결과에 권고를 의존 — 적재가 정체된 광고주는
+  // 잘못된 권고 생성 위험. lastSyncAt 은 stat 키 미보유 (5종 sync 만 추적) →
+  // StatDaily.updatedAt 광고주별 max 로 stale 판정.
+  // 신규 광고주 (StatDaily 0행) 는 skip 안 함 — baseline 가드(KeywordPerformanceProfile
+  // dataDays=0) 가 따로 처리.
+  const lastStat = await prisma.statDaily.findFirst({
+    where: { advertiserId },
+    select: { updatedAt: true },
+    orderBy: { updatedAt: "desc" },
+  })
+  if (lastStat?.updatedAt) {
+    const ageHours =
+      (Date.now() - lastStat.updatedAt.getTime()) / (1000 * 60 * 60)
+    if (ageHours > STAT_STALENESS_HOURS) {
+      stats.stale = true
+      return stats
+    }
   }
   const targets: AutomationTargets = {
     targetCpc: cfg?.targetCpc ?? null,
@@ -717,6 +754,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
         advertisersTotal: 0,
         advertisersOk: 0,
         advertisersSkipped: 0,
+        advertisersStale: 0,
         keywordsScanned: 0,
         budgetCampaignsScanned: 0,
         suggestionsCreated: 0,
@@ -754,6 +792,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   // -- 3. 광고주 직렬 처리 ---------------------------------------------------
   let advertisersOk = 0
   let advertisersSkipped = 0
+  let advertisersStale = 0
   let keywordsScanned = 0
   let budgetCampaignsScanned = 0
   let suggestionsCreated = 0
@@ -779,7 +818,8 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       singlesCreated += r.singlesCreated
       singlesUpdated += r.singlesUpdated
       singlesDismissed += r.singlesDismissed
-      if (r.scanned > 0 || r.budgetScanned > 0) advertisersOk++
+      if (r.stale) advertisersStale++
+      else if (r.scanned > 0 || r.budgetScanned > 0) advertisersOk++
       else advertisersSkipped++
     } catch (e) {
       const message = safeError(e)
@@ -795,6 +835,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     advertisersTotal: eligible.length,
     advertisersOk,
     advertisersSkipped,
+    advertisersStale,
     keywordsScanned,
     budgetCampaignsScanned,
     suggestionsCreated,

@@ -71,6 +71,14 @@ export type AutomationTargets = {
 export type MarginalConfig = {
   /** 신뢰도 임계 — 클릭 표본 < N → hold. 기본 50. */
   minClicksForConfidence: number
+  /**
+   * 7일 노출 하한 — 미만 시 hold (Phase 7 권고 품질 안전장치).
+   *
+   * 노출 0/극저 키워드는 표본 부족으로 신뢰 불가:
+   *   - clicks7d ≥ 50 만 가드하면 노출 60·클릭 50 (CTR 83%) 같은 비현실 케이스 통과 가능.
+   *   - 노출 1000 미만은 광고 노출 자체가 거의 안 된 상태 → 권고 침묵.
+   */
+  minImpressionsForConfidence: number
   /** 1회 변경 폭 (정률, %). 기본 15 — SPEC 운영 권장 ±10~20% 중간값. */
   maxBidChangePct: number
   /** 입찰가 하한(원) — 네이버 SA 공식 한도 70원. */
@@ -81,6 +89,7 @@ export type MarginalConfig = {
 
 export const DEFAULT_MARGINAL_CONFIG: MarginalConfig = {
   minClicksForConfidence: 50,
+  minImpressionsForConfidence: 1000,
   maxBidChangePct: 15,
   bidLowerBound: 70,
   bidUpperBound: 100_000,
@@ -174,6 +183,18 @@ export function decideMarginalSuggestion(
   // -- 2. 신뢰도 임계 ---------------------------------------------------------
   if (clicks7d < config.minClicksForConfidence) {
     return { decision: "hold", reason: "low_confidence_data" }
+  }
+
+  // -- 2.5. 노출 하한 (Phase 7) ----------------------------------------------
+  // 클릭 임계는 통과해도 노출 자체가 부족하면 신뢰 불가 (광고 노출 안 된 상태).
+  if (impressions7d < config.minImpressionsForConfidence) {
+    return { decision: "hold", reason: "low_impressions:insufficient_data" }
+  }
+
+  // -- 2.6. 비용 0 제외 (Phase 7) --------------------------------------------
+  // 비용 0 은 입찰가 변경의 신호가 없는 상태 (집행 전 / 신규 매칭).
+  if (cost7d <= 0) {
+    return { decision: "hold", reason: "zero_cost:no_signal" }
   }
 
   // -- 3. 메트릭 산출 ---------------------------------------------------------

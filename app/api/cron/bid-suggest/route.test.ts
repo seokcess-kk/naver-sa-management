@@ -13,6 +13,7 @@ const mockBidAutomationConfigFindUnique = vi.fn()
 const mockKeywordPerformanceProfileFindUnique = vi.fn()
 const mockBiddingPolicyFindMany = vi.fn()
 const mockStatDailyGroupBy = vi.fn()
+const mockStatDailyFindFirst = vi.fn()
 const mockKeywordFindMany = vi.fn()
 const mockBidSuggestionFindFirst = vi.fn()
 const mockBidSuggestionCreate = vi.fn()
@@ -38,6 +39,7 @@ vi.mock("@/lib/db/prisma", () => ({
     },
     statDaily: {
       groupBy: (...args: unknown[]) => mockStatDailyGroupBy(...args),
+      findFirst: (...args: unknown[]) => mockStatDailyFindFirst(...args),
     },
     keyword: {
       findMany: (...args: unknown[]) => mockKeywordFindMany(...args),
@@ -101,6 +103,10 @@ beforeEach(() => {
   mockKeywordPerformanceProfileFindUnique.mockResolvedValue(null)
   mockBiddingPolicyFindMany.mockResolvedValue([])
   mockKeywordFindMany.mockResolvedValue([])
+  // 기본: fresh stat (1시간 전) — Phase 7 stale 가드 통과.
+  mockStatDailyFindFirst.mockResolvedValue({
+    updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+  })
   mockBidSuggestionFindFirst.mockResolvedValue(null)
   mockBidSuggestionCreate.mockResolvedValue({ id: "s_budget" })
   mockBidSuggestionUpdate.mockResolvedValue({ id: "s_budget" })
@@ -366,5 +372,58 @@ describe("cron bid-suggest — keyword bundle suggestions", () => {
     expect(supersedeCalls).toHaveLength(1)
     expect(supersedeCalls[0][0].data.status).toBe("dismissed")
     expect(supersedeCalls[0][0].data.reason).toBe("superseded_by_new_bundle")
+  })
+})
+
+// =============================================================================
+// stat-daily stale 차단 (Phase 7 권고 품질 안전장치)
+// =============================================================================
+//
+// processAdvertiser 진입부 가드:
+//   - StatDaily.updatedAt 광고주별 max 가 30h 초과 → stats.stale=true → 권고 생성 skip.
+//   - StatDaily 0행 (신규 광고주) → skip 안 함 (baseline 가드가 처리).
+//   - 30h 이내 → 정상 진입 (24h 사이클 + 6h 여유).
+
+describe("cron bid-suggest — stat-daily stale 차단", () => {
+  it("StatDaily.updatedAt 31시간 전 → advertisersStale=1 + 권고 생성 0", async () => {
+    mockStatDailyFindFirst.mockResolvedValue({
+      updatedAt: new Date(Date.now() - 31 * 60 * 60 * 1000),
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.advertisersStale).toBe(1)
+    // stale 광고주는 budget 권고도 생성 안 함 (가드가 cfg 로드 직후).
+    expect(body.suggestionsCreated).toBe(0)
+    expect(body.budgetCampaignsScanned).toBe(0)
+    expect(body.keywordsScanned).toBe(0)
+    // bidSuggestion.create 미호출 검증.
+    expect(mockBidSuggestionCreate).not.toHaveBeenCalled()
+  })
+
+  it("StatDaily.updatedAt 5시간 전 → fresh — 정상 진입 (advertisersStale=0)", async () => {
+    mockStatDailyFindFirst.mockResolvedValue({
+      updatedAt: new Date(Date.now() - 5 * 60 * 60 * 1000),
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.advertisersStale).toBe(0)
+    // budget 권고는 생성 (default mock 시나리오).
+    expect(body.suggestionsCreated).toBe(1)
+    expect(body.budgetCampaignsScanned).toBe(1)
+  })
+
+  it("StatDaily 0행 (신규 광고주) → skip 안 함 (advertisersStale=0)", async () => {
+    mockStatDailyFindFirst.mockResolvedValue(null)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.advertisersStale).toBe(0)
+    // 정상 진입 — budget 흐름은 default mock 으로 진행.
+    expect(body.budgetCampaignsScanned).toBe(1)
   })
 })
