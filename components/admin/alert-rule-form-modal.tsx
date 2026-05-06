@@ -479,15 +479,15 @@ function AlertRuleFormModalInner({
           </DialogTitle>
           <DialogDescription>
             {isEdit
-              ? "type 은 변경할 수 없습니다. 다른 type 으로 바꾸려면 새 룰을 만들고 기존 룰을 삭제하세요."
-              : "광고주 + type 별 파라미터를 입력합니다. 같은 광고주에 같은 type 룰을 중복 등록할 수 있으나 권장하지 않습니다."}
+              ? "유형은 변경할 수 없습니다. 다른 유형으로 바꾸려면 새 룰을 만들고 기존 룰을 삭제하세요."
+              : "광고주 + 유형별 파라미터를 입력합니다. 같은 광고주에 같은 유형의 룰을 중복 등록할 수 있으나 권장하지 않습니다."}
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col gap-4">
           {/* type */}
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">type</Label>
+            <Label className="text-xs">유형</Label>
             <Select
               value={type}
               onValueChange={(v) => setType(v as AlertRuleType)}

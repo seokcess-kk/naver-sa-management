@@ -386,7 +386,7 @@ function PolicyFormBody({
 
         {/* device */}
         <div className="flex flex-col gap-1.5">
-          <Label className="text-sm">device</Label>
+          <Label className="text-sm">디바이스</Label>
           {mode === "create" ? (
             <div className="flex items-center gap-4">
               {(["PC", "MOBILE"] as const).map((d) => (
@@ -400,18 +400,22 @@ function PolicyFormBody({
                     checked={device === d}
                     onChange={() => setDevice(d)}
                   />
-                  {d}
+                  {d === "PC" ? "PC" : "모바일"}
                 </Label>
               ))}
             </div>
           ) : (
             <div className="rounded-md border bg-muted/30 px-3 py-1.5 text-sm">
-              {device}{" "}
+              {device === "PC" ? "PC" : "모바일"}{" "}
               <span className="text-[11px] text-muted-foreground">
                 (변경 불가)
               </span>
             </div>
           )}
+          <p className="text-[11px] text-muted-foreground">
+            PC 와 모바일은 별도 정책입니다. 같은 키워드라도 디바이스마다 목표
+            순위·입찰 상하한을 다르게 둘 수 있습니다.
+          </p>
         </div>
 
         {/* targetRank */}
@@ -431,9 +435,13 @@ function PolicyFormBody({
             className="w-32"
             aria-invalid={!targetRankValid && targetRank.trim() !== ""}
           />
-          {!targetRankValid && targetRank.trim() !== "" && (
+          {!targetRankValid && targetRank.trim() !== "" ? (
             <p className="text-[11px] text-destructive">
               1~10 사이 정수를 입력하세요.
+            </p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              1 에 가까울수록 클릭은 늘지만 클릭당 비용도 비례해 오릅니다.
             </p>
           )}
         </div>
@@ -442,7 +450,7 @@ function PolicyFormBody({
         <div className="grid grid-cols-2 gap-3">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="policy-maxBid" className="text-sm">
-              maxBid (원, 빈값=미제한)
+              입찰 상한 (원, 빈값=미제한)
             </Label>
             <Input
               id="policy-maxBid"
@@ -463,7 +471,7 @@ function PolicyFormBody({
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="policy-minBid" className="text-sm">
-              minBid (원, 빈값=미제한)
+              입찰 하한 (원, 빈값=미제한)
             </Label>
             <Input
               id="policy-minBid"
@@ -483,9 +491,14 @@ function PolicyFormBody({
             )}
           </div>
         </div>
-        {!bidRangeValid && (
+        {!bidRangeValid ? (
           <p className="-mt-2 text-[11px] text-destructive">
-            maxBid 는 minBid 이상이어야 합니다.
+            입찰 상한은 입찰 하한 이상이어야 합니다.
+          </p>
+        ) : (
+          <p className="-mt-2 text-[11px] text-muted-foreground">
+            자동 조정 시 이 범위 안에서만 입찰가가 움직입니다. 빈값이면 그
+            방향으로는 제한 없음.
           </p>
         )}
 

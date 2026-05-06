@@ -350,10 +350,10 @@ export function KeywordEstimateModal({
             <span className="font-medium">{keyword.keyword}</span>
           </DialogTitle>
           <DialogDescription className="flex items-center gap-2">
-            <span className="font-mono text-[11px]">{keyword.nccKeywordId}</span>
+            <span className="font-mono text-[11px]">키워드 ID: {keyword.nccKeywordId}</span>
             <span className="text-muted-foreground/60">·</span>
             <span className="text-xs text-muted-foreground">
-              조회 결과는 30분간 캐시됩니다. device 변경 시 재조회 필요.
+              조회 결과는 30분간 캐시됩니다. 디바이스를 바꾸면 재조회됩니다.
             </span>
           </DialogDescription>
         </DialogHeader>
