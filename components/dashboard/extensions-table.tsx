@@ -847,6 +847,7 @@ export function ExtensionsTable({
     adgroupFilter,
   ])
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table returns imperative helpers; keep this component out of React Compiler memoization.
   const table = useReactTable<ExtensionRow>({
     data: extensionsWithMetrics,
     columns,

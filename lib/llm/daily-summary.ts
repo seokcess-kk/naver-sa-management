@@ -14,7 +14,6 @@
 import { prisma } from "@/lib/db/prisma"
 import {
   callLlmWithFallback,
-  assertMonthlyBudgetOk,
   type LlmModel,
 } from "@/lib/llm/anthropic"
 

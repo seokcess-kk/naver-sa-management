@@ -76,6 +76,7 @@ import { StatusBadge } from "@/components/admin/change-batches-client"
 // =============================================================================
 
 const ROLLBACK_SUPPORTED_ACTIONS = new Set<string>([
+  "bid_inbox.apply",
   "keyword.toggle",
   "keyword.bid",
   "keyword.inline_update",
@@ -892,4 +893,3 @@ function ItemsTable({ items }: { items: ChangeItemRow[] }) {
     </Card>
   )
 }
-

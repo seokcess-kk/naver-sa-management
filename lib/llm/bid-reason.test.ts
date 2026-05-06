@@ -59,6 +59,8 @@ const METRICS_FULL: DecisionMetrics = {
   currentRoas: 4.28,
   currentCpa: null,
   keywordCpc: 1400,
+  keywordCtr: 2.5,
+  avgRank7d: 3.2,
 }
 
 const METRICS_PARTIAL: DecisionMetrics = {
@@ -68,6 +70,8 @@ const METRICS_PARTIAL: DecisionMetrics = {
   currentRoas: null,
   currentCpa: null,
   keywordCpc: 1500,
+  keywordCtr: null,
+  avgRank7d: null,
 }
 
 const DEFAULT_REASON = "ROAS 4.28x ≥ 목표 3.50x × 1.2 — 입찰 인상 여유"
@@ -113,6 +117,8 @@ describe("buildUserPrompt", () => {
     expect(p).toMatch(/매출: 1,500,000원/)
     expect(p).toMatch(/현재 ROAS: 4\.28배/)
     expect(p).toMatch(/키워드 CPC: 1,400원/)
+    expect(p).toMatch(/키워드 CTR: 2\.50%/)
+    expect(p).toMatch(/평균 노출 순위: 3\.2위/)
 
     // 정형 reason
     expect(p).toMatch(/시스템 산출 정형 사유/)
@@ -163,6 +169,8 @@ describe("buildUserPrompt", () => {
         currentRoas: null,
         currentCpa: 12_345,
         keywordCpc: 500,
+        keywordCtr: null,
+        avgRank7d: null,
       },
       defaultReason: "x",
     })

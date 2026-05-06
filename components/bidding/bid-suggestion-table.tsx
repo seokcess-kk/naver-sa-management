@@ -33,6 +33,7 @@ import {
   SparklesIcon,
   Loader2Icon,
   InfoIcon,
+  SlidersHorizontalIcon,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -87,6 +88,29 @@ type ApproveResult = {
   count: number
   preFailed: number
   enqueued: number
+}
+
+type BidAction = {
+  currentBid: number
+  suggestedBid: number
+  deltaPct: number
+  direction: "up" | "down"
+}
+
+const NUMBER_FORMATTER = new Intl.NumberFormat("ko-KR")
+const SHORT_DATE_FORMATTER = new Intl.DateTimeFormat("ko-KR", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+})
+
+type BudgetActionItem = {
+  campaignId?: string
+  nccCampaignId?: string
+  currentDailyBudget?: number | null
+  suggestedDailyBudget: number
 }
 
 // =============================================================================
@@ -183,12 +207,16 @@ export function BidSuggestionTable({
 
   // -- 적용 흐름 --------------------------------------------------------------
   async function handleApprove() {
-    if (selectedIds.size === 0) return
+    const approvableIds = selectedApplicableRows.map((s) => s.id)
+    if (approvableIds.length === 0) {
+      toast.error("적용 가능한 권고가 없습니다")
+      return
+    }
     setSubmitting(true)
     try {
       const res = await approveBidSuggestions(
         advertiserId,
-        Array.from(selectedIds),
+        approvableIds,
       )
       if (!res.ok) {
         toast.error(`적용 실패: ${res.error}`)
@@ -275,14 +303,36 @@ export function BidSuggestionTable({
     () => filtered.filter((s) => selectedIds.has(s.id)),
     [filtered, selectedIds],
   )
+  const selectedApplicableRows = selectedRows.filter(isApplicableSuggestion)
 
   // 미리보기 통계 (적용 모달)
   const previewStats = React.useMemo(() => {
     let upCount = 0
     let downCount = 0
+    let qualityOffCount = 0
+    let targetingCount = 0
+    let budgetCount = 0
     let totalDelta = 0
+    let totalBudgetDelta = 0
     let invalidCount = 0
-    for (const s of selectedRows) {
+    const unsupportedCount = selectedRows.length - selectedApplicableRows.length
+    for (const s of selectedApplicableRows) {
+      const action = getBidAction(s)
+      if (!action) {
+        if (isQualityOffSuggestion(s)) qualityOffCount++
+        if (isTargetingSuggestion(s)) targetingCount++
+        const budgetItems = getBudgetActionItems(s)
+        if (budgetItems) {
+          budgetCount += budgetItems.length
+          for (const item of budgetItems) {
+            if (typeof item.currentDailyBudget === "number") {
+              totalBudgetDelta +=
+                item.suggestedDailyBudget - item.currentDailyBudget
+            }
+          }
+        }
+        continue
+      }
       if (
         !s.keyword ||
         s.keyword.userLock ||
@@ -292,12 +342,22 @@ export function BidSuggestionTable({
         invalidCount++
         continue
       }
-      if (s.action.direction === "up") upCount++
+      if (action.direction === "up") upCount++
       else downCount++
-      totalDelta += s.action.suggestedBid - s.action.currentBid
+      totalDelta += action.suggestedBid - action.currentBid
     }
-    return { upCount, downCount, totalDelta, invalidCount }
-  }, [selectedRows])
+    return {
+      upCount,
+      downCount,
+      qualityOffCount,
+      targetingCount,
+      budgetCount,
+      totalDelta,
+      totalBudgetDelta,
+      invalidCount,
+      unsupportedCount,
+    }
+  }, [selectedApplicableRows, selectedRows.length])
 
   return (
     <div className="flex flex-col gap-3">
@@ -329,7 +389,7 @@ export function BidSuggestionTable({
               </Button>
               <Button
                 size="sm"
-                disabled={selectedIds.size === 0}
+                disabled={selectedApplicableRows.length === 0}
                 onClick={() => setApproveOpen(true)}
               >
                 선택 적용
@@ -346,7 +406,10 @@ export function BidSuggestionTable({
       {/* 필터 바 */}
       <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-3 py-2">
         <Input
-          placeholder="키워드 / 광고그룹 / 사유 검색"
+          aria-label="키워드, 광고그룹, 사유 검색"
+          name="bidSuggestionSearch"
+          autoComplete="off"
+          placeholder="키워드 / 광고그룹 / 사유 검색…"
           value={textFilter}
           onChange={(e) => setTextFilter(e.target.value)}
           className="h-8 max-w-xs"
@@ -355,7 +418,7 @@ export function BidSuggestionTable({
           value={engineFilter}
           onValueChange={(v) => setEngineFilter(v as EngineFilter)}
         >
-          <SelectTrigger className="h-8 w-32">
+          <SelectTrigger aria-label="엔진 필터" className="h-8 w-32">
             <SelectValue placeholder="엔진" />
           </SelectTrigger>
           <SelectContent>
@@ -371,7 +434,7 @@ export function BidSuggestionTable({
           value={severityFilter}
           onValueChange={(v) => setSeverityFilter(v as SeverityFilter)}
         >
-          <SelectTrigger className="h-8 w-32">
+          <SelectTrigger aria-label="심각도 필터" className="h-8 w-32">
             <SelectValue placeholder="심각도" />
           </SelectTrigger>
           <SelectContent>
@@ -401,7 +464,7 @@ export function BidSuggestionTable({
         <div className="rounded-md border bg-muted/20 px-4 py-12 text-center">
           <p className="text-sm font-medium">권고 항목이 없습니다</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            매시간 자동 분석이 신규 권고를 적재합니다. 자동화 모드를 "Inbox 권고"
+            매시간 자동 분석이 신규 권고를 적재합니다. 자동화 모드를 &quot;Inbox 권고&quot;
             로 켜고 광고주 평균 성과 데이터가 충분히 누적되면 권고가 표시됩니다.
           </p>
         </div>
@@ -426,9 +489,9 @@ export function BidSuggestionTable({
                 <TableHead>키워드</TableHead>
                 <TableHead>광고그룹</TableHead>
                 <TableHead className="w-24">엔진</TableHead>
-                <TableHead className="w-28 text-right">현재 입찰가</TableHead>
-                <TableHead className="w-28 text-right">권고 입찰가</TableHead>
-                <TableHead className="w-20 text-right">Δ%</TableHead>
+                <TableHead className="w-28 text-right">현재</TableHead>
+                <TableHead className="w-28 text-right">권고</TableHead>
+                <TableHead className="w-40 text-right">액션</TableHead>
                 <TableHead className="w-24">심각도</TableHead>
                 <TableHead>사유</TableHead>
                 <TableHead className="w-32">생성</TableHead>
@@ -455,12 +518,12 @@ export function BidSuggestionTable({
         open={approveOpen}
         onOpenChange={(o) => !submitting && setApproveOpen(o)}
       >
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="max-h-[min(86vh,44rem)] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>선택 적용 — 미리보기</DialogTitle>
             <DialogDescription>
-              선택한 권고 입찰가를 변경 작업으로 적재합니다. 백그라운드에서 1분
-              간격으로 처리되어 네이버 SA 에 입찰가가 반영됩니다.
+              선택한 입찰가, 품질 OFF, 타게팅 가중치, 캠페인 예산 권고를
+              변경 작업으로 적재하거나 즉시 반영합니다.
             </DialogDescription>
           </DialogHeader>
 
@@ -471,6 +534,12 @@ export function BidSuggestionTable({
                   <span className="text-muted-foreground">선택</span>
                   <span className="ml-2 font-medium">
                     {selectedRows.length}건
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">적용 가능</span>
+                  <span className="ml-2 font-medium">
+                    {selectedApplicableRows.length}건
                   </span>
                 </div>
                 <div>
@@ -491,6 +560,32 @@ export function BidSuggestionTable({
                     {previewStats.downCount}건
                   </span>
                 </div>
+                <div>
+                  <span className="text-muted-foreground">품질 OFF</span>
+                  <span className="ml-2 font-medium text-violet-700 dark:text-violet-300">
+                    {previewStats.qualityOffCount}건
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">타게팅</span>
+                  <span className="ml-2 font-medium text-emerald-700 dark:text-emerald-300">
+                    {previewStats.targetingCount}건
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">예산</span>
+                  <span className="ml-2 font-medium text-amber-700 dark:text-amber-300">
+                    {previewStats.budgetCount}건
+                  </span>
+                </div>
+                {previewStats.unsupportedCount > 0 && (
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground">제외</span>
+                    <span className="ml-2 font-medium text-muted-foreground">
+                      미지원 권고 {previewStats.unsupportedCount}건
+                    </span>
+                  </div>
+                )}
                 <div className="col-span-2">
                   <span className="text-muted-foreground">
                     입찰가 변경 합계
@@ -504,9 +599,29 @@ export function BidSuggestionTable({
                     )}
                   >
                     {previewStats.totalDelta >= 0 ? "+" : ""}
-                    {previewStats.totalDelta.toLocaleString()}원
+                    {NUMBER_FORMATTER.format(previewStats.totalDelta)}원
                   </span>
                 </div>
+                {previewStats.budgetCount > 0 && (
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground">
+                      예산 변경 합계
+                    </span>
+                    <span
+                      className={cn(
+                        "ml-2 font-mono text-sm",
+                        previewStats.totalBudgetDelta >= 0
+                          ? "text-emerald-600"
+                          : "text-amber-700",
+                      )}
+                    >
+                      {previewStats.totalBudgetDelta >= 0 ? "+" : ""}
+                      {NUMBER_FORMATTER.format(
+                        previewStats.totalBudgetDelta,
+                      )}원
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -514,6 +629,12 @@ export function BidSuggestionTable({
               <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs dark:border-amber-900/60 dark:bg-amber-950/30">
                 일부 키워드가 잠금/삭제/그룹입찰가 사용 상태로 변경 불가합니다.
                 해당 행은 ChangeItem `failed` 로 기록됩니다.
+              </div>
+            )}
+            {previewStats.unsupportedCount > 0 && (
+              <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                아직 적용 플로우가 연결되지 않은 권고는 제외됩니다. 상세에서
+                내용을 확인한 뒤 거부하거나 다음 지원 범위에 포함하세요.
               </div>
             )}
 
@@ -529,27 +650,54 @@ export function BidSuggestionTable({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {selectedRows.slice(0, 5).map((s) => (
-                    <TableRow key={s.id}>
-                      <TableCell className="text-xs">
-                        {s.keyword?.text ?? "—"}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
-                        {formatBid(s.action.currentBid)}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
-                        {formatBid(s.action.suggestedBid)}
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs">
-                        <DeltaInline action={s.action} />
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {selectedApplicableRows.slice(0, 5).map((s) => {
+                    const action = getBidAction(s)
+                    const isQualityOff = isQualityOffSuggestion(s)
+                    const isTargeting = isTargetingSuggestion(s)
+                    const budgetItems = getBudgetActionItems(s)
+                    return (
+                      <TableRow key={s.id}>
+                        <TableCell className="text-xs">
+                          {s.keyword?.text ??
+                            (budgetItems ? "캠페인 예산" : "—")}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {action
+                            ? formatBid(action.currentBid)
+                            : budgetItems?.length === 1
+                              ? formatBid(budgetItems[0].currentDailyBudget)
+                              : "—"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {action
+                            ? formatBid(action.suggestedBid)
+                            : isQualityOff
+                              ? "OFF"
+                              : isTargeting
+                                ? "가중치"
+                                : budgetItems?.length === 1
+                                  ? formatBid(
+                                      budgetItems[0].suggestedDailyBudget,
+                                    )
+                                  : budgetItems
+                                    ? `${budgetItems.length}건`
+                                    : "—"}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {action ? (
+                            <DeltaInline action={action} />
+                          ) : (
+                            <ActionSummary row={s} />
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
                 </TableBody>
               </Table>
-              {selectedRows.length > 5 && (
+              {selectedApplicableRows.length > 5 && (
                 <div className="border-t bg-muted/20 px-3 py-1.5 text-center text-[11px] text-muted-foreground">
-                  ...외 {selectedRows.length - 5}건
+                  …외 {selectedApplicableRows.length - 5}건
                 </div>
               )}
             </div>
@@ -564,7 +712,7 @@ export function BidSuggestionTable({
               취소
             </Button>
             <Button onClick={handleApprove} disabled={submitting}>
-              {submitting ? "적용 중..." : "확정 적용"}
+              {submitting ? "적용 중…" : "확정 적용"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -575,7 +723,7 @@ export function BidSuggestionTable({
         open={dismissOpen}
         onOpenChange={(o) => !submitting && setDismissOpen(o)}
       >
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-h-[min(86vh,34rem)] overflow-y-auto sm:max-w-md">
           <DialogHeader>
             <DialogTitle>선택 거부</DialogTitle>
             <DialogDescription>
@@ -597,7 +745,7 @@ export function BidSuggestionTable({
               onClick={handleDismiss}
               disabled={submitting}
             >
-              {submitting ? "처리 중..." : "거부"}
+              {submitting ? "처리 중…" : "거부"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -608,7 +756,7 @@ export function BidSuggestionTable({
         open={detailRow !== null}
         onOpenChange={(o) => !o && setDetailRow(null)}
       >
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="max-h-[min(86vh,46rem)] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>권고 상세</DialogTitle>
             <DialogDescription>
@@ -639,12 +787,13 @@ export function BidSuggestionTable({
         open={resultDialog !== null}
         onOpenChange={(o) => !o && setResultDialog(null)}
       >
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-h-[min(86vh,34rem)] overflow-y-auto sm:max-w-md">
           <DialogHeader>
             <DialogTitle>적용 요청 완료</DialogTitle>
             <DialogDescription>
               변경 작업이 생성되었습니다. 백그라운드에서 1분 간격으로 처리되어
-              네이버 SA 에 입찰가가 반영됩니다 (수 분 내).
+              네이버 SA 에 반영됩니다. 예산과 타게팅은 승인 시점에 바로
+              적용됩니다.
             </DialogDescription>
           </DialogHeader>
           {resultDialog && (
@@ -690,6 +839,101 @@ export function BidSuggestionTable({
 // 행 컴포넌트
 // =============================================================================
 
+function getBidAction(row: BidSuggestionRow): BidAction | null {
+  const a = row.action
+  if (
+    row.engineSource !== "bid" ||
+    typeof a.currentBid !== "number" ||
+    typeof a.suggestedBid !== "number" ||
+    typeof a.deltaPct !== "number" ||
+    (a.direction !== "up" && a.direction !== "down")
+  ) {
+    return null
+  }
+  return {
+    currentBid: a.currentBid,
+    suggestedBid: a.suggestedBid,
+    deltaPct: a.deltaPct,
+    direction: a.direction,
+  }
+}
+
+function isQualityOffSuggestion(row: BidSuggestionRow): boolean {
+  return row.engineSource === "quality" && row.action.kind === "off"
+}
+
+function isTargetingSuggestion(row: BidSuggestionRow): boolean {
+  return row.engineSource === "targeting" && row.action.kind === "hour_weights_recommendation"
+}
+
+function getBudgetActionItems(row: BidSuggestionRow): BudgetActionItem[] | null {
+  if (row.engineSource !== "budget" || row.action.kind !== "campaign_budget_update") {
+    return null
+  }
+  const rawItems = Array.isArray(row.action.items) ? row.action.items : [row.action]
+  const out: BudgetActionItem[] = []
+  for (const raw of rawItems) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue
+    const item = raw as Record<string, unknown>
+    const suggestedRaw =
+      item.suggestedDailyBudget ?? item.dailyBudget ?? item.suggestedBudget
+    const suggestedDailyBudget = Number(suggestedRaw)
+    if (!Number.isFinite(suggestedDailyBudget)) continue
+    const currentRaw = item.currentDailyBudget ?? item.currentBudget
+    const currentDailyBudget =
+      currentRaw == null || currentRaw === ""
+        ? null
+        : Number.isFinite(Number(currentRaw))
+          ? Number(currentRaw)
+          : undefined
+    out.push({
+      campaignId:
+        typeof item.campaignId === "string" ? item.campaignId : undefined,
+      nccCampaignId:
+        typeof item.nccCampaignId === "string"
+          ? item.nccCampaignId
+          : undefined,
+      currentDailyBudget,
+      suggestedDailyBudget,
+    })
+  }
+  return out.length > 0 ? out : null
+}
+
+function isApplicableSuggestion(row: BidSuggestionRow): boolean {
+  return (
+    getBidAction(row) !== null ||
+    isQualityOffSuggestion(row) ||
+    isTargetingSuggestion(row) ||
+    getBudgetActionItems(row) !== null
+  )
+}
+
+function describeAction(row: BidSuggestionRow): string {
+  const action = row.action
+  if (row.engineSource === "quality") {
+    const kind = typeof action.kind === "string" ? action.kind : "품질 개선"
+    const reasonCode =
+      typeof action.reasonCode === "string" ? ` · ${action.reasonCode}` : ""
+    return `${kind}${reasonCode}`
+  }
+  if (row.engineSource === "targeting") {
+    return "시간대 가중치 조정 권고"
+  }
+  if (row.engineSource === "budget") {
+    const items = getBudgetActionItems(row)
+    if (items?.length === 1) {
+      return `일예산 ${formatBid(items[0].suggestedDailyBudget)}원`
+    }
+    if (items && items.length > 1) return `캠페인 예산 ${items.length}건`
+    return "예산 운영 조정"
+  }
+  if (row.engineSource === "copy_policy") {
+    return "정책 복제 권고"
+  }
+  return "지원 예정"
+}
+
 function SuggestionRow({
   row,
   selected,
@@ -704,9 +948,18 @@ function SuggestionRow({
   canMutate: boolean
 }) {
   const k = row.keyword
+  const bidAction = getBidAction(row)
+  const budgetItems = getBudgetActionItems(row)
   // 적용 불가 케이스 시각 구분
   const invalid =
-    !k || k.userLock || k.useGroupBidAmt || k.status === "deleted"
+    row.engineSource === "bid" &&
+    (!k || k.userLock || k.useGroupBidAmt || k.status === "deleted")
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTableRowElement>) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault()
+      onOpenDetail()
+    }
+  }
   // 행 클릭 → 상세. 단, 체크박스 셀 클릭은 stopPropagation 으로 처리.
   return (
     <TableRow
@@ -715,6 +968,9 @@ function SuggestionRow({
         invalid && "bg-amber-50/40 dark:bg-amber-950/10",
       )}
       onClick={onOpenDetail}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
     >
       <TableCell onClick={(e) => e.stopPropagation()}>
         <Checkbox
@@ -763,13 +1019,27 @@ function SuggestionRow({
         <EngineBadge engine={row.engineSource} />
       </TableCell>
       <TableCell className="text-right font-mono text-sm">
-        {formatBid(row.action.currentBid)}
+        {bidAction
+          ? formatBid(bidAction.currentBid)
+          : budgetItems?.length === 1
+            ? formatBid(budgetItems[0].currentDailyBudget)
+            : "—"}
       </TableCell>
       <TableCell className="text-right font-mono text-sm">
-        {formatBid(row.action.suggestedBid)}
+        {bidAction
+          ? formatBid(bidAction.suggestedBid)
+          : budgetItems?.length === 1
+            ? formatBid(budgetItems[0].suggestedDailyBudget)
+            : budgetItems
+              ? `${budgetItems.length}건`
+              : "—"}
       </TableCell>
       <TableCell className="text-right">
-        <DeltaInline action={row.action} />
+        {bidAction ? (
+          <DeltaInline action={bidAction} />
+        ) : (
+          <ActionSummary row={row} />
+        )}
       </TableCell>
       <TableCell>
         <SeverityBadge severity={row.severity} />
@@ -808,7 +1078,8 @@ function DetailContent({
   onEnrich: () => void
 }) {
   const k = row.keyword
-  const isUp = row.action.direction === "up"
+  const bidAction = getBidAction(row)
+  const isUp = bidAction?.direction === "up"
   return (
     <div className="space-y-4">
       {/* 기본 정보 */}
@@ -837,22 +1108,28 @@ function DetailContent({
           <div>
             <span className="text-muted-foreground">현재 입찰가</span>
             <span className="ml-2 font-mono">
-              {formatBid(row.action.currentBid)}원
+              {bidAction ? `${formatBid(bidAction.currentBid)}원` : "—"}
             </span>
           </div>
           <div>
-            <span className="text-muted-foreground">권고 입찰가</span>
-            <span
-              className={cn(
-                "ml-2 font-mono",
-                isUp
-                  ? "text-emerald-600 dark:text-emerald-400"
-                  : "text-amber-700 dark:text-amber-400",
-              )}
-            >
-              {formatBid(row.action.suggestedBid)}원 ({isUp ? "+" : "-"}
-              {row.action.deltaPct}%)
-            </span>
+            <span className="text-muted-foreground">권고 액션</span>
+            {bidAction ? (
+              <span
+                className={cn(
+                  "ml-2 font-mono",
+                  isUp
+                    ? "text-emerald-600 dark:text-emerald-400"
+                    : "text-amber-700 dark:text-amber-400",
+                )}
+              >
+                {formatBid(bidAction.suggestedBid)}원 ({isUp ? "+" : "-"}
+                {bidAction.deltaPct}%)
+              </span>
+            ) : (
+              <span className="ml-2 text-muted-foreground">
+                {describeAction(row)}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -882,11 +1159,14 @@ function DetailContent({
               className="h-7 gap-1.5"
             >
               {enriching ? (
-                <Loader2Icon className="size-3.5 animate-spin" />
+                <Loader2Icon
+                  aria-hidden="true"
+                  className="size-3.5 animate-spin"
+                />
               ) : (
-                <SparklesIcon className="size-3.5" />
+                <SparklesIcon aria-hidden="true" className="size-3.5" />
               )}
-              {enriching ? "호출 중..." : "AI 설명 보기"}
+              {enriching ? "호출 중…" : "AI 설명 보기"}
             </Button>
           )}
         </div>
@@ -897,7 +1177,10 @@ function DetailContent({
         ) : canEnrich ? (
           <div className="rounded-md border border-dashed bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
             <div className="flex items-start gap-1.5">
-              <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
+              <InfoIcon
+                aria-hidden="true"
+                className="mt-0.5 size-3.5 shrink-0"
+              />
               <div>
                 <p>
                   Claude Haiku 4.5 호출로 정형 사유를 자연어 2~3 문장으로
@@ -986,7 +1269,7 @@ function SeverityBadge({
       )}
       title={severity}
     >
-      <Icon className="size-3" />
+      <Icon aria-hidden="true" className="size-3" />
       {SEVERITY_LABEL[severity]}
     </span>
   )
@@ -995,7 +1278,7 @@ function SeverityBadge({
 function DeltaInline({
   action,
 }: {
-  action: BidSuggestionRow["action"]
+  action: BidAction
 }) {
   const isUp = action.direction === "up"
   const cls = isUp
@@ -1004,22 +1287,26 @@ function DeltaInline({
   const Icon = isUp ? ArrowUpIcon : ArrowDownIcon
   return (
     <span className={cn("inline-flex items-center gap-0.5 font-mono text-xs", cls)}>
-      <Icon className="size-3" />
+      <Icon aria-hidden="true" className="size-3" />
       {action.deltaPct}%
     </span>
   )
 }
 
-function formatBid(v: number | null): string {
-  if (v === null) return "—"
-  return v.toLocaleString()
+function ActionSummary({ row }: { row: BidSuggestionRow }) {
+  return (
+    <span className="inline-flex items-center justify-end gap-1 text-xs text-muted-foreground">
+      <SlidersHorizontalIcon aria-hidden="true" className="size-3" />
+      {describeAction(row)}
+    </span>
+  )
+}
+
+function formatBid(v: number | null | undefined): string {
+  if (v == null) return "—"
+  return NUMBER_FORMATTER.format(v)
 }
 
 function formatDate(iso: string): string {
-  const d = new Date(iso)
-  const m = String(d.getMonth() + 1).padStart(2, "0")
-  const day = String(d.getDate()).padStart(2, "0")
-  const h = String(d.getHours()).padStart(2, "0")
-  const mi = String(d.getMinutes()).padStart(2, "0")
-  return `${m}-${day} ${h}:${mi}`
+  return SHORT_DATE_FORMATTER.format(new Date(iso))
 }

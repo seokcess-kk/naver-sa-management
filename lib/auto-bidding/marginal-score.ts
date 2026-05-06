@@ -7,7 +7,7 @@
  *
  * 핵심 원칙 (사용자 검토 반영):
  *   - 자동 실행 X. 본 함수 출력은 항상 Inbox 권고 (운영자 명시 승인 필요)
- *   - 의사결정 기준: **목표 CPA/ROAS 우선 → baseline 폴백** (절대 순위 X)
+ *   - 의사결정 기준: **CPA/ROAS → CPC/CTR → baseline 폴백** (절대 순위 X)
  *   - 절대 수치 사용 금지 — 모든 임계는 "사례·추정" 정책 기반 (운영 후 튜닝)
  *   - 데이터 신뢰도 부족 시 hold (Suggestion 미생성). 클릭 표본 < minClicks → 침묵
  *
@@ -40,6 +40,8 @@ export type KeywordPerfInput = {
   conversions7d: number | null
   /** 매출(원). 매출 조인 안 된 광고주 → null. */
   revenue7d: number | null
+  /** 7일 평균 노출 순위. 낮을수록 좋음. 미수집 → null. */
+  avgRank7d?: number | null
 }
 
 /** 광고주 단위 baseline — KeywordPerformanceProfile 1행. */
@@ -49,8 +51,16 @@ export type AdvertiserBaselineInput = {
   avgCpc: Prisma.Decimal | null
 }
 
-/** BidAutomationConfig 의 목표 — 둘 중 하나 또는 모두 null. */
+/** BidAutomationConfig 의 목표 — 모두 null 허용. */
 export type AutomationTargets = {
+  /** 목표 CPC(원). null = 미설정. */
+  targetCpc?: number | null
+  /** 최대 CPC(원). null = 시스템 기본 상한 사용. */
+  maxCpc?: number | null
+  /** CTR 하한(%). 예: 0.3 = 0.30%. null = 미설정. */
+  minCtr?: Prisma.Decimal | null
+  /** 목표 평균 노출 순위. 현재 marginal-score 직접 판단에는 미사용. */
+  targetAvgRank?: Prisma.Decimal | null
   /** 목표 CPA(원). null = 미설정. */
   targetCpa: number | null
   /** 목표 ROAS 비율 (예: 4.5 = 450%). null = 미설정. */
@@ -98,6 +108,10 @@ export type DecisionMetrics = {
   currentCpa: number | null
   /** 현재 키워드 CPC(원). 클릭 0 → null. */
   keywordCpc: number | null
+  /** 현재 키워드 CTR(%). 노출 0 → null. */
+  keywordCtr: number | null
+  /** 7일 평균 노출 순위. 낮을수록 좋음. */
+  avgRank7d: number | null
 }
 
 /** 변경 권고 페이로드 — BidSuggestion.action JSON 으로 직렬화. */
@@ -131,15 +145,26 @@ export type MarginalDecision =
  *   1. 신뢰도 임계 (clicks7d) — 부족 시 hold
  *   2. targetRoas 설정 + revenue 데이터 → ROAS 비교
  *   3. targetCpa 설정 + conversions 데이터 → CPA 비교
- *   4. 둘 다 없으면 baseline avgCpc 대비 키워드 CPC 비교 (이상 케이스만 down 권고)
- *   5. clamp 후 currentBid 와 동일 → hold
+ *   4. targetAvgRank 설정 + 평균 순위 데이터 → CPC/CTR 안전 조건 안에서 순위 개선/절감 비교
+ *   5. targetCpc 설정 + CPC 데이터 → CPC 비교
+ *   6. minCtr 설정 + CTR 데이터 → 저CTR 키워드 down 권고
+ *   7. 그래도 없으면 baseline avgCpc 대비 키워드 CPC 비교 (이상 케이스만 down 권고)
+ *   8. clamp 후 currentBid 와 동일 → hold
  */
 export function decideMarginalSuggestion(
   input: MarginalScoreInput,
 ): MarginalDecision {
   const config = { ...DEFAULT_MARGINAL_CONFIG, ...input.config }
   const { keyword, baseline, targets } = input
-  const { clicks7d, cost7d, conversions7d, revenue7d, currentBid } = keyword
+  const {
+    clicks7d,
+    impressions7d,
+    cost7d,
+    conversions7d,
+    revenue7d,
+    currentBid,
+    avgRank7d = null,
+  } = keyword
 
   // -- 1. 명시 입찰 키워드만 처리 (useGroupBidAmt 키워드는 본 모듈 비대상) ----
   if (currentBid <= 0) {
@@ -161,6 +186,7 @@ export function decideMarginalSuggestion(
       ? cost7d / conversions7d
       : null
   const keywordCpc = clicks7d > 0 ? cost7d / clicks7d : null
+  const keywordCtr = impressions7d > 0 ? (clicks7d / impressions7d) * 100 : null
 
   const metrics: DecisionMetrics = {
     clicks7d,
@@ -169,6 +195,8 @@ export function decideMarginalSuggestion(
     currentRoas,
     currentCpa,
     keywordCpc,
+    keywordCtr,
+    avgRank7d,
   }
 
   // -- 4. 방향 결정 -----------------------------------------------------------
@@ -208,7 +236,74 @@ export function decideMarginalSuggestion(
         reason: `cpa_within_band:${Math.round(currentCpa)}vs${target}`,
       }
     }
-  } else {
+  } else if (targets.targetAvgRank != null && avgRank7d != null) {
+    const target = Number(targets.targetAvgRank)
+    const minCtr = targets.minCtr != null ? Number(targets.minCtr) : null
+    const ctrOk = minCtr == null || (keywordCtr != null && keywordCtr >= minCtr)
+    const maxCpcOk = targets.maxCpc == null || currentBid < targets.maxCpc
+    const targetCpcOk =
+      targets.targetCpc == null ||
+      keywordCpc == null ||
+      keywordCpc <= targets.targetCpc * 1.1
+    const baselineCpc = baseline.avgCpc != null ? Number(baseline.avgCpc) : null
+    const rankTooGood = avgRank7d < Math.max(1, target - 1)
+    const cpcHighForRankDown =
+      keywordCpc != null &&
+      (targets.targetCpc != null
+        ? keywordCpc > targets.targetCpc
+        : baselineCpc != null && keywordCpc > baselineCpc * 1.2)
+
+    if (avgRank7d > target + 1 && ctrOk && maxCpcOk && targetCpcOk) {
+      direction = "up"
+      reasonCore = `평균 순위 ${avgRank7d.toFixed(1)}위 > 목표 ${target.toFixed(1)}위 + 1 — CPC/CTR 안전 조건 내 입찰 인상 권고`
+      severity = avgRank7d > target + 3 ? "warn" : "info"
+    } else if (rankTooGood && cpcHighForRankDown) {
+      direction = "down"
+      reasonCore = `평균 순위 ${avgRank7d.toFixed(1)}위가 목표 ${target.toFixed(1)}위보다 충분히 높고 CPC 부담이 있어 입찰 인하 권고`
+    } else if (targets.targetCpc == null && targets.minCtr == null) {
+      return {
+        decision: "hold",
+        reason: `rank_within_guardrails:${avgRank7d.toFixed(1)}vs${target.toFixed(1)}`,
+      }
+    }
+  }
+
+  if (direction == null && targets.targetCpc != null && keywordCpc != null) {
+    // CPC 비교: 목표보다 30% 이상 높으면 down, 20% 이상 낮고 CTR도 낮지 않으면 up.
+    const target = targets.targetCpc
+    const minCtr = targets.minCtr != null ? Number(targets.minCtr) : null
+    const ctrOk = minCtr == null || (keywordCtr != null && keywordCtr >= minCtr)
+    if (keywordCpc > target * 1.3) {
+      direction = "down"
+      reasonCore = `CPC ${Math.round(keywordCpc)}원 > 목표 ${target}원 × 1.3 — 입찰 인하 권고`
+      severity = keywordCpc > target * 1.6 ? "warn" : "info"
+    } else if (keywordCpc < target * 0.8 && ctrOk) {
+      direction = "up"
+      reasonCore = `CPC ${Math.round(keywordCpc)}원 < 목표 ${target}원 × 0.8 — 입찰 인상 여유`
+    } else {
+      return {
+        decision: "hold",
+        reason: `cpc_within_band:${Math.round(keywordCpc)}vs${target}`,
+      }
+    }
+  } else if (
+    direction == null &&
+    targets.minCtr != null &&
+    keywordCtr != null &&
+    Number(targets.minCtr) > 0
+  ) {
+    const target = Number(targets.minCtr)
+    if (keywordCtr < target) {
+      direction = "down"
+      reasonCore = `CTR ${keywordCtr.toFixed(2)}% < 하한 ${target.toFixed(2)}% — 입찰 인하 또는 소재 개선 권고`
+      severity = keywordCtr < target * 0.5 ? "warn" : "info"
+    } else {
+      return {
+        decision: "hold",
+        reason: `ctr_above_floor:${keywordCtr.toFixed(2)}vs${target.toFixed(2)}`,
+      }
+    }
+  } else if (direction == null) {
     // 목표 / 매출·전환 데이터 부족 — baseline avgCpc 대비 키워드 CPC 이상 케이스만
     if (
       baseline.avgCpc != null &&
@@ -233,9 +328,13 @@ export function decideMarginalSuggestion(
   const deltaPct = config.maxBidChangePct
   const factor = direction === "up" ? 1 + deltaPct / 100 : 1 - deltaPct / 100
   let candidate = Math.round(currentBid * factor)
+  const bidUpperBound =
+    targets.maxCpc != null
+      ? Math.min(config.bidUpperBound, targets.maxCpc)
+      : config.bidUpperBound
   candidate = Math.max(
     config.bidLowerBound,
-    Math.min(config.bidUpperBound, candidate),
+    Math.min(bidUpperBound, candidate),
   )
 
   // -- 6. clamp 후 동일 값 → hold --------------------------------------------

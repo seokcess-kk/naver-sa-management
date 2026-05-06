@@ -837,13 +837,21 @@ model TargetingRule {
 
 // 광고주 단위 비딩 자동화 설정 (1:1).
 //   mode 가 본 광고주의 자동화 행위 결정 — inbox / auto_policy_only / off.
-//   목표 CPA / ROAS 는 입찰 엔진 (BidSuggestionSource.bid) 의 over/under 판정 기준.
-//   targetCpa / targetRoas 는 둘 중 하나만 채워도 OK (운영 시나리오 분기).
+//   목표 CPC / CTR / 평균순위는 CPC 기반 파워링크 운영 기준.
+//   목표 CPA / ROAS 는 전환·매출 데이터가 있을 때 사용하는 고급 판정 기준.
 model BidAutomationConfig {
   id               String            @id @default(cuid())
   advertiserId     String            @unique // 광고주 1:1 강제 (TargetingRule 패턴)
   mode             BidAutomationMode @default(off)
   budgetPacingMode BudgetPacingMode  @default(focus)
+  // 목표 CPC (원 단위). null = 미설정 (광고주 평균 CPC 폴백).
+  targetCpc        Int?
+  // 최대 CPC (원 단위). null = 시스템 기본 상한 사용.
+  maxCpc           Int?
+  // CTR 하한 (%). 예) 0.30 = 0.30%. null = CTR 기반 하향 판정 비활성.
+  minCtr           Decimal?          @db.Decimal(6, 4)
+  // 목표 평균 노출 순위. 예) 3.00 = 3위. null = 순위 기반 정책 권고 비활성.
+  targetAvgRank    Decimal?          @db.Decimal(5, 2)
   // 목표 CPA (원 단위). null = 미설정 (CPA 기반 over/under bid 판정 비활성).
   targetCpa        Int?
   // 목표 ROAS (배율). 예) 4.50 = 매출 / 광고비 = 450%.

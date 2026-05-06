@@ -330,6 +330,10 @@ export async function syncAdExtensions(
             )
             continue
           }
+          if (!targetTypes.includes(t)) {
+            skipped++
+            continue
+          }
 
           const dbAdgroupId = adgroupIdMap.get(e.ownerId)
           if (!dbAdgroupId) {

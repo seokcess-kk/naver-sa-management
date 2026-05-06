@@ -17,7 +17,7 @@
  * 직접 의존: @sentry/nextjs (transitive @sentry/core 도 동일 타입)
  */
 
-import type { ErrorEvent, Breadcrumb, EventHint } from "@sentry/nextjs"
+import type { ErrorEvent, Breadcrumb } from "@sentry/nextjs"
 import { sanitize } from "@/lib/audit/sanitize"
 import { scrubString } from "@/lib/crypto/scrub-string"
 
@@ -30,7 +30,7 @@ import { scrubString } from "@/lib/crypto/scrub-string"
  * 반환 null 가능하지만 본 구현은 event 객체를 mutate 후 그대로 반환.
  * (null 반환은 이벤트 자체 전송 차단 — 본 정책은 마스킹만, 차단은 아님)
  */
-export function scrubEvent(event: ErrorEvent, _hint?: EventHint): ErrorEvent | null {
+export function scrubEvent(event: ErrorEvent): ErrorEvent | null {
   if (event.request) {
     if (event.request.headers) {
       // RequestEventData.headers: { [key: string]: string }
@@ -79,7 +79,7 @@ export function scrubEvent(event: ErrorEvent, _hint?: EventHint): ErrorEvent | n
  *
  * breadcrumb.data 의 시크릿 키 마스킹 + message 안 토큰 패턴 마스킹.
  */
-export function scrubBreadcrumb(b: Breadcrumb, _hint?: { event?: unknown }): Breadcrumb | null {
+export function scrubBreadcrumb(b: Breadcrumb): Breadcrumb | null {
   if (b.data) {
     b.data = sanitize(b.data) as typeof b.data
   }

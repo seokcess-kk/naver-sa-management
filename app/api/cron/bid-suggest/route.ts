@@ -14,12 +14,13 @@
  *   1. CRON_SECRET 검증 (불일치 시 401)
  *   2. 활성 광고주 조회 (status='active' AND BidAutomationConfig.mode != 'off' [없으면 inbox 폴백])
  *   3. 광고주 직렬:
- *      a. KeywordPerformanceProfile 로드 (없으면 skip — baseline cron 가 채울 때까지 대기)
- *      b. BidAutomationConfig 로드 (없으면 default mode='inbox')
- *      c. BiddingPolicy.enabled=true 키워드 nccKeywordId 셋 (자동 실행 키워드 제외 — auto-bidding cron 책임)
- *      d. StatDaily 7d groupBy(refId) sum(cost) desc TOP N
- *      e. Keyword 매핑 (nccKeywordId → id / bidAmt / userLock / status)
- *      f. 각 키워드:
+ *      a. BidAutomationConfig 로드 (없거나 off면 skip)
+ *      b. 캠페인 예산 페이싱/성과 권고 → BidSuggestion(engineSource='budget') 적재
+ *      c. KeywordPerformanceProfile 로드 (없으면 bid 엔진만 skip)
+ *      d. BiddingPolicy.enabled=true 키워드 nccKeywordId 셋 (자동 실행 키워드 제외 — auto-bidding cron 책임)
+ *      e. StatDaily 7d groupBy(refId) sum(cost) desc TOP N
+ *      f. Keyword 매핑 (nccKeywordId → id / bidAmt / userLock / status)
+ *      g. 각 키워드:
  *         - userLock=true / status='deleted' → skip
  *         - useGroupBidAmt=true → skip (명시 입찰만)
  *         - decideMarginalSuggestion
@@ -76,6 +77,7 @@ type CronResponse = {
   advertisersOk: number
   advertisersSkipped: number
   keywordsScanned: number
+  budgetCampaignsScanned: number
   suggestionsCreated: number
   suggestionsUpdated: number
   suggestionsDismissed: number
@@ -101,33 +103,326 @@ function addDays(base: Date, days: number): Date {
 
 type AdvertiserStats = {
   scanned: number
+  budgetScanned: number
   created: number
   updated: number
   dismissed: number
 }
 
-async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats> {
-  const stats: AdvertiserStats = {
+type BudgetSuggestionStats = {
+  scanned: number
+  created: number
+  updated: number
+  dismissed: number
+}
+
+type BudgetConfig = {
+  budgetPacingMode: "focus" | "explore" | "protect"
+  targetCpa: number | null
+  targetRoas: Prisma.Decimal | number | null
+}
+
+type BudgetDecision =
+  | {
+      decision: "suggest"
+      reasonCode: string
+      suggestedDailyBudget: number
+      severity: "info" | "warn" | "critical"
+      reason: string
+      meta: Record<string, number | string | null>
+    }
+  | {
+      decision: "hold"
+      reasonCode: string
+    }
+
+function roundBudget(v: number): number {
+  if (!Number.isFinite(v)) return 0
+  return Math.max(0, Math.round(v / 1000) * 1000)
+}
+
+function clampBudgetChange(
+  currentBudget: number,
+  suggestedBudget: number,
+  mode: BudgetConfig["budgetPacingMode"],
+): number {
+  const maxIncreasePct = mode === "explore" ? 0.3 : mode === "protect" ? 0.1 : 0.2
+  const maxDecreasePct = mode === "protect" ? 0.25 : 0.15
+  const min = currentBudget * (1 - maxDecreasePct)
+  const max = currentBudget * (1 + maxIncreasePct)
+  return roundBudget(Math.min(max, Math.max(min, suggestedBudget)))
+}
+
+function decideBudgetSuggestion(input: {
+  campaignName: string
+  currentDailyBudget: number
+  costYesterday: number
+  cost7d: number
+  conversions7d: number | null
+  revenue7d: number | null
+  cfg: BudgetConfig
+}): BudgetDecision {
+  const {
+    campaignName,
+    currentDailyBudget,
+    costYesterday,
+    cost7d,
+    conversions7d,
+    revenue7d,
+    cfg,
+  } = input
+  if (currentDailyBudget <= 0 || cost7d <= 0) {
+    return { decision: "hold", reasonCode: "no_budget_signal" }
+  }
+
+  const yesterdayPacePct = (costYesterday / currentDailyBudget) * 100
+  const sevenDayPacePct = (cost7d / (currentDailyBudget * 7)) * 100
+  const cpa7d =
+    conversions7d != null && conversions7d > 0 ? cost7d / conversions7d : null
+  const roas7d =
+    revenue7d != null && cost7d > 0 ? revenue7d / cost7d : null
+  const targetRoas =
+    cfg.targetRoas == null ? null : Number(cfg.targetRoas)
+
+  const meetsCpa = cfg.targetCpa == null || (cpa7d != null && cpa7d <= cfg.targetCpa)
+  const meetsRoas = targetRoas == null || (roas7d != null && roas7d >= targetRoas)
+  const hasTarget = cfg.targetCpa != null || targetRoas != null
+  const performanceOk = hasTarget ? meetsCpa || meetsRoas : true
+  const performanceBad =
+    (cfg.targetCpa != null && cpa7d != null && cpa7d > cfg.targetCpa * 1.25) ||
+    (targetRoas != null && roas7d != null && roas7d < targetRoas * 0.8)
+
+  const meta = {
+    currentDailyBudget,
+    costYesterday,
+    cost7d,
+    yesterdayPacePct: Number(yesterdayPacePct.toFixed(2)),
+    sevenDayPacePct: Number(sevenDayPacePct.toFixed(2)),
+    cpa7d: cpa7d == null ? null : Math.round(cpa7d),
+    roas7d: roas7d == null ? null : Number(roas7d.toFixed(2)),
+    budgetPacingMode: cfg.budgetPacingMode,
+  }
+
+  if (yesterdayPacePct >= 98 && sevenDayPacePct >= 75 && performanceOk) {
+    const factor =
+      cfg.budgetPacingMode === "explore"
+        ? 1.3
+        : cfg.budgetPacingMode === "protect"
+          ? 1.1
+          : 1.2
+    const suggestedDailyBudget = clampBudgetChange(
+      currentDailyBudget,
+      currentDailyBudget * factor,
+      cfg.budgetPacingMode,
+    )
+    return {
+      decision: "suggest",
+      reasonCode: "budget_exhausted_with_signal",
+      suggestedDailyBudget,
+      severity: yesterdayPacePct >= 110 ? "critical" : "warn",
+      reason: `${campaignName} 캠페인이 어제 일예산의 ${yesterdayPacePct.toFixed(0)}%를 사용했고 7일 페이스도 ${sevenDayPacePct.toFixed(0)}%입니다. 성과 목표를 크게 벗어나지 않아 일예산을 ${suggestedDailyBudget.toLocaleString()}원으로 증액 권고합니다.`,
+      meta,
+    }
+  }
+
+  if (sevenDayPacePct <= 35 && cost7d >= currentDailyBudget && cfg.budgetPacingMode !== "explore") {
+    const suggestedDailyBudget = clampBudgetChange(
+      currentDailyBudget,
+      Math.max(cost7d / 7 / 0.65, currentDailyBudget * 0.75),
+      cfg.budgetPacingMode,
+    )
+    if (suggestedDailyBudget < currentDailyBudget) {
+      return {
+        decision: "suggest",
+        reasonCode: "budget_underused",
+        suggestedDailyBudget,
+        severity: "info",
+        reason: `${campaignName} 캠페인의 7일 예산 사용률이 ${sevenDayPacePct.toFixed(0)}%로 낮습니다. 예산을 ${suggestedDailyBudget.toLocaleString()}원으로 낮춰 다른 캠페인에 재배분하는 것을 권고합니다.`,
+        meta,
+      }
+    }
+  }
+
+  if (performanceBad && sevenDayPacePct >= 50) {
+    const suggestedDailyBudget = clampBudgetChange(
+      currentDailyBudget,
+      currentDailyBudget * 0.85,
+      cfg.budgetPacingMode,
+    )
+    if (suggestedDailyBudget < currentDailyBudget) {
+      return {
+        decision: "suggest",
+        reasonCode: "budget_reduce_for_efficiency",
+        suggestedDailyBudget,
+        severity: "warn",
+        reason: `${campaignName} 캠페인의 최근 7일 효율이 목표 대비 낮습니다. 예산 소진은 이어지고 있어 일예산을 ${suggestedDailyBudget.toLocaleString()}원으로 감액 권고합니다.`,
+        meta,
+      }
+    }
+  }
+
+  return { decision: "hold", reasonCode: "budget_within_band" }
+}
+
+async function processBudgetSuggestions(
+  advertiserId: string,
+  cfg: BudgetConfig,
+): Promise<BudgetSuggestionStats> {
+  const stats: BudgetSuggestionStats = {
     scanned: 0,
     created: 0,
     updated: 0,
     dismissed: 0,
   }
 
-  // -- a. baseline 로드 -----------------------------------------------------
-  const kpp = await prisma.keywordPerformanceProfile.findUnique({
-    where: { advertiserId },
+  const campaigns = await prisma.campaign.findMany({
+    where: {
+      advertiserId,
+      status: { not: "deleted" },
+      dailyBudget: { not: null },
+    },
+    select: {
+      id: true,
+      nccCampaignId: true,
+      name: true,
+      dailyBudget: true,
+    },
   })
-  if (!kpp || kpp.dataDays === 0) {
-    return stats // baseline 없음 — 다음 cron 까지 대기 (silent skip)
-  }
-  const baseline: AdvertiserBaselineInput = {
-    avgCtr: kpp.avgCtr,
-    avgCvr: kpp.avgCvr,
-    avgCpc: kpp.avgCpc,
+  if (campaigns.length === 0) return stats
+
+  const since = addDays(new Date(), -STATS_WINDOW_DAYS)
+  const yesterday = addDays(new Date(), -1)
+  const yesterdayDate = new Date(Date.UTC(
+    yesterday.getUTCFullYear(),
+    yesterday.getUTCMonth(),
+    yesterday.getUTCDate(),
+  ))
+  const cost7d = await prisma.statDaily.groupBy({
+    by: ["refId"],
+    where: {
+      advertiserId,
+      level: "campaign",
+      refId: { in: campaigns.map((c) => c.nccCampaignId) },
+      date: { gte: since },
+    },
+    _sum: {
+      cost: true,
+      conversions: true,
+      revenue: true,
+    },
+  })
+  const costYesterday = await prisma.statDaily.groupBy({
+    by: ["refId"],
+    where: {
+      advertiserId,
+      level: "campaign",
+      refId: { in: campaigns.map((c) => c.nccCampaignId) },
+      date: yesterdayDate,
+    },
+    _sum: { cost: true },
+  })
+
+  const sevenDayById = new Map(cost7d.map((r) => [r.refId, r]))
+  const yesterdayById = new Map(costYesterday.map((r) => [r.refId, r]))
+  const expiresAt = addDays(new Date(), SUGGESTION_TTL_DAYS)
+
+  for (const c of campaigns) {
+    stats.scanned++
+    const budget = Number(c.dailyBudget ?? 0)
+    if (budget <= 0) continue
+    const sevenDay = sevenDayById.get(c.nccCampaignId)
+    const yesterdayRow = yesterdayById.get(c.nccCampaignId)
+    const decision = decideBudgetSuggestion({
+      campaignName: c.name,
+      currentDailyBudget: budget,
+      costYesterday: yesterdayRow?._sum.cost ? Number(yesterdayRow._sum.cost) : 0,
+      cost7d: sevenDay?._sum.cost ? Number(sevenDay._sum.cost) : 0,
+      conversions7d: sevenDay?._sum.conversions ?? null,
+      revenue7d: sevenDay?._sum.revenue ? Number(sevenDay._sum.revenue) : null,
+      cfg,
+    })
+
+    const existing = await prisma.bidSuggestion.findFirst({
+      where: {
+        advertiserId,
+        engineSource: "budget",
+        status: "pending",
+        action: {
+          path: ["campaignId"],
+          equals: c.id,
+        },
+      },
+      select: { id: true },
+    })
+
+    if (decision.decision === "suggest") {
+      const action = {
+        kind: "campaign_budget_update",
+        campaignId: c.id,
+        nccCampaignId: c.nccCampaignId,
+        currentDailyBudget: budget,
+        suggestedDailyBudget: decision.suggestedDailyBudget,
+        reasonCode: decision.reasonCode,
+        metrics: decision.meta,
+        items: [
+          {
+            campaignId: c.id,
+            nccCampaignId: c.nccCampaignId,
+            currentDailyBudget: budget,
+            suggestedDailyBudget: decision.suggestedDailyBudget,
+            reasonCode: decision.reasonCode,
+          },
+        ],
+      } satisfies Prisma.InputJsonValue
+
+      const data = {
+        advertiserId,
+        keywordId: null,
+        adgroupId: null,
+        engineSource: "budget" as const,
+        action,
+        reason: decision.reason,
+        severity: decision.severity,
+        status: "pending" as const,
+        expiresAt,
+      }
+      if (existing) {
+        await prisma.bidSuggestion.update({
+          where: { id: existing.id },
+          data: {
+            action: data.action,
+            reason: data.reason,
+            severity: data.severity,
+            expiresAt,
+          },
+        })
+        stats.updated++
+      } else {
+        await prisma.bidSuggestion.create({ data })
+        stats.created++
+      }
+    } else if (existing) {
+      const r = await prisma.bidSuggestion.updateMany({
+        where: { id: existing.id, status: "pending" },
+        data: { status: "dismissed" },
+      })
+      stats.dismissed += r.count
+    }
   }
 
-  // -- b. automation config 로드 (없거나 off 면 skip — 운영자 명시 활성화 필요) ---
+  return stats
+}
+
+async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats> {
+  const stats: AdvertiserStats = {
+    scanned: 0,
+    budgetScanned: 0,
+    created: 0,
+    updated: 0,
+    dismissed: 0,
+  }
+
+  // -- a. automation config 로드 (없거나 off 면 skip — 운영자 명시 활성화 필요) ---
   const cfg = await prisma.bidAutomationConfig.findUnique({
     where: { advertiserId },
   })
@@ -135,18 +430,45 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
     return stats
   }
   const targets: AutomationTargets = {
+    targetCpc: cfg?.targetCpc ?? null,
+    maxCpc: cfg?.maxCpc ?? null,
+    minCtr: cfg?.minCtr ?? null,
+    targetAvgRank: cfg?.targetAvgRank ?? null,
     targetCpa: cfg?.targetCpa ?? null,
     targetRoas: cfg?.targetRoas ?? null,
   }
 
-  // -- c. BiddingPolicy 등록 키워드 (자동 실행 대상 — 본 cron 제외) -----------
+  const budgetStats = await processBudgetSuggestions(advertiserId, {
+    budgetPacingMode: cfg.budgetPacingMode,
+    targetCpa: cfg.targetCpa ?? null,
+    targetRoas: cfg.targetRoas ?? null,
+  })
+  stats.budgetScanned += budgetStats.scanned
+  stats.created += budgetStats.created
+  stats.updated += budgetStats.updated
+  stats.dismissed += budgetStats.dismissed
+
+  // -- c. baseline 로드 -----------------------------------------------------
+  const kpp = await prisma.keywordPerformanceProfile.findUnique({
+    where: { advertiserId },
+  })
+  if (!kpp || kpp.dataDays === 0) {
+    return stats // baseline 없음 — bid 엔진만 다음 cron 까지 대기
+  }
+  const baseline: AdvertiserBaselineInput = {
+    avgCtr: kpp.avgCtr,
+    avgCvr: kpp.avgCvr,
+    avgCpc: kpp.avgCpc,
+  }
+
+  // -- d. BiddingPolicy 등록 키워드 (자동 실행 대상 — 본 cron 제외) -----------
   const policyKeywords = await prisma.biddingPolicy.findMany({
     where: { advertiserId, enabled: true },
     select: { keywordId: true },
   })
   const policyKeywordIds = new Set(policyKeywords.map((p) => p.keywordId))
 
-  // -- d. TOP N — StatDaily level='keyword' 7일 cost 큰 순 -------------------
+  // -- e. TOP N — StatDaily level='keyword' 7일 cost 큰 순 -------------------
   const since = addDays(new Date(), -STATS_WINDOW_DAYS)
   const top = await prisma.statDaily.groupBy({
     by: ["refId"],
@@ -162,6 +484,7 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
       conversions: true,
       revenue: true,
     },
+    _avg: { avgRnk: true },
     orderBy: { _sum: { cost: "desc" } },
     take: TOP_N,
   })
@@ -170,7 +493,7 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
     return stats // 데이터 없음
   }
 
-  // -- e. Keyword 매핑 -------------------------------------------------------
+  // -- f. Keyword 매핑 -------------------------------------------------------
   const nccIds = top.map((t) => t.refId)
   const keywords = await prisma.keyword.findMany({
     where: {
@@ -188,7 +511,7 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
   })
   const keywordMap = new Map(keywords.map((k) => [k.nccKeywordId, k]))
 
-  // -- f. 각 키워드 처리 -----------------------------------------------------
+  // -- g. 각 키워드 처리 -----------------------------------------------------
   const expiresAt = addDays(new Date(), SUGGESTION_TTL_DAYS)
 
   for (const row of top) {
@@ -209,6 +532,7 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
       cost7d: sum.cost ? Number(sum.cost) : 0,
       conversions7d: sum.conversions ?? null,
       revenue7d: sum.revenue ? Number(sum.revenue) : null,
+      avgRank7d: row._avg.avgRnk != null ? Number(row._avg.avgRnk) : null,
     }
 
     const decision = decideMarginalSuggestion({
@@ -290,6 +614,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
         advertisersOk: 0,
         advertisersSkipped: 0,
         keywordsScanned: 0,
+        budgetCampaignsScanned: 0,
         suggestionsCreated: 0,
         suggestionsUpdated: 0,
         suggestionsDismissed: 0,
@@ -321,6 +646,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   let advertisersOk = 0
   let advertisersSkipped = 0
   let keywordsScanned = 0
+  let budgetCampaignsScanned = 0
   let suggestionsCreated = 0
   let suggestionsUpdated = 0
   let suggestionsDismissed = 0
@@ -330,10 +656,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     try {
       const r = await processAdvertiser(adv.id)
       keywordsScanned += r.scanned
+      budgetCampaignsScanned += r.budgetScanned
       suggestionsCreated += r.created
       suggestionsUpdated += r.updated
       suggestionsDismissed += r.dismissed
-      if (r.scanned > 0) advertisersOk++
+      if (r.scanned > 0 || r.budgetScanned > 0) advertisersOk++
       else advertisersSkipped++
     } catch (e) {
       const message = safeError(e)
@@ -350,6 +677,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     advertisersOk,
     advertisersSkipped,
     keywordsScanned,
+    budgetCampaignsScanned,
     suggestionsCreated,
     suggestionsUpdated,
     suggestionsDismissed,

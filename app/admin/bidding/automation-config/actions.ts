@@ -13,8 +13,10 @@
  *   - mode = 'inbox'             : bid-suggest cron 이 BidSuggestion 적재. 운영자 승인 시 SA 적용.
  *   - mode = 'auto_policy_only'  : Inbox 비활성. BiddingPolicy 등록 키워드만 자동 비딩(F-11.2 기존 흐름).
  *   - mode = 'off'               : Inbox 비활성 + 자동 비딩 비활성 (안전 모드).
- *   - budgetPacingMode           : 광고주별 페이싱 전략 (Phase E budget-pacer 가 활용). 본 PR 은 컬럼 보존만.
- *   - targetCpa / targetRoas     : marginal-score 의 1차 의사결정 기준.
+ *   - budgetPacingMode           : 광고주별 페이싱 전략.
+ *   - targetCpc / maxCpc / minCtr: CPC 기반 검색광고 운영 기준.
+ *   - targetAvgRank              : 평균 노출 순위 기반 정책 권고 기준.
+ *   - targetCpa / targetRoas     : 전환·매출 데이터가 있을 때의 고급 의사결정 기준.
  */
 
 import { revalidatePath } from "next/cache"
@@ -40,6 +42,10 @@ export type BidAutomationConfigRow = {
   config: {
     mode: BidAutomationMode
     budgetPacingMode: BudgetPacingMode
+    targetCpc: number | null
+    maxCpc: number | null
+    minCtr: string | null // Decimal 직렬화
+    targetAvgRank: string | null // Decimal 직렬화
     targetCpa: number | null
     targetRoas: string | null // Decimal 직렬화
     updatedAt: string // ISO
@@ -63,6 +69,26 @@ const upsertSchema = z.object({
   advertiserId: advertiserIdSchema,
   mode: modeSchema,
   budgetPacingMode: pacingSchema,
+  /** 원, 10~1,000,000. null = 미설정. */
+  targetCpc: z
+    .number()
+    .int()
+    .min(10)
+    .max(1_000_000)
+    .nullable()
+    .optional(),
+  /** 원, 10~1,000,000. null = 시스템 기본 상한. */
+  maxCpc: z
+    .number()
+    .int()
+    .min(10)
+    .max(1_000_000)
+    .nullable()
+    .optional(),
+  /** CTR 하한(%), 예: 0.3 = 0.30%. null = 미설정. */
+  minCtr: z.number().min(0.01).max(100).nullable().optional(),
+  /** 평균 노출 순위 목표, 1~50. null = 미설정. */
+  targetAvgRank: z.number().min(1).max(50).nullable().optional(),
   /** 원, 100~1,000,000 (목표 CPA 운영 범위). null = 미설정. */
   targetCpa: z
     .number()
@@ -105,6 +131,10 @@ export async function listBidAutomationConfigs(): Promise<
         select: {
           mode: true,
           budgetPacingMode: true,
+          targetCpc: true,
+          maxCpc: true,
+          minCtr: true,
+          targetAvgRank: true,
           targetCpa: true,
           targetRoas: true,
           updatedAt: true,
@@ -122,6 +152,16 @@ export async function listBidAutomationConfigs(): Promise<
           mode: a.bidAutomationConfig.mode as BidAutomationMode,
           budgetPacingMode: a.bidAutomationConfig
             .budgetPacingMode as BudgetPacingMode,
+          targetCpc: a.bidAutomationConfig.targetCpc,
+          maxCpc: a.bidAutomationConfig.maxCpc,
+          minCtr:
+            a.bidAutomationConfig.minCtr != null
+              ? a.bidAutomationConfig.minCtr.toString()
+              : null,
+          targetAvgRank:
+            a.bidAutomationConfig.targetAvgRank != null
+              ? a.bidAutomationConfig.targetAvgRank.toString()
+              : null,
           targetCpa: a.bidAutomationConfig.targetCpa,
           targetRoas:
             a.bidAutomationConfig.targetRoas != null
@@ -141,7 +181,7 @@ export async function listBidAutomationConfigs(): Promise<
  * admin: 광고주 자동화 설정 upsert (광고주 1:1).
  *
  * - delete 없음 — mode='off' 로 비활성화
- * - targetCpa / targetRoas 는 둘 다 null 허용 (목표 미설정 → marginal-score 가 baseline 폴백)
+ * - 목표값은 모두 null 허용 (목표 미설정 → marginal-score 가 baseline 폴백)
  * - AuditLog 기록 — before(기존 config) / after(신규 config)
  */
 export async function upsertBidAutomationConfig(
@@ -156,8 +196,17 @@ export async function upsertBidAutomationConfig(
       error: parsed.error.issues[0]?.message ?? "유효하지 않은 입력",
     }
   }
-  const { advertiserId, mode, budgetPacingMode, targetCpa, targetRoas } =
-    parsed.data
+  const {
+    advertiserId,
+    mode,
+    budgetPacingMode,
+    targetCpc,
+    maxCpc,
+    minCtr,
+    targetAvgRank,
+    targetCpa,
+    targetRoas,
+  } = parsed.data
 
   // 광고주 존재성 + status 검증
   const advertiser = await prisma.advertiser.findUnique({
@@ -177,6 +226,10 @@ export async function upsertBidAutomationConfig(
     select: {
       mode: true,
       budgetPacingMode: true,
+      targetCpc: true,
+      maxCpc: true,
+      minCtr: true,
+      targetAvgRank: true,
       targetCpa: true,
       targetRoas: true,
     },
@@ -184,6 +237,9 @@ export async function upsertBidAutomationConfig(
 
   const targetRoasDecimal =
     targetRoas != null ? new Prisma.Decimal(targetRoas) : null
+  const minCtrDecimal = minCtr != null ? new Prisma.Decimal(minCtr) : null
+  const targetAvgRankDecimal =
+    targetAvgRank != null ? new Prisma.Decimal(targetAvgRank) : null
 
   await prisma.bidAutomationConfig.upsert({
     where: { advertiserId },
@@ -191,12 +247,20 @@ export async function upsertBidAutomationConfig(
       advertiserId,
       mode,
       budgetPacingMode,
+      targetCpc: targetCpc ?? null,
+      maxCpc: maxCpc ?? null,
+      minCtr: minCtrDecimal,
+      targetAvgRank: targetAvgRankDecimal,
       targetCpa: targetCpa ?? null,
       targetRoas: targetRoasDecimal,
     },
     update: {
       mode,
       budgetPacingMode,
+      targetCpc: targetCpc ?? null,
+      maxCpc: maxCpc ?? null,
+      minCtr: minCtrDecimal,
+      targetAvgRank: targetAvgRankDecimal,
       targetCpa: targetCpa ?? null,
       targetRoas: targetRoasDecimal,
     },
@@ -211,6 +275,10 @@ export async function upsertBidAutomationConfig(
       ? {
           mode: before.mode,
           budgetPacingMode: before.budgetPacingMode,
+          targetCpc: before.targetCpc,
+          maxCpc: before.maxCpc,
+          minCtr: before.minCtr?.toString() ?? null,
+          targetAvgRank: before.targetAvgRank?.toString() ?? null,
           targetCpa: before.targetCpa,
           targetRoas: before.targetRoas?.toString() ?? null,
         }
@@ -218,6 +286,10 @@ export async function upsertBidAutomationConfig(
     after: {
       mode,
       budgetPacingMode,
+      targetCpc: targetCpc ?? null,
+      maxCpc: maxCpc ?? null,
+      minCtr: minCtr ?? null,
+      targetAvgRank: targetAvgRank ?? null,
       targetCpa: targetCpa ?? null,
       targetRoas: targetRoas ?? null,
     },

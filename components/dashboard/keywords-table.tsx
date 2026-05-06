@@ -275,6 +275,7 @@ type BulkInputForKeywords =
   | { action: "toggleOn" }
   | { action: "toggleOff" }
   | { action: "bid"; mode: "absolute"; bidAmt: number }
+  | { action: "bid"; mode: "delta"; amount: number; roundTo: 10 | 50 | 100 }
   | {
       action: "bid"
       mode: "ratio"
@@ -1425,6 +1426,7 @@ export function KeywordsTable({
     rnkFilter,
   ])
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table returns imperative helpers; keep this component out of React Compiler memoization.
   const table = useReactTable<KeywordRow>({
     data: keywordsWithMetrics,
     columns,
@@ -2383,6 +2385,7 @@ function KeywordChangePreview({
 //   - toggleOff → { action: "toggle", items: rows.map(r => ({ keywordId: r.id, userLock: true })) }
 //   - bid abs   → { action: "bid", mode: "absolute", bidAmt, keywordIds: rows.map(r => r.id) }
 //   - bid ratio → { action: "bid", mode: "ratio", percent, roundTo, keywordIds: rows.map(r => r.id) }
+//   - bid delta → { action: "bid", mode: "delta", amount, roundTo, keywordIds: rows.map(r => r.id) }
 
 function KeywordsBulkActionModal({
   advertiserId,
@@ -2430,6 +2433,15 @@ function KeywordsBulkActionModal({
           action: "bid",
           mode: "absolute",
           bidAmt: input.bidAmt,
+          keywordIds: selectedRows.map((r) => r.id),
+        }
+      }
+      if (input.mode === "delta") {
+        return {
+          action: "bid",
+          mode: "delta",
+          amount: input.amount,
+          roundTo: input.roundTo,
           keywordIds: selectedRows.map((r) => r.id),
         }
       }
@@ -2515,9 +2527,12 @@ function BulkActionInputForm({
   }, [action])
 
   // bid 입력 폼 state (action='bid' 일 때만 사용)
-  const [mode, setMode] = React.useState<"absolute" | "ratio">("absolute")
+  const [mode, setMode] = React.useState<"absolute" | "ratio" | "delta">(
+    "absolute",
+  )
   const [bidAmtInput, setBidAmtInput] = React.useState("")
   const [percentInput, setPercentInput] = React.useState("")
+  const [amountInput, setAmountInput] = React.useState("")
   const [roundTo, setRoundTo] = React.useState<10 | 50 | 100>(10)
 
   if (action !== "bid") {
@@ -2549,14 +2564,31 @@ function BulkActionInputForm({
     pct <= 900 &&
     Math.round(pct * 10) / 10 === pct
 
-  const valid = mode === "absolute" ? absoluteValid : ratioValid
+  const trimmedAmount = amountInput.trim()
+  const amount = trimmedAmount === "" ? null : Number(trimmedAmount)
+  const deltaValid =
+    amount !== null &&
+    Number.isFinite(amount) &&
+    Number.isInteger(amount) &&
+    amount >= -1_000_000 &&
+    amount <= 1_000_000 &&
+    amount !== 0
+
+  const valid =
+    mode === "absolute"
+      ? absoluteValid
+      : mode === "ratio"
+        ? ratioValid
+        : deltaValid
 
   function handleSubmitForm() {
     if (!valid) return
     if (mode === "absolute") {
       onReady({ action: "bid", mode: "absolute", bidAmt: bidAmt! })
-    } else {
+    } else if (mode === "ratio") {
       onReady({ action: "bid", mode: "ratio", percent: pct!, roundTo })
+    } else {
+      onReady({ action: "bid", mode: "delta", amount: amount!, roundTo })
     }
   }
 
@@ -2582,6 +2614,15 @@ function BulkActionInputForm({
           />
           비율
         </Label>
+        <Label className="flex cursor-pointer items-center gap-2 text-sm font-normal">
+          <input
+            type="radio"
+            name="bid-mode"
+            checked={mode === "delta"}
+            onChange={() => setMode("delta")}
+          />
+          정액 증감
+        </Label>
       </div>
 
       {mode === "absolute" ? (
@@ -2606,7 +2647,7 @@ function BulkActionInputForm({
             해제). 0 이상의 정수.
           </p>
         </div>
-      ) : (
+      ) : mode === "ratio" ? (
         <>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="bulk-percent">증감 (%)</Label>
@@ -2627,6 +2668,47 @@ function BulkActionInputForm({
             />
             <p className="text-xs text-muted-foreground">
               -90% ~ +900% (정수 또는 소수 1자리). 음수는 입찰가 감소.
+            </p>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label>반올림 단위 (원)</Label>
+            <div className="flex gap-2">
+              {([10, 50, 100] as const).map((v) => (
+                <Button
+                  key={v}
+                  type="button"
+                  size="sm"
+                  variant={roundTo === v ? "default" : "outline"}
+                  onClick={() => setRoundTo(v)}
+                >
+                  {v}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="bulk-amount">증감액 (원)</Label>
+            <Input
+              id="bulk-amount"
+              type="number"
+              inputMode="numeric"
+              step={10}
+              min={-1_000_000}
+              max={1_000_000}
+              value={amountInput}
+              onChange={(e) => setAmountInput(e.target.value)}
+              placeholder="예: 100 또는 -100"
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && valid) handleSubmitForm()
+              }}
+            />
+            <p className="text-xs text-muted-foreground">
+              현재 입찰가 기준으로 같은 금액을 더하거나 뺍니다. 음수는 입찰가
+              감소이며, 0원 아래로 내려가면 0원으로 보정됩니다.
             </p>
           </div>
           <div className="flex flex-col gap-1.5">

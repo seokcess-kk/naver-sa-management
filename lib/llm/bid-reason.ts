@@ -40,7 +40,7 @@ export type EnrichBidReasonInput = {
   searchTerm: string
   /** 권고 액션 (currentBid / suggestedBid / deltaPct / direction) */
   suggestion: SuggestAction
-  /** 결정 메트릭 (clicks7d / cost7d / currentRoas / currentCpa / keywordCpc / revenue7d) */
+  /** 결정 메트릭 (clicks7d / cost7d / currentRoas / currentCpa / keywordCpc / keywordCtr / avgRank7d / revenue7d) */
   metrics: DecisionMetrics
   /** 정형 reason — marginal-score.decideMarginalSuggestion 출력 텍스트 */
   defaultReason: string
@@ -131,6 +131,12 @@ export function buildUserPrompt(input: EnrichBidReasonInput): string {
     lines.push(
       `- 키워드 CPC: ${Math.round(metrics.keywordCpc).toLocaleString()}원`,
     )
+  }
+  if (metrics.keywordCtr != null) {
+    lines.push(`- 키워드 CTR: ${metrics.keywordCtr.toFixed(2)}%`)
+  }
+  if (metrics.avgRank7d != null) {
+    lines.push(`- 평균 노출 순위: ${metrics.avgRank7d.toFixed(1)}위`)
   }
 
   lines.push("")

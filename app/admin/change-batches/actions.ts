@@ -191,6 +191,7 @@ export type RollbackResult = {
  * 화이트리스트 외 액션 호출 시 throw.
  */
 const ROLLBACK_SUPPORTED_ACTIONS = new Set<string>([
+  "bid_inbox.apply",
   "keyword.toggle",
   "keyword.bid",
   "keyword.inline_update",

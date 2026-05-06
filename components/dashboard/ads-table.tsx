@@ -122,7 +122,6 @@ import {
 } from "@/app/(dashboard)/[advertiserId]/ads/actions"
 import { cn } from "@/lib/utils"
 import {
-  EMPTY_METRICS,
   PERIOD_LABELS,
   formatInt,
   formatPct,
@@ -1019,6 +1018,7 @@ export function AdsTable({
     adgroupFilter,
   ])
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table returns imperative helpers; keep this component out of React Compiler memoization.
   const table = useReactTable<AdRow>({
     data: adsWithMetrics,
     columns,

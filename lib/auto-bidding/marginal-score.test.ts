@@ -5,10 +5,11 @@
  *   A. 신뢰도 분기 — clicks7d < minClicks / >= minClicks
  *   B. ROAS 분기 — high (up) / mid (hold) / low (down) / very low (warn)
  *   C. CPA 분기 — low cpa (up) / mid (hold) / high (down) / very high (warn)
- *   D. baseline fallback — cpc 이상 (down) / 정상 (hold) / 데이터 부족 (hold)
- *   E. clamp — bidLowerBound / bidUpperBound / no_change after clamp
- *   F. confidence — low / medium / high
- *   G. useGroupBidAmt 분기 — currentBid <= 0 → hold
+ *   D. 평균 순위 분기 — 목표보다 낮은 순위(up) / 과상위+고CPC(down) / 가드레일 hold
+ *   E. baseline fallback — cpc 이상 (down) / 정상 (hold) / 데이터 부족 (hold)
+ *   F. clamp — bidLowerBound / bidUpperBound / no_change after clamp
+ *   G. confidence — low / medium / high
+ *   H. useGroupBidAmt 분기 — currentBid <= 0 → hold
  */
 
 import { describe, expect, it } from "vitest"
@@ -32,6 +33,7 @@ function input(over: Partial<MarginalScoreInput> = {}): MarginalScoreInput {
       cost7d: 100_000,
       conversions7d: 5,
       revenue7d: 500_000,
+      avgRank7d: null,
       ...over.keyword,
     },
     baseline: {
@@ -181,7 +183,83 @@ describe("decideMarginalSuggestion — C. CPA 분기", () => {
   })
 })
 
-describe("decideMarginalSuggestion — D. baseline fallback", () => {
+describe("decideMarginalSuggestion — D. 평균 순위 분기", () => {
+  it("평균 순위가 목표보다 1위 이상 밀리고 CPC/CTR 가드레일 통과 → suggest up", () => {
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          avgRank7d: 5.2,
+          impressions7d: 5000,
+          clicks7d: 100,
+          cost7d: 90_000,
+          conversions7d: null,
+          revenue7d: null,
+        } as any,
+        targets: {
+          targetCpa: null,
+          targetRoas: null,
+          targetAvgRank: new Prisma.Decimal("3.0"),
+          targetCpc: 1000,
+          maxCpc: 1500,
+          minCtr: new Prisma.Decimal("1.0"),
+        },
+      }),
+    )
+    expect(r.decision).toBe("suggest")
+    if (r.decision === "suggest") {
+      expect(r.action.direction).toBe("up")
+      expect(r.reason).toMatch(/평균 순위/)
+      expect(r.metrics.avgRank7d).toBe(5.2)
+    }
+  })
+
+  it("목표보다 충분히 상위인데 CPC가 목표보다 높으면 절감 후보로 suggest down", () => {
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          avgRank7d: 1.4,
+          clicks7d: 100,
+          cost7d: 130_000,
+          conversions7d: null,
+          revenue7d: null,
+        } as any,
+        targets: {
+          targetCpa: null,
+          targetRoas: null,
+          targetAvgRank: new Prisma.Decimal("3.0"),
+          targetCpc: 1000,
+        },
+      }),
+    )
+    expect(r.decision).toBe("suggest")
+    if (r.decision === "suggest") expect(r.action.direction).toBe("down")
+  })
+
+  it("순위 개선 필요해도 CTR 하한 미달이면 인상 대신 CTR 기준 down", () => {
+    const r = decideMarginalSuggestion(
+      input({
+        keyword: {
+          avgRank7d: 5.2,
+          impressions7d: 10_000,
+          clicks7d: 50,
+          cost7d: 40_000,
+          conversions7d: null,
+          revenue7d: null,
+        } as any,
+        targets: {
+          targetCpa: null,
+          targetRoas: null,
+          targetAvgRank: new Prisma.Decimal("3.0"),
+          minCtr: new Prisma.Decimal("1.0"),
+        },
+      }),
+    )
+    expect(r.decision).toBe("suggest")
+    if (r.decision === "suggest") expect(r.action.direction).toBe("down")
+  })
+})
+
+describe("decideMarginalSuggestion — E. baseline fallback", () => {
   it("targets 없음 + 키워드 CPC > baseline × 1.5 → suggest down", () => {
     const r = decideMarginalSuggestion(
       input({
@@ -218,7 +296,7 @@ describe("decideMarginalSuggestion — D. baseline fallback", () => {
   })
 })
 
-describe("decideMarginalSuggestion — E. clamp", () => {
+describe("decideMarginalSuggestion — F. clamp", () => {
   it("upper bound clamp — currentBid 95000 + up 15% = 109250 → 100000", () => {
     const r = decideMarginalSuggestion(
       input({
@@ -262,7 +340,7 @@ describe("decideMarginalSuggestion — E. clamp", () => {
   })
 })
 
-describe("decideMarginalSuggestion — F. confidence", () => {
+describe("decideMarginalSuggestion — G. confidence", () => {
   it("clicks 50 ~ 75 → low", () => {
     const r = decideMarginalSuggestion(
       input({
@@ -294,7 +372,7 @@ describe("decideMarginalSuggestion — F. confidence", () => {
   })
 })
 
-describe("decideMarginalSuggestion — G. config 기본값", () => {
+describe("decideMarginalSuggestion — H. config 기본값", () => {
   it("DEFAULT_MARGINAL_CONFIG 노출", () => {
     expect(DEFAULT_MARGINAL_CONFIG.minClicksForConfidence).toBe(50)
     expect(DEFAULT_MARGINAL_CONFIG.maxBidChangePct).toBe(15)

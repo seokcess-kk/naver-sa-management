@@ -11,8 +11,9 @@
  * 운영 정책 (CLAUDE.md / 안전장치):
  *   - 진입부 getCurrentAdvertiser(advertiserId) — 광고주 화이트리스트 검증
  *   - mutation 액션은 viewer 차단 (operator+ 만) — bidding-policies/actions.ts 와 동일 패턴
- *   - "staging → 미리보기 → 확정" 모델: 본 액션은 "확정" 시점만 — 즉시 SA 호출 X
- *     · ChangeBatch + ChangeItem 적재 → /api/batch/run cron 이 lease 기반 픽업·실행
+ *   - "staging → 미리보기 → 확정" 모델: 본 액션은 "확정" 시점만
+ *     · 키워드 입찰/OFF: ChangeBatch + ChangeItem 적재 → /api/batch/run cron 실행
+ *     · 타게팅/예산: 외부 배치 호환성이 없어 즉시 반영 후 done ChangeItem 기록
  *   - 광고주 횡단 차단:
  *      * BidSuggestion.advertiserId == advertiserId
  *      * Keyword 는 adgroup.campaign.advertiserId join 으로 한정
@@ -42,6 +43,10 @@ import { prisma } from "@/lib/db/prisma"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
 import { enrichBidReason } from "@/lib/llm/bid-reason"
+import {
+  updateCampaignsBulk,
+  type CampaignBulkUpdateItem,
+} from "@/lib/naver-sa/campaigns"
 import type {
   DecisionMetrics,
   SuggestAction,
@@ -66,7 +71,7 @@ export type BidSuggestionRow = {
   engineSource: BidSuggestionSource
   severity: BidSuggestionSeverity
   reason: string
-  /** 본문 그대로(JSON) — 클라이언트가 컬럼 표시에 사용. shape 은 marginal-score.SuggestAction. */
+  /** 본문 그대로(JSON) — engineSource 별 shape 이 다르므로 클라이언트에서 guard 후 표시. */
   action: BidSuggestionAction
   createdAt: string // ISO
   expiresAt: string // ISO
@@ -86,14 +91,15 @@ export type BidSuggestionRow = {
   } | null
 }
 
-/** marginal-score.SuggestAction 과 1:1. (lib 의 타입을 import 하면 server-only 의존이 생기지 않으나, 본 모듈은 server 이므로 그냥 export type 로 동기화.) */
+/** BidSuggestion.action JSON. bid 엔진은 marginal-score.SuggestAction shape. */
 export type BidSuggestionAction = {
-  currentBid: number
-  suggestedBid: number
-  deltaPct: number
-  direction: "up" | "down"
+  currentBid?: number | null
+  suggestedBid?: number | null
+  deltaPct?: number | null
+  direction?: "up" | "down"
   /** F.4 enrich 결과 — 1회만 저장. 존재 시 클라이언트는 LLM 호출 X. */
   llmEnrichedReason?: string
+  [key: string]: unknown
 }
 
 export type ListOptions = {
@@ -221,13 +227,370 @@ export type ApproveResult = {
   enqueued: number
 }
 
+type TargetingApplyResult =
+  | {
+      ok: true
+      targetId: string
+      before: PrismaTypes.InputJsonValue
+      after: PrismaTypes.InputJsonValue
+    }
+  | {
+      ok: false
+      error: string
+      before: PrismaTypes.InputJsonValue
+    }
+
+type BudgetApplyResult =
+  | {
+      ok: true
+      targetId: string
+      before: PrismaTypes.InputJsonValue
+      after: PrismaTypes.InputJsonValue
+    }
+  | {
+      ok: false
+      error: string
+      targetId: string
+      before: PrismaTypes.InputJsonValue
+      after: PrismaTypes.InputJsonValue
+    }
+
+type BudgetActionItem = {
+  campaignId?: string
+  nccCampaignId?: string
+  suggestedDailyBudget: number
+  currentDailyBudget?: number | null
+  reasonCode?: string
+}
+
+const TARGETING_BUCKET_HOURS: Record<string, string[]> = {
+  weekday_morning: expandHours(["mon", "tue", "wed", "thu", "fri"], 9, 12),
+  weekday_afternoon: expandHours(["mon", "tue", "wed", "thu", "fri"], 13, 17),
+  evening: expandHours(["mon", "tue", "wed", "thu", "fri", "sat", "sun"], 18, 23),
+  off_peak: buildOffPeakHours(),
+}
+
+function expandHours(days: string[], from: number, to: number): string[] {
+  const out: string[] = []
+  for (const day of days) {
+    for (let hour = from; hour <= to; hour++) out.push(`${day}-${hour}`)
+  }
+  return out
+}
+
+function buildOffPeakHours(): string[] {
+  const allDays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+  const excluded = new Set([
+    ...expandHours(["mon", "tue", "wed", "thu", "fri"], 9, 12),
+    ...expandHours(["mon", "tue", "wed", "thu", "fri"], 13, 17),
+    ...expandHours(allDays, 18, 23),
+  ])
+  const out: string[] = []
+  for (const day of allDays) {
+    for (let hour = 0; hour <= 23; hour++) {
+      const key = `${day}-${hour}`
+      if (!excluded.has(key)) out.push(key)
+    }
+  }
+  return out
+}
+
+function jsonToNumberRecord(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  const out: Record<string, number> = {}
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    const n = typeof raw === "number" ? raw : Number(raw)
+    if (Number.isFinite(n)) out[key] = n
+  }
+  return out
+}
+
+function readRecommendedTargetingWeights(
+  action: BidSuggestionAction,
+): Record<string, number> | null {
+  if (action.kind !== "hour_weights_recommendation") return null
+  const buckets = action.buckets
+  if (!buckets || typeof buckets !== "object" || Array.isArray(buckets)) {
+    return null
+  }
+  const out: Record<string, number> = {}
+  for (const [bucket, raw] of Object.entries(buckets as Record<string, unknown>)) {
+    if (!TARGETING_BUCKET_HOURS[bucket]) continue
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue
+    const rec = raw as Record<string, unknown>
+    if (rec.hasSignal !== true) continue
+    const weight = Number(rec.recommendedWeight)
+    if (!Number.isFinite(weight) || weight < 0 || weight > 3) continue
+    out[bucket] = Number(weight.toFixed(2))
+  }
+  return Object.keys(out).length > 0 ? out : null
+}
+
+async function applyTargetingSuggestion(
+  advertiserId: string,
+  action: BidSuggestionAction,
+): Promise<TargetingApplyResult> {
+  const before = await prisma.targetingRule.findUnique({
+    where: { advertiserId },
+  })
+  const beforeJson: PrismaTypes.InputJsonValue = before
+    ? ({
+        enabled: before.enabled,
+        defaultWeight: Number(before.defaultWeight),
+        hourWeights: before.hourWeights,
+      } as PrismaTypes.InputJsonValue)
+    : { existed: false }
+
+  const bucketWeights = readRecommendedTargetingWeights(action)
+  if (!bucketWeights) {
+    return {
+      ok: false,
+      error: "unsupported_targeting_action",
+      before: beforeJson,
+    }
+  }
+
+  const hourWeights = jsonToNumberRecord(before?.hourWeights)
+  for (const [bucket, weight] of Object.entries(bucketWeights)) {
+    for (const key of TARGETING_BUCKET_HOURS[bucket] ?? []) {
+      hourWeights[key] = weight
+    }
+  }
+
+  const after = await prisma.targetingRule.upsert({
+    where: { advertiserId },
+    update: {
+      enabled: true,
+      hourWeights,
+    },
+    create: {
+      advertiserId,
+      enabled: true,
+      defaultWeight: 1.0,
+      hourWeights,
+    },
+  })
+
+  return {
+    ok: true,
+    targetId: after.id,
+    before: beforeJson,
+    after: {
+      enabled: after.enabled,
+      defaultWeight: Number(after.defaultWeight),
+      appliedBuckets: bucketWeights,
+      hourWeights: after.hourWeights,
+    } as PrismaTypes.InputJsonValue,
+  }
+}
+
+function readBudgetActionItems(action: BidSuggestionAction): BudgetActionItem[] | null {
+  if (action.kind !== "campaign_budget_update") return null
+
+  const rawItems = Array.isArray(action.items) ? action.items : [action]
+  const out: BudgetActionItem[] = []
+  for (const raw of rawItems.slice(0, 200)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue
+    const item = raw as Record<string, unknown>
+    const campaignId =
+      typeof item.campaignId === "string" && item.campaignId.trim().length > 0
+        ? item.campaignId.trim()
+        : undefined
+    const nccCampaignId =
+      typeof item.nccCampaignId === "string" &&
+      item.nccCampaignId.trim().length > 0
+        ? item.nccCampaignId.trim()
+        : undefined
+    const suggestedRaw =
+      item.suggestedDailyBudget ?? item.dailyBudget ?? item.suggestedBudget
+    const suggestedDailyBudget = Number(suggestedRaw)
+    if (
+      (!campaignId && !nccCampaignId) ||
+      !Number.isInteger(suggestedDailyBudget) ||
+      suggestedDailyBudget < 0
+    ) {
+      continue
+    }
+    const currentRaw = item.currentDailyBudget ?? item.currentBudget
+    const currentDailyBudget =
+      currentRaw == null || currentRaw === ""
+        ? null
+        : Number.isFinite(Number(currentRaw))
+          ? Number(currentRaw)
+          : undefined
+
+    out.push({
+      campaignId,
+      nccCampaignId,
+      suggestedDailyBudget,
+      currentDailyBudget,
+      reasonCode:
+        typeof item.reasonCode === "string" ? item.reasonCode : undefined,
+    })
+  }
+
+  return out.length > 0 ? out : null
+}
+
+async function applyBudgetSuggestion(
+  advertiserId: string,
+  customerId: string,
+  action: BidSuggestionAction,
+): Promise<BudgetApplyResult> {
+  const items = readBudgetActionItems(action)
+  if (!items) {
+    return {
+      ok: false,
+      error: "unsupported_budget_action",
+      targetId: advertiserId,
+      before: { suggestion: "budget" },
+      after: { suggestion: "budget" },
+    }
+  }
+
+  const campaignIds = items
+    .map((item) => item.campaignId)
+    .filter((v): v is string => v != null)
+  const nccCampaignIds = items
+    .map((item) => item.nccCampaignId)
+    .filter((v): v is string => v != null)
+
+  const campaigns = await prisma.campaign.findMany({
+    where: {
+      advertiserId,
+      status: { not: "deleted" },
+      OR: [
+        ...(campaignIds.length > 0 ? [{ id: { in: campaignIds } }] : []),
+        ...(nccCampaignIds.length > 0
+          ? [{ nccCampaignId: { in: nccCampaignIds } }]
+          : []),
+      ],
+    },
+    select: {
+      id: true,
+      nccCampaignId: true,
+      name: true,
+      dailyBudget: true,
+      status: true,
+    },
+  })
+
+  const byId = new Map(campaigns.map((c) => [c.id, c]))
+  const byNccId = new Map(campaigns.map((c) => [c.nccCampaignId, c]))
+  const updateByNccId = new Map<string, BudgetActionItem>()
+  for (const item of items) {
+    const campaign =
+      (item.campaignId ? byId.get(item.campaignId) : undefined) ??
+      (item.nccCampaignId ? byNccId.get(item.nccCampaignId) : undefined)
+    if (!campaign) continue
+    updateByNccId.set(campaign.nccCampaignId, item)
+  }
+
+  const before = campaigns
+    .filter((c) => updateByNccId.has(c.nccCampaignId))
+    .map((c) => ({
+      id: c.id,
+      nccCampaignId: c.nccCampaignId,
+      name: c.name,
+      dailyBudget: c.dailyBudget == null ? null : Number(c.dailyBudget),
+      status: c.status,
+    }))
+
+  if (updateByNccId.size !== items.length || before.length === 0) {
+    return {
+      ok: false,
+      error: "campaign_not_found",
+      targetId: advertiserId,
+      before: { campaigns: before },
+      after: { requested: items },
+    }
+  }
+
+  const apiItems: CampaignBulkUpdateItem[] = before.map((c) => {
+    const next = updateByNccId.get(c.nccCampaignId)!
+    return {
+      nccCampaignId: c.nccCampaignId,
+      dailyBudget: next.suggestedDailyBudget,
+    }
+  })
+
+  try {
+    const updated = await updateCampaignsBulk(customerId, apiItems, "dailyBudget")
+    const updatedMap = new Map(updated.map((c) => [c.nccCampaignId, c]))
+    for (const c of campaigns) {
+      const u = updatedMap.get(c.nccCampaignId)
+      if (!u) continue
+      await prisma.campaign.update({
+        where: { id: c.id },
+        data: {
+          dailyBudget:
+            typeof u.dailyBudget === "number" ? u.dailyBudget : null,
+          raw: u as unknown as PrismaTypes.InputJsonValue,
+        },
+      })
+    }
+
+    const appliedCampaigns = apiItems.map((item) => ({
+      nccCampaignId: item.nccCampaignId,
+      dailyBudget: item.dailyBudget ?? null,
+    }))
+    const singleBefore = before.length === 1 ? before[0] : null
+    const singleAfter = appliedCampaigns.length === 1 ? appliedCampaigns[0] : null
+
+    return {
+      ok: true,
+      targetId: before.length === 1 ? before[0].nccCampaignId : advertiserId,
+      before: singleBefore
+        ? ({
+            campaignId: singleBefore.id,
+            nccCampaignId: singleBefore.nccCampaignId,
+            name: singleBefore.name,
+            dailyBudget: singleBefore.dailyBudget,
+            status: singleBefore.status,
+          } as PrismaTypes.InputJsonValue)
+        : ({ campaigns: before } as PrismaTypes.InputJsonValue),
+      after: singleAfter
+        ? ({
+            operation: "UPDATE",
+            fields: "dailyBudget",
+            nccCampaignId: singleAfter.nccCampaignId,
+            dailyBudget: singleAfter.dailyBudget,
+          } as PrismaTypes.InputJsonValue)
+        : ({
+            operation: "UPDATE",
+            fields: "dailyBudget",
+            campaigns: appliedCampaigns,
+          } as PrismaTypes.InputJsonValue),
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return {
+      ok: false,
+      error: msg,
+      targetId: before.length === 1 ? before[0].nccCampaignId : advertiserId,
+      before: { campaigns: before },
+      after: {
+        operation: "UPDATE",
+        fields: "dailyBudget",
+        campaigns: apiItems.map((item) => ({
+          nccCampaignId: item.nccCampaignId,
+          dailyBudget: item.dailyBudget ?? null,
+        })),
+      },
+    }
+  }
+}
+
 /**
  * 다중 선택 Suggestion 일괄 적용.
  *
  * 흐름:
  *   1. 권한 검증 + viewer 차단
- *   2. suggestion 로드 (status='pending', advertiserId 일치, engineSource='bid')
- *      - 본 PR 은 'bid' 엔진만 — 다른 엔진(quality/targeting/budget) 은 후속 PR
+ *   2. suggestion 로드 (status='pending', advertiserId 일치, engineSource in bid/quality/targeting/budget)
+ *      - bid     : 입찰가 UPDATE ChangeItem
+ *      - quality : kind='off' 인 OFF 후보만 Keyword OFF ChangeItem
+ *      - targeting: hour weight 추천을 TargetingRule 에 즉시 반영하고 done ChangeItem 기록
+ *      - budget  : campaign_budget_update 를 SA 캠페인 일예산 변경으로 즉시 반영하고 done ChangeItem 기록
  *   3. 키워드 메타 join (advertiserId 한정)
  *   4. ChangeBatch 1건 생성 (action='bid_inbox.apply', status='pending')
  *   5. 각 suggestion → ChangeItem 1건:
@@ -268,17 +631,18 @@ export async function approveBidSuggestions(
     }
   }
 
-  // -- suggestion 로드 (engineSource='bid' 한정 — 본 PR 범위) -----------------
+  // -- suggestion 로드 (현재 적용 지원: bid / quality OFF / targeting / budget) -
   const suggestions = await prisma.bidSuggestion.findMany({
     where: {
       id: { in: parsedIds },
       advertiserId,
       status: "pending",
-      engineSource: "bid",
+      engineSource: { in: ["bid", "quality", "targeting", "budget"] },
     },
     select: {
       id: true,
       keywordId: true,
+      engineSource: true,
       action: true,
       reason: true,
       severity: true,
@@ -324,7 +688,9 @@ export async function approveBidSuggestions(
       summary: {
         advertiserId,
         suggestionCount: suggestions.length,
-        engineSource: "bid",
+        engineSources: Array.from(
+          new Set(suggestions.map((s) => s.engineSource)),
+        ),
       },
     },
   })
@@ -337,15 +703,95 @@ export async function approveBidSuggestions(
     before: PrismaTypes.InputJsonValue
     after: PrismaTypes.InputJsonValue
     idempotencyKey: string
-    status: "pending" | "failed"
+    status: "pending" | "failed" | "done"
     error?: string
   }
 
   const seeds: ChangeItemSeed[] = []
   let preFailed = 0
+  let directDone = 0
 
   for (const s of suggestions) {
     const action = s.action as unknown as BidSuggestionAction
+    if (s.engineSource === "budget") {
+      const applied = await applyBudgetSuggestion(
+        advertiserId,
+        advertiser.customerId,
+        action,
+      )
+      if (!applied.ok) {
+        preFailed++
+        seeds.push({
+          batchId: batch.id,
+          targetType: "Campaign",
+          targetId: applied.targetId,
+          before: applied.before,
+          after: {
+            attempted: applied.after,
+            suggestionId: s.id,
+            engineSource: s.engineSource,
+            reason: applied.error,
+          },
+          idempotencyKey: `${batch.id}:${s.id}`,
+          status: "failed",
+          error: applied.error,
+        })
+      } else {
+        directDone++
+        seeds.push({
+          batchId: batch.id,
+          targetType: "Campaign",
+          targetId: applied.targetId,
+          before: applied.before,
+          after: {
+            ...(applied.after as Record<string, unknown>),
+            suggestionId: s.id,
+            suggestionReason: s.reason,
+          } as PrismaTypes.InputJsonValue,
+          idempotencyKey: `${batch.id}:${s.id}`,
+          status: "done",
+        })
+      }
+      continue
+    }
+
+    if (s.engineSource === "targeting") {
+      const applied = await applyTargetingSuggestion(advertiserId, action)
+      if (!applied.ok) {
+        preFailed++
+        seeds.push({
+          batchId: batch.id,
+          targetType: "TargetingRule",
+          targetId: advertiserId,
+          before: applied.before,
+          after: {
+            suggestionId: s.id,
+            engineSource: s.engineSource,
+            reason: applied.error,
+          },
+          idempotencyKey: `${batch.id}:${s.id}`,
+          status: "failed",
+          error: applied.error,
+        })
+      } else {
+        directDone++
+        seeds.push({
+          batchId: batch.id,
+          targetType: "TargetingRule",
+          targetId: applied.targetId,
+          before: applied.before,
+          after: {
+            applied: applied.after,
+            suggestionId: s.id,
+            suggestionReason: s.reason,
+          },
+          idempotencyKey: `${batch.id}:${s.id}`,
+          status: "done",
+        })
+      }
+      continue
+    }
+
     const k = s.keywordId ? keywordById.get(s.keywordId) : null
 
     // 키워드 미존재 / 광고주 외 → 사전 실패
@@ -364,8 +810,13 @@ export async function approveBidSuggestions(
       continue
     }
 
-    // 잠금 / 삭제 / 그룹 입찰가 사용 → 사전 실패
-    if (k.userLock || k.status === "deleted" || k.useGroupBidAmt) {
+    const isQualityOff =
+      s.engineSource === "quality" && action.kind === "off"
+    const isBidUpdate =
+      s.engineSource === "bid" &&
+      typeof action.suggestedBid === "number"
+
+    if (!isBidUpdate && !isQualityOff) {
       preFailed++
       seeds.push({
         batchId: batch.id,
@@ -378,11 +829,66 @@ export async function approveBidSuggestions(
           status: k.status,
         },
         after: {
-          suggestedBid: action.suggestedBid,
+          suggestionId: s.id,
+          engineSource: s.engineSource,
+          reason: "unsupported_suggestion_action",
+        },
+        idempotencyKey: `${batch.id}:${k.nccKeywordId}`,
+        status: "failed",
+        error: "unsupported_suggestion_action",
+      })
+      continue
+    }
+
+    // 잠금 / 삭제 / 그룹 입찰가 사용 → 사전 실패.
+    // quality OFF 는 그룹입찰가 여부와 무관하게 userLock=true 적용이 가능하므로 useGroupBidAmt 는 bid 에만 차단.
+    if (
+      k.userLock ||
+      k.status === "deleted" ||
+      (isBidUpdate && k.useGroupBidAmt)
+    ) {
+      preFailed++
+      seeds.push({
+        batchId: batch.id,
+        targetType: "Keyword",
+        targetId: k.nccKeywordId,
+        before: {
+          bidAmt: k.bidAmt,
+          useGroupBidAmt: k.useGroupBidAmt,
+          userLock: k.userLock,
+          status: k.status,
+        },
+        after: {
+          suggestedBid: isBidUpdate ? action.suggestedBid : undefined,
+          suggestedAction: isQualityOff ? "off" : undefined,
         },
         idempotencyKey: `${batch.id}:${k.nccKeywordId}`,
         status: "failed",
         error: "invalid_keyword_state",
+      })
+      continue
+    }
+
+    if (isQualityOff) {
+      seeds.push({
+        batchId: batch.id,
+        targetType: "Keyword",
+        targetId: k.nccKeywordId,
+        before: {
+          userLock: k.userLock,
+          status: k.status,
+          reasonCode:
+            typeof action.reasonCode === "string" ? action.reasonCode : null,
+        },
+        after: {
+          operation: "OFF" as const,
+          customerId: advertiser.customerId,
+          nccKeywordId: k.nccKeywordId,
+          suggestionId: s.id,
+          suggestionReason: s.reason,
+        },
+        idempotencyKey: `${batch.id}:${k.nccKeywordId}`,
+        status: "pending",
       })
       continue
     }
@@ -447,15 +953,20 @@ export async function approveBidSuggestions(
   })
 
   // 사전 실패가 0이고 대기 1개 이상 → 정상 enqueue. 대기 0이면 batch 즉시 failed 마킹.
-  const enqueued = suggestions.length - preFailed
+  const enqueued = suggestions.length - preFailed - directDone
   if (enqueued === 0) {
     await prisma.changeBatch.update({
       where: { id: batch.id },
       data: {
-        status: "failed",
+        status: preFailed > 0 ? "failed" : "done",
         processed: suggestions.length,
         finishedAt: new Date(),
       },
+    })
+  } else if (directDone > 0) {
+    await prisma.changeBatch.update({
+      where: { id: batch.id },
+      data: { processed: directDone },
     })
   }
 
@@ -473,6 +984,7 @@ export async function approveBidSuggestions(
       total: suggestions.length,
       preFailed,
       enqueued,
+      directDone,
     },
   })
 
@@ -616,13 +1128,16 @@ export async function enrichSuggestionReason(
       date: { gte: since },
     },
     _sum: {
+      impressions: true,
       clicks: true,
       cost: true,
       conversions: true,
       revenue: true,
     },
+    _avg: { avgRnk: true },
   })
 
+  const impressions7d = agg._sum.impressions ?? 0
   const clicks7d = agg._sum.clicks ?? 0
   const cost7d = agg._sum.cost ? Number(agg._sum.cost) : 0
   const conversions7d = agg._sum.conversions ?? null
@@ -637,6 +1152,9 @@ export async function enrichSuggestionReason(
       ? cost7d / conversions7d
       : null
   const keywordCpc = clicks7d > 0 ? cost7d / clicks7d : null
+  const keywordCtr =
+    impressions7d > 0 ? (clicks7d / impressions7d) * 100 : null
+  const avgRank7d = agg._avg.avgRnk != null ? Number(agg._avg.avgRnk) : null
 
   const metrics: DecisionMetrics = {
     clicks7d,
@@ -645,6 +1163,8 @@ export async function enrichSuggestionReason(
     currentRoas,
     currentCpa,
     keywordCpc,
+    keywordCtr,
+    avgRank7d,
   }
 
   const action = actionRaw as unknown as SuggestAction

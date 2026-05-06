@@ -32,6 +32,10 @@ const mockBidSuggestionFindMany = vi.fn()
 const mockBidSuggestionUpdateMany = vi.fn()
 
 const mockKeywordFindMany = vi.fn()
+const mockTargetingRuleFindUnique = vi.fn()
+const mockTargetingRuleUpsert = vi.fn()
+const mockCampaignFindMany = vi.fn()
+const mockCampaignUpdate = vi.fn()
 
 const mockChangeBatchCreate = vi.fn()
 const mockChangeBatchUpdate = vi.fn()
@@ -48,6 +52,14 @@ vi.mock("@/lib/db/prisma", () => ({
     keyword: {
       findMany: (...args: unknown[]) => mockKeywordFindMany(...args),
     },
+    targetingRule: {
+      findUnique: (...args: unknown[]) => mockTargetingRuleFindUnique(...args),
+      upsert: (...args: unknown[]) => mockTargetingRuleUpsert(...args),
+    },
+    campaign: {
+      findMany: (...args: unknown[]) => mockCampaignFindMany(...args),
+      update: (...args: unknown[]) => mockCampaignUpdate(...args),
+    },
     changeBatch: {
       create: (...args: unknown[]) => mockChangeBatchCreate(...args),
       update: (...args: unknown[]) => mockChangeBatchUpdate(...args),
@@ -56,6 +68,12 @@ vi.mock("@/lib/db/prisma", () => ({
       createMany: (...args: unknown[]) => mockChangeItemCreateMany(...args),
     },
   },
+}))
+
+const mockUpdateCampaignsBulk = vi.fn()
+vi.mock("@/lib/naver-sa/campaigns", () => ({
+  updateCampaignsBulk: (...args: unknown[]) =>
+    mockUpdateCampaignsBulk(...args),
 }))
 
 const mockLogAudit = vi.fn()
@@ -103,6 +121,16 @@ beforeEach(() => {
   mockChangeBatchCreate.mockResolvedValue({ id: "batch_1" })
   mockChangeItemCreateMany.mockResolvedValue({ count: 0 })
   mockBidSuggestionUpdateMany.mockResolvedValue({ count: 0 })
+  mockTargetingRuleFindUnique.mockResolvedValue(null)
+  mockTargetingRuleUpsert.mockResolvedValue({
+    id: "tr_1",
+    enabled: true,
+    defaultWeight: 1,
+    hourWeights: {},
+  })
+  mockCampaignFindMany.mockResolvedValue([])
+  mockCampaignUpdate.mockResolvedValue({})
+  mockUpdateCampaignsBulk.mockResolvedValue([])
 })
 
 afterEach(() => {
@@ -211,6 +239,7 @@ describe("approveBidSuggestions", () => {
       {
         id: "s1",
         keywordId: "kw1",
+        engineSource: "bid",
         action: {
           currentBid: 1000,
           suggestedBid: 1150,
@@ -277,11 +306,203 @@ describe("approveBidSuggestions", () => {
     expect(auditArgs.targetId).toBe("batch_xyz")
   })
 
+  it("quality OFF 권고 — ChangeItem OFF shape 으로 적재", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        id: "s_quality",
+        keywordId: "kw1",
+        engineSource: "quality",
+        action: {
+          kind: "off",
+          reasonCode: "low_ctr_14d",
+          metrics: { impressions14d: 1000, clicks14d: 1, cost14d: 12000 },
+        },
+        reason: "14일 CTR 낮음 — OFF 권고",
+        severity: "warn",
+      },
+    ])
+    mockKeywordFindMany.mockResolvedValue([
+      {
+        id: "kw1",
+        nccKeywordId: "ncc_kw_1",
+        bidAmt: 1000,
+        useGroupBidAmt: true,
+        userLock: false,
+        status: "on",
+      },
+    ])
+    mockChangeBatchCreate.mockResolvedValue({ id: "batch_quality" })
+    mockBidSuggestionUpdateMany.mockResolvedValue({ count: 1 })
+
+    const r = await approveBidSuggestions(ADV_ID, ["s_quality"])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.preFailed).toBe(0)
+    expect(r.data.enqueued).toBe(1)
+
+    const itemArgs = mockChangeItemCreateMany.mock.calls[0]?.[0]
+    expect(itemArgs.data).toHaveLength(1)
+    const seed = itemArgs.data[0]
+    expect(seed.targetType).toBe("Keyword")
+    expect(seed.targetId).toBe("ncc_kw_1")
+    expect(seed.status).toBe("pending")
+    expect(seed.before.userLock).toBe(false)
+    expect(seed.before.reasonCode).toBe("low_ctr_14d")
+    expect(seed.after.operation).toBe("OFF")
+    expect(seed.after.customerId).toBe(CUSTOMER_ID)
+    expect(seed.after.nccKeywordId).toBe("ncc_kw_1")
+    expect(seed.after.suggestionId).toBe("s_quality")
+  })
+
+  it("targeting 권고 — TargetingRule 갱신 후 done ChangeItem 적재", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        id: "s_targeting",
+        keywordId: null,
+        engineSource: "targeting",
+        action: {
+          kind: "hour_weights_recommendation",
+          buckets: {
+            weekday_morning: {
+              recommendedWeight: 1.25,
+              hasSignal: true,
+              ctr: 2.1,
+            },
+            evening: {
+              recommendedWeight: 0.8,
+              hasSignal: false,
+              ctr: 0.9,
+            },
+          },
+        },
+        reason: "28일 CTR 비교 — 권장 가중치: 평일 오전 1.25x",
+        severity: "info",
+      },
+    ])
+    mockKeywordFindMany.mockResolvedValue([])
+    mockTargetingRuleFindUnique.mockResolvedValue({
+      id: "tr_existing",
+      enabled: true,
+      defaultWeight: 1,
+      hourWeights: { "mon-0": 0.9 },
+    })
+    mockTargetingRuleUpsert.mockResolvedValue({
+      id: "tr_existing",
+      enabled: true,
+      defaultWeight: 1,
+      hourWeights: { "mon-0": 0.9, "mon-9": 1.25, "fri-12": 1.25 },
+    })
+    mockChangeBatchCreate.mockResolvedValue({ id: "batch_targeting" })
+    mockBidSuggestionUpdateMany.mockResolvedValue({ count: 1 })
+
+    const r = await approveBidSuggestions(ADV_ID, ["s_targeting"])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.preFailed).toBe(0)
+    expect(r.data.enqueued).toBe(0)
+
+    const upsertArgs = mockTargetingRuleUpsert.mock.calls[0]?.[0]
+    expect(upsertArgs.where.advertiserId).toBe(ADV_ID)
+    expect(upsertArgs.update.enabled).toBe(true)
+    expect(upsertArgs.update.hourWeights["mon-9"]).toBe(1.25)
+    expect(upsertArgs.update.hourWeights["fri-12"]).toBe(1.25)
+    expect(upsertArgs.update.hourWeights["mon-0"]).toBe(0.9)
+
+    const itemArgs = mockChangeItemCreateMany.mock.calls[0]?.[0]
+    const seed = itemArgs.data[0]
+    expect(seed.targetType).toBe("TargetingRule")
+    expect(seed.targetId).toBe("tr_existing")
+    expect(seed.status).toBe("done")
+    expect(seed.after.suggestionId).toBe("s_targeting")
+    expect(seed.after.applied.appliedBuckets.weekday_morning).toBe(1.25)
+
+    const batchUpd = mockChangeBatchUpdate.mock.calls[0]?.[0]
+    expect(batchUpd.data.status).toBe("done")
+    expect(batchUpd.data.processed).toBe(1)
+  })
+
+  it("budget 권고 — 캠페인 일예산 수정 후 done ChangeItem 적재", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        id: "s_budget",
+        keywordId: null,
+        engineSource: "budget",
+        action: {
+          kind: "campaign_budget_update",
+          items: [
+            {
+              campaignId: "camp_1",
+              currentDailyBudget: 100000,
+              suggestedDailyBudget: 120000,
+              reasonCode: "pacing_fast",
+            },
+          ],
+        },
+        reason: "예산 소진 속도를 맞추기 위한 일예산 조정",
+        severity: "warn",
+      },
+    ])
+    mockKeywordFindMany.mockResolvedValue([])
+    mockCampaignFindMany.mockResolvedValue([
+      {
+        id: "camp_1",
+        nccCampaignId: "ncc_cmp_1",
+        name: "브랜드 캠페인",
+        dailyBudget: 100000,
+        status: "on",
+      },
+    ])
+    mockUpdateCampaignsBulk.mockResolvedValue([
+      {
+        nccCampaignId: "ncc_cmp_1",
+        customerId: CUSTOMER_ID,
+        name: "브랜드 캠페인",
+        dailyBudget: 120000,
+      },
+    ])
+    mockChangeBatchCreate.mockResolvedValue({ id: "batch_budget" })
+    mockBidSuggestionUpdateMany.mockResolvedValue({ count: 1 })
+
+    const r = await approveBidSuggestions(ADV_ID, ["s_budget"])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.preFailed).toBe(0)
+    expect(r.data.enqueued).toBe(0)
+
+    expect(mockUpdateCampaignsBulk).toHaveBeenCalledWith(
+      CUSTOMER_ID,
+      [{ nccCampaignId: "ncc_cmp_1", dailyBudget: 120000 }],
+      "dailyBudget",
+    )
+    expect(mockCampaignUpdate).toHaveBeenCalledWith({
+      where: { id: "camp_1" },
+      data: {
+        dailyBudget: 120000,
+        raw: expect.objectContaining({ nccCampaignId: "ncc_cmp_1" }),
+      },
+    })
+
+    const itemArgs = mockChangeItemCreateMany.mock.calls[0]?.[0]
+    const seed = itemArgs.data[0]
+    expect(seed.targetType).toBe("Campaign")
+    expect(seed.targetId).toBe("ncc_cmp_1")
+    expect(seed.status).toBe("done")
+    expect(seed.before.dailyBudget).toBe(100000)
+    expect(seed.after.suggestionId).toBe("s_budget")
+    expect(seed.after.fields).toBe("dailyBudget")
+    expect(seed.after.dailyBudget).toBe(120000)
+
+    const batchUpd = mockChangeBatchUpdate.mock.calls[0]?.[0]
+    expect(batchUpd.data.status).toBe("done")
+    expect(batchUpd.data.processed).toBe(1)
+  })
+
   it("invalid_keyword_state — 잠금/삭제/그룹입찰가 행은 사전 실패", async () => {
     mockBidSuggestionFindMany.mockResolvedValue([
       {
         id: "s_lock",
         keywordId: "kw_locked",
+        engineSource: "bid",
         action: { currentBid: 800, suggestedBid: 920, deltaPct: 15, direction: "up" },
         reason: "x",
         severity: "info",
@@ -289,6 +510,7 @@ describe("approveBidSuggestions", () => {
       {
         id: "s_del",
         keywordId: "kw_del",
+        engineSource: "bid",
         action: { currentBid: 700, suggestedBid: 805, deltaPct: 15, direction: "up" },
         reason: "x",
         severity: "info",
@@ -296,6 +518,7 @@ describe("approveBidSuggestions", () => {
       {
         id: "s_group",
         keywordId: "kw_group",
+        engineSource: "bid",
         action: { currentBid: 500, suggestedBid: 575, deltaPct: 15, direction: "up" },
         reason: "x",
         severity: "info",
@@ -355,6 +578,7 @@ describe("approveBidSuggestions", () => {
       {
         id: "s1",
         keywordId: "kw_other_adv",
+        engineSource: "bid",
         action: { currentBid: 1000, suggestedBid: 1150, deltaPct: 15, direction: "up" },
         reason: "x",
         severity: "info",

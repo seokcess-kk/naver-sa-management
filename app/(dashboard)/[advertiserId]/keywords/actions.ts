@@ -821,16 +821,18 @@ function mapInspectStatus(k: SaKeyword): InspectStatus {
 //   - toggle:        userLock 일괄 적용 (true=OFF, false=ON)
 //   - bid absolute:  bidAmt 동일 절대값 + useGroupBidAmt=false 강제
 //   - bid ratio:     각 row baseline 재조회 + (1+percent/100) 계산 (옵션 B — 서버에서 계산)
+//   - bid delta:     각 row baseline 재조회 + amount 증감 (서버에서 계산)
 //                    baseline 우선순위:
 //                      1) keyword.bidAmt 가 number
 //                      2) useGroupBidAmt=true 면 광고그룹 bidAmt
 //                      3) 둘 다 null → 해당 row 사전 'failed' (다른 row 는 정상 진행)
-//                    산출값 = round(baseline * (1+percent/100) / roundTo) * roundTo, 0 클램프
+//                    ratio 산출값 = round(baseline * (1+percent/100) / roundTo) * roundTo, 0 클램프
+//                    delta 산출값 = round((baseline+amount) / roundTo) * roundTo, 0 클램프
 //
 // TODO(5천 건 한계): 본 PR 은 단일 PUT 시도. updateKeywordsBulk 의 SA 응답 한계가 부딪히면
 //   batch-executor-job 패턴 (Job Table + Cron + Chunk Executor) 으로 이관.
 
-const bulkActionKeywordsSchema = z.discriminatedUnion("action", [
+const bulkActionKeywordsSchema = z.union([
   // ON/OFF 토글 (userLock)
   z.object({
     action: z.literal("toggle"),
@@ -857,6 +859,14 @@ const bulkActionKeywordsSchema = z.discriminatedUnion("action", [
     action: z.literal("bid"),
     mode: z.literal("ratio"),
     percent: z.number().min(-90).max(900),
+    roundTo: z.number().int().min(1).default(10),
+    keywordIds: z.array(z.string().min(1)).min(1).max(500),
+  }),
+  // 입찰가 정액 증감
+  z.object({
+    action: z.literal("bid"),
+    mode: z.literal("delta"),
+    amount: z.number().int().min(-1_000_000).max(1_000_000),
     roundTo: z.number().int().min(1).default(10),
     keywordIds: z.array(z.string().min(1)).min(1).max(500),
   }),
@@ -975,6 +985,19 @@ function computeRatioBid(
 }
 
 /**
+ * delta 산출값 계산: round((baseline+amount) / roundTo) * roundTo, 0 클램프.
+ */
+function computeDeltaBid(
+  baseline: number,
+  amount: number,
+  roundTo: number,
+): number {
+  const next = baseline + amount
+  const rounded = Math.round(next / roundTo) * roundTo
+  return rounded < 0 ? 0 : rounded
+}
+
+/**
  * 일괄 액션 미리보기.
  *
  * UI 모달이 baseline 정확도 (서버 시점 DB 값 + 광고그룹 bidAmt 폴백) 를 보장받기 위해
@@ -1052,7 +1075,7 @@ export async function previewBulkAction(
       }
     }
 
-    // bid 변경 — absolute / ratio
+    // bid 변경 — absolute / ratio / delta
     if (parsed.mode === "absolute") {
       return {
         ...baseEntry,
@@ -1064,7 +1087,7 @@ export async function previewBulkAction(
       }
     }
 
-    // ratio
+    // ratio / delta
     const baseline = resolveRatioBaseline(r)
     if (baseline === null) {
       return {
@@ -1073,7 +1096,10 @@ export async function previewBulkAction(
         skipReason: "입찰가 baseline 없음",
       }
     }
-    const newBid = computeRatioBid(baseline, parsed.percent, parsed.roundTo)
+    const newBid =
+      parsed.mode === "ratio"
+        ? computeRatioBid(baseline, parsed.percent, parsed.roundTo)
+        : computeDeltaBid(baseline, parsed.amount, parsed.roundTo)
     return {
       ...baseEntry,
       after: {
@@ -1097,7 +1123,8 @@ export async function previewBulkAction(
  *   5. 액션별 SA payload + ChangeItem before/after 산출:
  *      - toggle:       items=[{nccKeywordId, userLock}], fields="userLock"
  *      - bid absolute: items=[{... bidAmt, useGroupBidAmt:false}], fields="bidAmt,useGroupBidAmt"
- *      - bid ratio:    각 row baseline 산출 → 산출값 또는 사전 'failed'
+ *      - bid ratio/delta:
+ *                    각 row baseline 산출 → 산출값 또는 사전 'failed'
  *                      유효 row 만 itemsForApi 에 push
  *   6. ChangeItem createMany — ratio 사전 skip 행은 status='failed' + error 즉시 기록
  *   7. updateKeywordsBulk(customerId, validItems, fields) — 단일 PUT
@@ -1152,8 +1179,11 @@ export async function bulkActionKeywords(
     batchSummary.mode = parsed.mode
     if (parsed.mode === "absolute") {
       batchSummary.bidAmt = parsed.bidAmt
-    } else {
+    } else if (parsed.mode === "ratio") {
       batchSummary.percent = parsed.percent
+      batchSummary.roundTo = parsed.roundTo
+    } else {
+      batchSummary.amount = parsed.amount
       batchSummary.roundTo = parsed.roundTo
     }
   }
@@ -1185,10 +1215,10 @@ export async function bulkActionKeywords(
 
   const itemsForApi: KeywordBulkUpdateItem[] = []
   const changeItemSeeds: ChangeItemSeed[] = []
-  // ratio 사전 실패 keywordId — 호출 후 결과 매핑에 즉시 반영하기 위해 보존.
+  // baseline 기반 모드 사전 실패 keywordId — 호출 후 결과 매핑에 즉시 반영하기 위해 보존.
   const preFailed = new Map<string, string>() // keywordId → error
-  // ratio 모드의 산출 bid 보존 (DB update 시 응답 누락 대비 fallback).
-  const ratioComputed = new Map<string, number>() // keywordId → newBid
+  // baseline 기반 모드의 산출 bid 보존 (DB update 시 응답 누락 대비 fallback).
+  const computedBid = new Map<string, number>() // keywordId → newBid
 
   let fields: string
 
@@ -1250,7 +1280,7 @@ export async function bulkActionKeywords(
             status: "pending",
           })
         } else {
-          // ratio
+          // ratio / delta
           const baseline = resolveRatioBaseline(r)
           if (baseline === null) {
             const errMsg = "입찰가 baseline 없음"
@@ -1267,12 +1297,11 @@ export async function bulkActionKeywords(
             })
             continue
           }
-          const newBid = computeRatioBid(
-            baseline,
-            parsed.percent,
-            parsed.roundTo,
-          )
-          ratioComputed.set(r.id, newBid)
+          const newBid =
+            parsed.mode === "ratio"
+              ? computeRatioBid(baseline, parsed.percent, parsed.roundTo)
+              : computeDeltaBid(baseline, parsed.amount, parsed.roundTo)
+          computedBid.set(r.id, newBid)
 
           const after = {
             bidAmt: newBid,
@@ -1350,6 +1379,9 @@ export async function bulkActionKeywords(
         ...(parsed.action === "bid" && parsed.mode === "ratio"
           ? { percent: parsed.percent }
           : {}),
+        ...(parsed.action === "bid" && parsed.mode === "delta"
+          ? { amount: parsed.amount }
+          : {}),
         note: "all-rows-pre-failed",
       },
     })
@@ -1390,11 +1422,11 @@ export async function bulkActionKeywords(
             },
           })
         } else {
-          // bid (absolute / ratio) — bidAmt + useGroupBidAmt
+          // bid (absolute / ratio / delta) — bidAmt + useGroupBidAmt
           const fallbackBid =
             parsed.mode === "absolute"
               ? parsed.bidAmt
-              : (ratioComputed.get(kid) ?? null)
+              : (computedBid.get(kid) ?? null)
           const newBid =
             typeof u.bidAmt === "number" ? u.bidAmt : fallbackBid
           const newUseGroup =
@@ -1473,6 +1505,9 @@ export async function bulkActionKeywords(
       ...(parsed.action === "bid" ? { mode: parsed.mode } : {}),
       ...(parsed.action === "bid" && parsed.mode === "ratio"
         ? { percent: parsed.percent, roundTo: parsed.roundTo }
+        : {}),
+      ...(parsed.action === "bid" && parsed.mode === "delta"
+        ? { amount: parsed.amount, roundTo: parsed.roundTo }
         : {}),
       ...(parsed.action === "bid" && parsed.mode === "absolute"
         ? { bidAmt: parsed.bidAmt }
