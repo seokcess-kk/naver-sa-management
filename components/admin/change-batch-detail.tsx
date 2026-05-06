@@ -806,11 +806,11 @@ function ItemsTable({ items }: { items: ChangeItemRow[] }) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">전체</SelectItem>
-                  <SelectItem value="pending">pending</SelectItem>
-                  <SelectItem value="running">running</SelectItem>
-                  <SelectItem value="done">done</SelectItem>
-                  <SelectItem value="failed">failed</SelectItem>
-                  <SelectItem value="skipped">skipped</SelectItem>
+                  <SelectItem value="pending">대기 (pending)</SelectItem>
+                  <SelectItem value="running">실행 중 (running)</SelectItem>
+                  <SelectItem value="done">완료 (done)</SelectItem>
+                  <SelectItem value="failed">실패 (failed)</SelectItem>
+                  <SelectItem value="skipped">스킵 (skipped)</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -172,9 +172,9 @@ const BULK_ACTION_MAX = 500
 // raw value (예: "on", "pending", "EXACT") 를 그대로 표시한다. 한글 라벨 매핑.
 const MATCH_LABELS: Record<string, string> = {
   ALL: "매치 (전체)",
-  EXACT: "EXACT",
-  PHRASE: "PHRASE",
-  BROAD: "BROAD",
+  EXACT: "정확 일치 (EXACT)",
+  PHRASE: "구문 일치 (PHRASE)",
+  BROAD: "확장 일치 (BROAD)",
 }
 const STATUS_LABELS: Record<string, string> = {
   ALL: "상태 (전체)",
@@ -880,11 +880,19 @@ function KeywordRowActions({
   )
 }
 
+// 짧은 한글 라벨 + title 에 영문 매치 코드 (호버 툴팁) — 셀 폭 절약 + 풀 라벨 인지.
+const MATCH_BADGE_LABEL: Record<string, { ko: string; full: string }> = {
+  EXACT: { ko: "정확", full: "정확 일치 (EXACT)" },
+  PHRASE: { ko: "구문", full: "구문 일치 (PHRASE)" },
+  BROAD: { ko: "확장", full: "확장 일치 (BROAD)" },
+}
+
 function MatchTypeBadge({ value }: { value: string | null }) {
   if (!value) {
     return <span className="text-xs text-muted-foreground">—</span>
   }
   const v = value.toUpperCase()
+  const meta = MATCH_BADGE_LABEL[v]
   const cls =
     v === "EXACT"
       ? "bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300"
@@ -899,8 +907,9 @@ function MatchTypeBadge({ value }: { value: string | null }) {
         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
         cls,
       )}
+      title={meta?.full ?? v}
     >
-      {v}
+      {meta?.ko ?? v}
     </span>
   )
 }
@@ -1797,9 +1806,9 @@ export function KeywordsTable({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="ALL">매치 (전체)</SelectItem>
-              <SelectItem value="EXACT">EXACT</SelectItem>
-              <SelectItem value="PHRASE">PHRASE</SelectItem>
-              <SelectItem value="BROAD">BROAD</SelectItem>
+              <SelectItem value="EXACT">정확 일치 (EXACT)</SelectItem>
+              <SelectItem value="PHRASE">구문 일치 (PHRASE)</SelectItem>
+              <SelectItem value="BROAD">확장 일치 (BROAD)</SelectItem>
             </SelectContent>
           </Select>
           <Select
