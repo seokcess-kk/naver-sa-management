@@ -114,6 +114,7 @@
 - 모든 일괄 작업: **선택 → 미리보기 → 확정 → 롤백** 4단계 (롤백은 가능한 변경에 한정, 현재 상태 재검증 후 항목 단위 적용)
 - 변경 이력은 모두 감사 로그
 - (P2) Guardrail: 룰당 일 변경 한도, Kill Switch 1-클릭 정지
+- **예외 — BidSuggestion 단건 승인 (Inbox)**: `engineSource='budget' | 'targeting'` 권고는 광고그룹·캠페인 단위 단건 적용으로 ChangeBatch 큐를 거치지 않고 Server Action 안에서 즉시 SA 호출 + ChangeItem 사후 기록 (`status='done'`). 운영자가 Inbox에서 명시 승인한 단건이며 결과를 즉시 확인하는 UX가 자연스럽기 때문. 묶음 권고(`scope ≠ 'keyword'` 또는 `affectedCount > 100`) 도입 시점에 Chunk Executor 패턴(3.5절)으로 이관 예정. `engineSource='bid'`는 본 예외 비대상 — ChangeBatch 정상 흐름 유지.
 
 ### 2.4 데이터 우선 축적
 - P1부터 모든 성과·변경 이력 구조화 저장 → P2의 학습 데이터

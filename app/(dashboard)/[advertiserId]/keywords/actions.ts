@@ -832,29 +832,32 @@ function mapInspectStatus(k: SaKeyword): InspectStatus {
 // TODO(5천 건 한계): 본 PR 은 단일 PUT 시도. updateKeywordsBulk 의 SA 응답 한계가 부딪히면
 //   batch-executor-job 패턴 (Job Table + Cron + Chunk Executor) 으로 이관.
 
-const bulkActionKeywordsSchema = z.union([
-  // ON/OFF 토글 (userLock)
-  z.object({
-    action: z.literal("toggle"),
-    items: z
-      .array(
-        z.object({
-          keywordId: z.string().min(1), // 앱 DB Keyword.id
-          // userLock=true → OFF, false → ON
-          userLock: z.boolean(),
-        }),
-      )
-      .min(1)
-      .max(500),
-  }),
-  // 입찰가 절대값
+// 토글 (userLock) — action="toggle" 단일
+const toggleActionSchema = z.object({
+  action: z.literal("toggle"),
+  items: z
+    .array(
+      z.object({
+        keywordId: z.string().min(1), // 앱 DB Keyword.id
+        // userLock=true → OFF, false → ON
+        userLock: z.boolean(),
+      }),
+    )
+    .min(1)
+    .max(500),
+})
+
+// 입찰가 (action="bid") — mode 기준 inner discriminatedUnion 으로 mode 오타·누락 차단.
+// outer union 이라도 toggle vs bid 는 action 값과 모양이 달라 부분 통과 위험 없음.
+const bidActionSchema = z.discriminatedUnion("mode", [
+  // 절대값
   z.object({
     action: z.literal("bid"),
     mode: z.literal("absolute"),
     bidAmt: z.number().int().min(0),
     keywordIds: z.array(z.string().min(1)).min(1).max(500),
   }),
-  // 입찰가 비율 (-90% ~ +900%)
+  // 비율 (-90% ~ +900%)
   z.object({
     action: z.literal("bid"),
     mode: z.literal("ratio"),
@@ -862,7 +865,7 @@ const bulkActionKeywordsSchema = z.union([
     roundTo: z.number().int().min(1).default(10),
     keywordIds: z.array(z.string().min(1)).min(1).max(500),
   }),
-  // 입찰가 정액 증감
+  // 정액 증감
   z.object({
     action: z.literal("bid"),
     mode: z.literal("delta"),
@@ -871,6 +874,8 @@ const bulkActionKeywordsSchema = z.union([
     keywordIds: z.array(z.string().min(1)).min(1).max(500),
   }),
 ])
+
+const bulkActionKeywordsSchema = z.union([toggleActionSchema, bidActionSchema])
 
 export type BulkActionKeywordsInput = z.infer<typeof bulkActionKeywordsSchema>
 
