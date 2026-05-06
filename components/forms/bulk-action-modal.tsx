@@ -313,13 +313,13 @@ function ResultView<TItem>({
           size="sm"
           variant="outline"
           disabled
-          title="롤백 화면 준비 중 (F-6.4)"
+          title="롤백 화면 준비 중"
         >
           롤백 페이지로 이동
         </Button>
       </div>
       <p className="text-[11px] text-muted-foreground">
-        롤백 페이지(F-6.4)에서 본 ID 로 변경 이력을 조회·되돌릴 수 있습니다.
+        롤백 페이지에서 위 ID 로 변경 이력을 조회·되돌릴 수 있습니다.
       </p>
 
       {failedItems.length > 0 && (

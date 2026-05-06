@@ -62,8 +62,8 @@ export function KillSwitchBanner({
                   자동 비딩 정지 중
                 </span>
                 <span className="text-xs text-destructive/80">
-                  본 광고주의 자동 비딩 cron(F-11.2) / 룰 트리거 / OptimizationRun
-                  신규 실행이 모두 차단됩니다.
+                  본 광고주의 자동 입찰가 조정 / 룰 트리거 / 최적화 실행이
+                  모두 차단됩니다.
                 </span>
                 {toggledAt && (
                   <span className="mt-1 text-[11px] text-muted-foreground">
@@ -111,7 +111,7 @@ export function KillSwitchBanner({
             <ShieldCheckIcon className="size-4 text-emerald-600" />
             <span className="font-medium">자동 비딩 활성</span>
             <span className="text-xs text-muted-foreground">
-              cron(F-11.2) 매시간 정책을 픽업합니다.
+              매시간 자동으로 정책별 입찰가가 조정됩니다.
             </span>
             {toggledAt && (
               <span className="text-[11px] text-muted-foreground">

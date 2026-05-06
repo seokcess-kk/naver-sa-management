@@ -91,8 +91,14 @@ export default async function TargetingPage({
             <p className="font-medium text-foreground">사용 방법</p>
             <p className="mt-1.5 leading-relaxed">
               7×24 시간 가중치, 디바이스 가중치, 지역 가중치를 룰로 등록하면
-              자동 입찰가 계산에 반영됩니다. 본 페이지에서의 변경은 자동 비딩이
-              켜진 키워드에만 영향을 미칩니다.
+              자동 입찰가 계산에 반영됩니다. 본 페이지의 변경은 자동 비딩이 켜진
+              키워드에만 영향을 미칩니다.
+            </p>
+            <p className="mt-2 font-medium text-foreground">적용 흐름</p>
+            <p className="mt-1.5 leading-relaxed">
+              매시간 자동 입찰가 계산 시 <strong>기본 입찰가 × 시간대 가중치
+              × 디바이스 가중치</strong> 로 곱해 적용됩니다. 룰을 비활성화하면
+              가중치 1.0 (효과 없음), 빈 셀은 기본 가중치가 적용됩니다.
             </p>
           </>
         }
@@ -102,20 +108,7 @@ export default async function TargetingPage({
         ]}
       />
 
-      <Card size="sm">
-        <CardHeader className="border-b">
-          <CardTitle className="text-sky-700 dark:text-sky-400">
-            적용 흐름
-          </CardTitle>
-          <CardDescription>
-            자동 비딩이 매시간 입찰가를 계산할 때
-            <strong> 기본 입찰가 × 시간대 가중치 × 디바이스 가중치</strong> 로
-            곱해 적용됩니다. 룰을 비활성화하면 모든 가중치가 1.0 (효과 없음)
-            으로 동작하고, 빈 셀은 기본 가중치가 적용됩니다.
-          </CardDescription>
-        </CardHeader>
-      </Card>
-
+      {/* 항상 알아야 할 상태 1개만 카드로 — 분석 설명은 도움말로 합침. */}
       <Card size="sm">
         <CardHeader className="border-b">
           <CardTitle className="text-amber-700 dark:text-amber-400">

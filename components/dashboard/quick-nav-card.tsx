@@ -59,7 +59,7 @@ export function QuickNavCard({ advertiserId }: { advertiserId: string }) {
         />
         <div className="border-t" aria-hidden />
         <NavSection
-          title="비딩 최적화 (P2)"
+          title="비딩 최적화"
           links={P2_LINKS}
           advertiserId={advertiserId}
         />

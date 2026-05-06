@@ -22,7 +22,6 @@ import {
 } from "@/lib/auth/access"
 import {
   Card,
-  CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
@@ -64,9 +63,27 @@ export default async function MarginalUtilityPage({
           <>
             <p className="font-medium text-foreground">읽는 방법</p>
             <p className="mt-1.5 leading-relaxed">
-              순위가 1위에 가까울수록 클릭은 늘지만 CPC도 비례해 오릅니다.
-              지표는 CPC 기준이며, ROAS/ROI 기반 분석은 후속 업데이트에서 추가됩니다.
+              순위가 1위에 가까울수록 클릭은 늘지만 클릭당 비용(CPC)도 비례해
+              오릅니다. 본 화면은 <strong>CPC 기준</strong>이며 (단위: 클릭/원),
+              매출 기반 ROI/ROAS 분석은 지원 예정입니다. 네이버 SA 입찰가
+              예상치(1~5위)를 활용해 직전 순위 대비 추가 클릭 1건당 비용을
+              계산합니다.
             </p>
+            <p className="mt-2 font-medium text-foreground">참고</p>
+            <ul className="mt-1.5 list-disc space-y-1 pl-4 leading-relaxed">
+              <li>
+                최근 7일 합계 클릭이 50회 미만인 키워드는 분석에서 제외됩니다
+                (표본 부족).
+              </li>
+              <li>
+                한계효용 = 직전 순위 대비 (Δ클릭 / Δ비용). 양수일수록 추가 클릭
+                비용이 효율적입니다.
+              </li>
+              <li>
+                권장 순위는 한계효용이 양수인 가장 높은(숫자가 낮은) 순위.
+                운영자 판단이 우선합니다.
+              </li>
+            </ul>
           </>
         }
         breadcrumbs={[
@@ -74,20 +91,6 @@ export default async function MarginalUtilityPage({
           { label: "한계효용 분석" },
         ]}
       />
-
-      {/* 안내 박스 — 본 분석은 CPC 기반 (P2 매출 조인 후 ROAS/ROI 표시) */}
-      <Card size="sm">
-        <CardHeader className="border-b">
-          <CardTitle className="text-sky-700 dark:text-sky-400">
-            분석 기준 안내
-          </CardTitle>
-          <CardDescription>
-            본 분석은 <strong>CPC 기반</strong>입니다 (단위: 클릭/원). ROI/ROAS는
-            P2 매출 조인 후 표시됩니다. Estimate API 의 1~5위 예상치를 활용해
-            순위별 한계효용(직전 순위 대비 추가 클릭 1당 비용)을 계산합니다.
-          </CardDescription>
-        </CardHeader>
-      </Card>
 
       {!advertiser.hasKeys ? (
         <Card>
@@ -106,27 +109,6 @@ export default async function MarginalUtilityPage({
         <MarginalUtilityClient advertiserId={advertiser.id} />
       )}
 
-      <Card size="sm">
-        <CardHeader className="border-b">
-          <CardTitle>참고</CardTitle>
-        </CardHeader>
-        <CardContent className="py-3 text-xs text-muted-foreground">
-          <ul className="list-disc space-y-1 pl-4">
-            <li>
-              최근 7일 합계 클릭이 50회 미만인 키워드는 분석 대상에서 제외됩니다
-              (표본 부족).
-            </li>
-            <li>
-              한계효용 = 직전 순위 대비 (Δ클릭 / Δ비용). 양수일수록 추가 클릭
-              비용이 효율적임을 의미합니다.
-            </li>
-            <li>
-              권장 순위는 한계효용이 양수인 가장 높은(낮은 숫자) 순위입니다.
-              운영자 판단이 우선합니다.
-            </li>
-          </ul>
-        </CardContent>
-      </Card>
     </div>
   )
 }

@@ -34,6 +34,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { PageHeader } from "@/components/navigation/page-header"
 
 export default async function AuditLogsPage() {
   let initial: AuditLogPage
@@ -52,17 +53,15 @@ export default async function AuditLogsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            감사 로그
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            모든 변경 액션은 before / after 형태로 기록됩니다. 시크릿 컬럼은
-            적재 시 마스킹 처리되어 안전하게 노출됩니다.
+      <PageHeader
+        title="감사 로그"
+        helpText={
+          <p className="leading-relaxed">
+            모든 변경 작업은 변경 전·후 값과 함께 기록됩니다. 시크릿 정보는
+            저장 시점에 마스킹되어 노출되지 않습니다.
           </p>
-        </div>
-      </div>
+        }
+      />
 
       <Card>
         <CardHeader className="border-b">

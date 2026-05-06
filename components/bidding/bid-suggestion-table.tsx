@@ -237,7 +237,7 @@ export function BidSuggestionTable({
     if (enrichedMap.has(row.id)) return
     if (row.action.llmEnrichedReason) return
     if (row.engineSource !== "bid") {
-      toast.error("'bid' 엔진만 AI 설명 가능 — 후속 PR")
+      toast.error("입찰가 권고만 AI 설명 가능 (다른 엔진은 지원 예정)")
       return
     }
     setEnrichingId(row.id)
@@ -401,8 +401,8 @@ export function BidSuggestionTable({
         <div className="rounded-md border bg-muted/20 px-4 py-12 text-center">
           <p className="text-sm font-medium">권고 항목이 없습니다</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            매시간 자동 분석 cron(F-11.4 Phase B.2)이 신규 권고를 적재합니다.
-            BidAutomationConfig 가 inbox 모드이고 baseline 데이터가 있어야 합니다.
+            매시간 자동 분석이 신규 권고를 적재합니다. 자동화 모드를 "Inbox 권고"
+            로 켜고 광고주 평균 성과 데이터가 충분히 누적되면 권고가 표시됩니다.
           </p>
         </div>
       ) : filtered.length === 0 ? (
@@ -459,9 +459,8 @@ export function BidSuggestionTable({
           <DialogHeader>
             <DialogTitle>선택 적용 — 미리보기</DialogTitle>
             <DialogDescription>
-              선택한 권고 입찰가를 ChangeBatch 로 적재합니다.
-              cron(`/api/batch/run`) 이 1분 간격으로 픽업해 SA API 로 입찰가를
-              변경합니다.
+              선택한 권고 입찰가를 변경 작업으로 적재합니다. 백그라운드에서 1분
+              간격으로 처리되어 네이버 SA 에 입찰가가 반영됩니다.
             </DialogDescription>
           </DialogHeader>
 
@@ -581,8 +580,8 @@ export function BidSuggestionTable({
             <DialogTitle>선택 거부</DialogTitle>
             <DialogDescription>
               선택한 {selectedIds.size}개 권고를 거부 처리합니다. 거부된 항목은
-              Inbox 에서 사라지며 다음 cron 분석 시 재평가됩니다 (조건 충족 시
-              다시 등장).
+              Inbox 에서 사라지며 다음 분석 사이클에 조건이 충족되면 다시
+              등장합니다.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -644,8 +643,8 @@ export function BidSuggestionTable({
           <DialogHeader>
             <DialogTitle>적용 요청 완료</DialogTitle>
             <DialogDescription>
-              ChangeBatch 가 생성되었습니다. cron 이 1분 간격으로 픽업하여 SA API
-              로 입찰가를 변경합니다 (수 분 내 처리).
+              변경 작업이 생성되었습니다. 백그라운드에서 1분 간격으로 처리되어
+              네이버 SA 에 입찰가가 반영됩니다 (수 분 내).
             </DialogDescription>
           </DialogHeader>
           {resultDialog && (
@@ -913,8 +912,8 @@ function DetailContent({
         ) : (
           <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
             {row.engineSource !== "bid"
-              ? "'bid' 엔진 권고만 AI 설명 지원 (quality / targeting / budget 은 후속 PR)"
-              : "viewer 권한은 AI 설명 호출 불가 (비용 발생)"}
+              ? "현재는 입찰가 권고만 AI 설명을 지원합니다 (품질 / 타게팅 / 예산은 지원 예정)"
+              : "뷰어 권한은 AI 설명을 호출할 수 없습니다 (비용 발생)"}
           </div>
         )}
       </div>

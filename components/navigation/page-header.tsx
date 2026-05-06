@@ -89,7 +89,7 @@ export function PageHeader({
               {title}
             </h1>
             {helpText ? (
-              <details className="group inline-block">
+              <details className="group relative inline-block">
                 <summary
                   className={cn(
                     "list-none cursor-pointer rounded-md p-1 text-muted-foreground transition",
@@ -101,7 +101,14 @@ export function PageHeader({
                 >
                   <HelpCircle className="size-4" />
                 </summary>
-                <div className="absolute z-10 mt-1 max-w-md rounded-md border bg-popover p-3 text-sm text-muted-foreground shadow-md">
+                {/* 부모 details 가 relative — 본문은 summary 아래에 절대 배치.
+                    모바일에서 viewport 를 넘지 않도록 w-[min(24rem,calc(100vw-2rem))]. */}
+                <div
+                  className={cn(
+                    "absolute left-0 top-full z-20 mt-1 rounded-md border bg-popover p-3 text-sm text-muted-foreground shadow-md",
+                    "w-[min(24rem,calc(100vw-2rem))]",
+                  )}
+                >
                   {helpText}
                 </div>
               </details>

@@ -8,7 +8,10 @@ import { KeyStatusBadge } from "@/components/admin/key-status-badge"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -33,16 +36,39 @@ const primarySections: DashboardSection[] = [
   { href: "/extensions", label: "확장소재" },
 ]
 
-// 2차 — 주간/이벤트성으로 쓰는 6개. "더보기" 드롭다운으로 접음.
+// 2차 — 주간/이벤트성으로 쓰는 6개. "더보기" 드롭다운으로 접되 그룹 라벨로 분리.
 // 활성 페이지가 이 그룹에 있으면 트리거가 active 스타일 + 라벨로 어떤 항목인지 표시.
-const advancedSections: DashboardSection[] = [
-  { href: "/bidding-policies", label: "비딩 정책" },
-  { href: "/bid-inbox", label: "비딩 Inbox" },
-  { href: "/targeting", label: "타게팅" },
-  { href: "/marginal-utility", label: "한계효용" },
-  { href: "/search-term-import", label: "검색어 분석" },
-  { href: "/approval-queue", label: "승인 큐" },
+type AdvancedGroup = {
+  label: string
+  sections: DashboardSection[]
+}
+
+const advancedGroups: AdvancedGroup[] = [
+  {
+    label: "비딩",
+    sections: [
+      { href: "/bidding-policies", label: "비딩 정책" },
+      { href: "/bid-inbox", label: "비딩 Inbox" },
+      { href: "/targeting", label: "타게팅" },
+    ],
+  },
+  {
+    label: "분석",
+    sections: [
+      { href: "/marginal-utility", label: "한계효용" },
+      { href: "/search-term-import", label: "검색어 분석" },
+    ],
+  },
+  {
+    label: "승인",
+    sections: [{ href: "/approval-queue", label: "승인 큐" }],
+  },
 ]
+
+// flat 라벨 lookup 용 — 활성 페이지의 항목 라벨을 트리거에 표시.
+const advancedSectionsFlat: DashboardSection[] = advancedGroups.flatMap(
+  (g) => g.sections,
+)
 
 export function DashboardSectionNav({
   advertiser,
@@ -160,11 +186,21 @@ function AdvancedSectionsDropdown({
   activeSectionHref: string
 }) {
   const router = useRouter()
-  const activeAdvanced = advancedSections.find(
+  const activeAdvanced = advancedSectionsFlat.find(
     (s) => s.href === activeSectionHref,
   )
   const triggerActive = activeAdvanced != null
   const triggerLabel = activeAdvanced?.label ?? "더보기"
+
+  const buildHref = (segment: string) => {
+    const baseHref = `${rootHref}${segment}`
+    return scopedCampaignIds.length > 0 || scopedAdgroupIds.length > 0
+      ? getScopedHref(baseHref, {
+          campaignIds: scopedCampaignIds,
+          adgroupIds: scopedAdgroupIds,
+        })
+      : baseHref
+  }
 
   return (
     <DropdownMenu>
@@ -182,26 +218,29 @@ function AdvancedSectionsDropdown({
         <ChevronDownIcon className="size-3.5" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-44">
-        {advancedSections.map((section) => {
-          const baseHref = `${rootHref}${section.href}`
-          const href =
-            scopedCampaignIds.length > 0 || scopedAdgroupIds.length > 0
-              ? getScopedHref(baseHref, {
-                  campaignIds: scopedCampaignIds,
-                  adgroupIds: scopedAdgroupIds,
-                })
-              : baseHref
-          const active = section.href === activeSectionHref
-          return (
-            <DropdownMenuItem
-              key={section.label}
-              onClick={() => router.push(href)}
-              className={cn(active && "bg-muted font-medium text-foreground")}
-            >
-              {section.label}
-            </DropdownMenuItem>
-          )
-        })}
+        {advancedGroups.map((group, gi) => (
+          <DropdownMenuGroup key={group.label}>
+            {gi > 0 ? <DropdownMenuSeparator /> : null}
+            <DropdownMenuLabel className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              {group.label}
+            </DropdownMenuLabel>
+            {group.sections.map((section) => {
+              const active = section.href === activeSectionHref
+              const href = buildHref(section.href)
+              return (
+                <DropdownMenuItem
+                  key={section.label}
+                  onClick={() => router.push(href)}
+                  className={cn(
+                    active && "bg-muted font-medium text-foreground",
+                  )}
+                >
+                  {section.label}
+                </DropdownMenuItem>
+              )
+            })}
+          </DropdownMenuGroup>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   )

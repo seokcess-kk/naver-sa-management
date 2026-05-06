@@ -33,6 +33,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { PageHeader } from "@/components/navigation/page-header"
 
 const INITIAL_LIMIT = 100
 
@@ -62,17 +63,15 @@ export default async function AlertsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            알림 이벤트
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            평가기가 적재한 알림 후보입니다. status 는 pending(적재만)
-            / sent(채널 발송 완료) / failed / muted(1시간 음소거 적용) 4종.
+      <PageHeader
+        title="알림 이벤트"
+        helpText={
+          <p className="leading-relaxed">
+            자동 평가가 적재한 알림 후보입니다. 상태는 대기(적재만) / 발송(채널
+            전송 완료) / 실패 / 음소거(1시간 적용) 4종입니다.
           </p>
-        </div>
-      </div>
+        }
+      />
 
       <Card>
         <CardHeader className="border-b">

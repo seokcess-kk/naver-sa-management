@@ -29,6 +29,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { PageHeader } from "@/components/navigation/page-header"
 
 export default async function UsersPage() {
   let users: UserRow[]
@@ -43,17 +44,16 @@ export default async function UsersPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            사용자 / 권한 관리
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            앱 DB 기반 권한 모델. 사용자 직접 생성·삭제는 지원하지 않습니다 —
-            Supabase Auth 가 회원가입을 담당하며 첫 로그인 시 viewer 로 자동 등록됩니다.
+      <PageHeader
+        title="사용자 / 권한 관리"
+        helpText={
+          <p className="leading-relaxed">
+            사용자 직접 생성·삭제는 지원하지 않습니다. 회원가입은 Supabase Auth
+            가 담당하며, 첫 로그인 시 자동으로 뷰어 권한으로 등록됩니다. 본
+            화면에서는 권한 변경 / 광고주 접근 권한 부여를 수행합니다.
           </p>
-        </div>
-      </div>
+        }
+      />
 
       <Card>
         <CardHeader className="border-b">

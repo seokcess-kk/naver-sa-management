@@ -31,6 +31,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import { PageHeader } from "@/components/navigation/page-header"
 
 export default async function ChangeBatchesPage() {
   let initial: ChangeBatchPage
@@ -45,17 +46,15 @@ export default async function ChangeBatchesPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            변경 이력
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            모든 변경 액션은 ChangeBatch + ChangeItem 으로 적재됩니다. 실패
-            항목 재시도 / 변경 롤백을 본 페이지에서 수행하세요.
+      <PageHeader
+        title="변경 이력"
+        helpText={
+          <p className="leading-relaxed">
+            모든 변경 작업은 묶음 단위로 적재됩니다. 본 화면에서 실패 항목
+            재시도 / 변경 롤백을 수행할 수 있습니다.
           </p>
-        </div>
-      </div>
+        }
+      />
 
       <Card>
         <CardHeader className="border-b">
