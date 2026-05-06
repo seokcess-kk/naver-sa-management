@@ -182,7 +182,7 @@ export default async function AdsPage({
   }))
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="소재"
         description={
@@ -194,9 +194,16 @@ export default async function AdsPage({
             <ScopeClearLink clearHref={`/${advertiserId}/ads`}>
               {`선택한 캠페인 ${campaignScopeIds.length}개에 속한 소재만 표시합니다.`}
             </ScopeClearLink>
-          ) : (
-            "광고그룹별 소재 목록. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집·CSV 는 후속 PR)"
-          )
+          ) : null
+        }
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <ul className="mt-1.5 list-disc pl-4 leading-relaxed">
+              <li>광고그룹별 소재 목록 — 체크박스 다중 선택 → ON/OFF 일괄</li>
+              <li>인라인 편집 · CSV 는 후속 업데이트 예정</li>
+            </ul>
+          </>
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },

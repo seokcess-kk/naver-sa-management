@@ -118,10 +118,18 @@ export default async function BidInboxPage({
   }))
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="비딩 Inbox"
-        description="자동 분석 cron 이 적재한 입찰가 권고를 검토 후 일괄 적용. 본 PR(Phase B.3)은 'bid' 엔진만 적용 가능 — quality / targeting / budget 은 후속 PR 에서 적용 흐름 추가."
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <p className="mt-1.5 leading-relaxed">
+              자동 분석이 적재한 입찰가 권고를 검토하고 일괄 적용합니다.
+              현재는 입찰가 권고만 적용 가능 — 품질 · 타게팅 · 예산 권고는 후속 업데이트 예정.
+            </p>
+          </>
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "비딩 Inbox" },

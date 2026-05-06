@@ -105,10 +105,18 @@ export default async function ApprovalQueuePage({
   }))
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="승인 큐"
-        description="검색어 분석 결과로 적재된 신규 키워드 후보를 검토 후 일괄 승인합니다. 승인 시 ChangeBatch 가 생성되어 cron 이 SA API 로 키워드를 등록합니다 (수 분 내 처리)."
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <p className="mt-1.5 leading-relaxed">
+              검색어 분석에서 적재된 신규 키워드 후보를 검토하고 일괄 승인합니다.
+              승인하면 백그라운드에서 키워드 등록이 진행됩니다 (수 분 내 반영).
+            </p>
+          </>
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "승인 큐" },

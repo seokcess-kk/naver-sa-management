@@ -105,7 +105,7 @@ export default async function AdvertiserDashboardPage({
   ])
 
   return (
-    <div className="flex flex-col gap-4 p-4 md:p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       {/* HERO — 1행 컴팩트 헤더 (광고주명 / 비즈머니 / 마지막 동기화 / 글로벌 새로고침) */}
       <DashboardHero
         advertiser={advertiser}

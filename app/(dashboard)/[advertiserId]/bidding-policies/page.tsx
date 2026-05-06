@@ -88,10 +88,19 @@ export default async function BiddingPoliciesPage({
   ])
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="비딩 정책"
-        description="키워드 단위 목표 노출 순위 정책 (F-11.1) — 자동 조정 cron(F-11.2)이 매시간 입찰가를 조정합니다."
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <p className="mt-1.5 leading-relaxed">
+              키워드 단위로 목표 노출 순위(1~10위)와 입찰가 상·하한을 등록하면,
+              매시간 자동으로 입찰가를 조정해 순위를 유지합니다. 비상 시 상단의
+              Kill Switch 로 즉시 정지할 수 있습니다.
+            </p>
+          </>
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "비딩 정책" },

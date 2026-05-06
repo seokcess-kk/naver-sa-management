@@ -62,7 +62,7 @@ export default async function TargetingPage({
   const ruleRes = await getTargetingRule(advertiser.id)
   if (!ruleRes.ok) {
     return (
-      <div className="flex flex-col gap-6 p-6">
+      <div className="flex flex-col gap-6 p-4 md:p-6">
         <PageHeader
           title="시간대·지역 타게팅"
           breadcrumbs={[
@@ -83,10 +83,19 @@ export default async function TargetingPage({
   }
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="시간대·지역 타게팅"
-        description="7×24 시간 가중 + 디바이스 가중 + 지역 가중 (자동 비딩 미적용)"
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <p className="mt-1.5 leading-relaxed">
+              7×24 시간 가중치, 디바이스 가중치, 지역 가중치를 룰로 등록하면
+              자동 입찰가 계산에 반영됩니다. 본 페이지에서의 변경은 자동 비딩이
+              켜진 키워드에만 영향을 미칩니다.
+            </p>
+          </>
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "타게팅" },

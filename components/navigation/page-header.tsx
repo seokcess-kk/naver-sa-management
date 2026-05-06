@@ -1,6 +1,6 @@
 import Link from "next/link"
 import type { ReactNode } from "react"
-import { ArrowLeft, ChevronRight } from "lucide-react"
+import { ArrowLeft, ChevronRight, HelpCircle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -12,7 +12,16 @@ export type PageBreadcrumb = {
 
 type PageHeaderProps = {
   title: string
+  /**
+   * 페이지 진입 시 항상 보이는 1줄 상태 문구. 매뉴얼성 안내는 helpText 로 분리.
+   * 비어 있으면 헤더가 더 조용해짐 — 운영자 일상 화면에 권장.
+   */
   description?: ReactNode
+  /**
+   * "이 페이지로 무엇을 할 수 있는가" 같은 신규 사용자용 안내.
+   * title 옆 ? 버튼을 누르면 펼쳐짐(native <details>). 숙련 사용자 시야엔 안 들어옴.
+   */
+  helpText?: ReactNode
   breadcrumbs?: PageBreadcrumb[]
   backHref?: string
   backLabel?: string
@@ -23,6 +32,7 @@ type PageHeaderProps = {
 export function PageHeader({
   title,
   description,
+  helpText,
   breadcrumbs = [],
   backHref,
   backLabel = "뒤로가기",
@@ -74,9 +84,29 @@ export function PageHeader({
 
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
-          <h1 className="font-heading text-xl font-medium leading-snug">
-            {title}
-          </h1>
+          <div className="flex items-center gap-1.5">
+            <h1 className="font-heading text-xl font-medium leading-snug">
+              {title}
+            </h1>
+            {helpText ? (
+              <details className="group inline-block">
+                <summary
+                  className={cn(
+                    "list-none cursor-pointer rounded-md p-1 text-muted-foreground transition",
+                    "hover:bg-muted hover:text-foreground",
+                    "[&::-webkit-details-marker]:hidden",
+                  )}
+                  aria-label="페이지 도움말"
+                  title="페이지 도움말"
+                >
+                  <HelpCircle className="size-4" />
+                </summary>
+                <div className="absolute z-10 mt-1 max-w-md rounded-md border bg-popover p-3 text-sm text-muted-foreground shadow-md">
+                  {helpText}
+                </div>
+              </details>
+            ) : null}
+          </div>
           {description ? (
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
               {description}

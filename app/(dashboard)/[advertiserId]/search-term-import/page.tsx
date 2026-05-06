@@ -109,10 +109,19 @@ export default async function SearchTermImportPage({
   const todayMondayKst = computeMondayOfWeekKst(new Date())
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="검색어 보고서 분석"
-        description="네이버 SA 콘솔에서 다운로드한 검색어 보고서 CSV 를 업로드하면, 광고주 baseline 기반으로 신규 후보 / 제외 후보를 자동 분류합니다. 본 도구는 분석 결과만 보여줍니다 — 실제 키워드 등록 / 제외 등록은 SA 콘솔에서 직접 수행하세요."
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <ol className="mt-1.5 list-decimal pl-4 leading-relaxed">
+              <li>네이버 SA 콘솔 → 보고서 → 검색어 보고서 CSV 다운로드</li>
+              <li>본 페이지에 업로드 → 광고주 baseline 기준으로 신규 / 제외 후보 자동 분류</li>
+              <li>분석 결과는 표시만 — 실제 키워드 등록 / 제외는 SA 콘솔 또는 승인 큐에서 진행</li>
+            </ol>
+          </>
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "검색어 분석" },

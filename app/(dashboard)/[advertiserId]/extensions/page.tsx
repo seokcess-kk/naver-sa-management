@@ -197,7 +197,7 @@ export default async function ExtensionsPage({
     }))
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="확장소재"
         description={
@@ -209,9 +209,16 @@ export default async function ExtensionsPage({
             <ScopeClearLink clearHref={`/${advertiserId}/extensions`}>
               {`선택한 캠페인 ${campaignScopeIds.length}개에 속한 확장소재만 표시합니다.`}
             </ScopeClearLink>
-          ) : (
-            "추가제목 / 추가설명 / 이미지. 체크박스로 다중 선택 후 ON/OFF 일괄 변경 가능. (인라인 편집은 후속 PR)"
-          )
+          ) : null
+        }
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <ul className="mt-1.5 list-disc pl-4 leading-relaxed">
+              <li>지원 유형: 추가제목 / 추가설명 / 이미지</li>
+              <li>체크박스 다중 선택 → ON/OFF 일괄. 인라인 편집은 후속 업데이트</li>
+            </ul>
+          </>
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },

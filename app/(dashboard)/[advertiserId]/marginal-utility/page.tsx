@@ -56,10 +56,19 @@ export default async function MarginalUtilityPage({
   }
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="한계효용 분석"
-        description="분석 기간 last 7일 (기본) · device 별 1~5위 입찰 한계효용 비교"
+        description="최근 7일 · 디바이스별 1~5위 입찰 한계효용 비교"
+        helpText={
+          <>
+            <p className="font-medium text-foreground">읽는 방법</p>
+            <p className="mt-1.5 leading-relaxed">
+              순위가 1위에 가까울수록 클릭은 늘지만 CPC도 비례해 오릅니다.
+              지표는 CPC 기준이며, ROAS/ROI 기반 분석은 후속 업데이트에서 추가됩니다.
+            </p>
+          </>
+        }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: "한계효용 분석" },

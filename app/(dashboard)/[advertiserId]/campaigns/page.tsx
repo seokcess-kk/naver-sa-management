@@ -125,7 +125,7 @@ export default async function CampaignsPage({
         : null
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="캠페인"
         description={
@@ -133,9 +133,16 @@ export default async function CampaignsPage({
             <ScopeClearLink clearHref={`/${advertiserId}/campaigns`}>
               {scopeMessage}
             </ScopeClearLink>
-          ) : (
-            "ON/OFF · 일 예산을 다중 선택 후 일괄 변경할 수 있습니다."
-          )
+          ) : null
+        }
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <ul className="mt-1.5 list-disc pl-4 leading-relaxed">
+              <li>체크박스 다중 선택 → 상단 액션바에서 ON/OFF 일괄</li>
+              <li>일 예산은 셀 클릭 인라인 편집 후 미리보기 적용</li>
+            </ul>
+          </>
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },

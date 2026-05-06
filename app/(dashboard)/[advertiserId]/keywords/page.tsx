@@ -195,7 +195,7 @@ export default async function KeywordsPage({
   }))
 
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
         title="키워드"
         description={
@@ -207,9 +207,17 @@ export default async function KeywordsPage({
             <ScopeClearLink clearHref={`/${advertiserId}/keywords`}>
               {`선택한 캠페인 ${campaignScopeIds.length}개에 속한 키워드만 표시합니다.`}
             </ScopeClearLink>
-          ) : (
-            "셀을 클릭해 인라인 편집하거나, 체크박스로 다중 선택 후 ON/OFF · 입찰가 일괄 변경. CSV 가져오기로 일괄 생성·수정·OFF 가능."
-          )
+          ) : null
+        }
+        helpText={
+          <>
+            <p className="font-medium text-foreground">사용 방법</p>
+            <ul className="mt-1.5 list-disc pl-4 leading-relaxed">
+              <li>셀 클릭 → 인라인 편집 (변경은 미리보기 후 일괄 적용)</li>
+              <li>체크박스 다중 선택 → 상단 액션바에서 ON/OFF · 입찰가 일괄 변경</li>
+              <li>CSV 가져오기로 일괄 생성 · 수정 · OFF</li>
+            </ul>
+          </>
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
