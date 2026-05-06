@@ -4,7 +4,7 @@
  * 동작:
  *   1. CRON_SECRET 검증 (env 미설정 또는 헤더 불일치 시 401)
  *   2. 활성 광고주 조회 (status='active' AND apiKeyEnc / secretKeyEnc 둘 다 NOT NULL)
- *   3. (date, hour) = previousHourKstAsUtc(now) — KST 직전 정시 (1시간 후행 기록)
+ *   3. (date, hour) = previousHourKstAsUtc(now, 2) — KST 2시간 후행 정시 (SA SLA 보호)
  *   4. 광고주별 직렬 처리:
  *        ingestAdvertiserStatHourly({ advertiserId, customerId, date, hour })
  *      try/catch 로 실패 격리 — 한 광고주 실패가 다음 광고주 차단 X
@@ -134,7 +134,9 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   })
 
   // -- 3. (date, hour) 계산 — KST 직전 정시 (1시간 후행) ----------------------
-  const { date, hour } = previousHourKstAsUtc()
+  // 2시간 후행 — SA Stats SLA 가 직전 1시간을 즉시 안 줄 수 있어 안전 마진 확보.
+  // (관찰: 17:42 시점에도 16:00~17:00 응답 누락. 15시 시간대까지만 안정 회신.)
+  const { date, hour } = previousHourKstAsUtc(new Date(), 2)
 
   // -- 4. 광고주별 직렬 처리 -------------------------------------------------
   let advertisersOk = 0

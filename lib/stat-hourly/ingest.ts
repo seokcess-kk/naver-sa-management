@@ -52,32 +52,41 @@ import type { Prisma, StatLevel, StatDevice } from "@/lib/generated/prisma/clien
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000 // KST = UTC+9
 
 /**
- * 현재 시각 기준 "KST 직전 정시" 의 (date, hour) 반환 — 1시간 후행 기록 정책.
+ * 현재 시각 기준 "KST N 시간 후행 정시" 의 (date, hour) 반환.
  *
- * 예 (now = 2026-04-29 14:35 KST = 2026-04-29 05:35 UTC):
- *   → previousHourKstAsUtc(now) = { date: 2026-04-29 KST 0시 (= 2026-04-28 15:00 UTC), hour: 13 }
- *   - "직전 정시" = KST 13시 → cron 14:05 실행 시 KST 13시 데이터 기록
+ * SA Stats API 가 진행 중인 시간대뿐 아니라 직전 1시간 데이터도 즉시 회신하지
+ * 않는 케이스 관찰됨 (17:42 시점 16:00~17:00 응답 누락). 운영 cron 은
+ * `offsetHours=2` 로 호출해 SA 응답에 안정 적재된 시간대를 처리한다.
  *
- * 자정 직후 (now = 2026-04-29 00:30 KST = 2026-04-28 15:30 UTC):
- *   → previousHourKstAsUtc(now) = { date: 2026-04-28 KST 0시 (= 2026-04-27 15:00 UTC), hour: 23 }
- *   - 직전 시간은 "전날 KST 23시" → date 도 전일로 롤백
+ * 예 (now = 2026-04-29 14:35 KST):
+ *   - offsetHours=1 → { date: KST 4-29 0시, hour: 13 }  (기본 — 단위 테스트 호환)
+ *   - offsetHours=2 → { date: KST 4-29 0시, hour: 12 }  (운영 호출 — cron route)
  *
- * 반환 date 는 "그 KST 일자 자정"의 절대 epoch — Prisma @db.Date 호환 (StatDaily 와 동일 패턴).
- * UTC 표시로는 "KST 0시 = 전일 UTC 15:00".
+ * 자정 직후 (now = 2026-04-29 00:30 KST):
+ *   - offsetHours=1 → { date: KST 4-28 0시, hour: 23 }
+ *   - offsetHours=2 → { date: KST 4-28 0시, hour: 22 }
  *
- * @param now 테스트용 현재 시각 주입 (운영 호출부는 omit → new Date())
+ * 반환 date 는 "그 KST 일자 자정"의 절대 epoch — Prisma @db.Date 호환.
+ *
+ * @param now           테스트용 현재 시각 주입 (운영 호출부는 omit → new Date())
+ * @param offsetHours   KST 기준 몇 시간 후행 처리할지 (default 1; cron route 는 2 명시)
  */
-export function previousHourKstAsUtc(now: Date = new Date()): {
+export function previousHourKstAsUtc(
+  now: Date = new Date(),
+  offsetHours: number = 1,
+): {
   date: Date
   hour: number
 } {
   // 1) now 의 "KST epoch" 환산 → epoch + 9h
   const kstShifted = new Date(now.getTime() + KST_OFFSET_MS)
 
-  // 2) KST 시각 -1 시간 → 직전 정시
-  const prevKst = new Date(kstShifted.getTime() - 60 * 60 * 1000)
+  // 2) KST 시각 -offsetHours → 처리 대상 정시
+  const prevKst = new Date(
+    kstShifted.getTime() - offsetHours * 60 * 60 * 1000,
+  )
 
-  // 3) 직전 시각의 KST 일자 / 시 추출 (UTC API 사용 — kstShifted 가 이미 KST 기준)
+  // 3) 처리 대상 시각의 KST 일자 / 시 추출
   const kstY = prevKst.getUTCFullYear()
   const kstM = prevKst.getUTCMonth()
   const kstD = prevKst.getUTCDate()
