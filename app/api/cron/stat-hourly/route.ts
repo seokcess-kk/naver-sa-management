@@ -186,7 +186,8 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     errors,
   }
 
-  // Vercel Logs 의 GET 응답 body 가 표시 안 되는 경우 대비 — 결과를 명시적으로 출력 (TEMP).
+  // Vercel Logs 의 GET 응답 body 가 표시 안 되는 경우가 있어 결과 요약을
+  // application log 로 1줄 출력 — 운영 모니터링용 (Sentry / 알림 연동 전 단계).
   console.log(
     `[cron/stat-hourly] result advertisers=${advertisers.length} ok=${advertisersOk} failed=${advertisersFailed} statHourlyInserted=${statHourlyInserted} statHourlySkipped=${statHourlySkipped} keywordsRanked=${keywordsRanked} date=${result.date} hour=${hour} errors=${errors.length}`,
   )
