@@ -169,10 +169,8 @@ export async function syncKeywords(
       },
     })
     // lastSyncAt 갱신 — 광고그룹 0개도 "동기화 시도 완료" 로 기록 (UI 표시 일관성).
-    // 단, 캠페인 필터 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
-    if (!hasCampaignFilter) {
-      await recordSyncAt(advertiserId, "keywords")
-    }
+    // 캠페인 필터로 부분 동기화한 경우에도 갱신 — "동기화했는데 표시 안 됨" 혼란 방지.
+    await recordSyncAt(advertiserId, "keywords")
     revalidatePath(`/${advertiserId}/keywords`)
     return {
       ok: true,
@@ -349,10 +347,8 @@ export async function syncKeywords(
   })
 
   // lastSyncAt 갱신 (UI 헤더 "마지막 동기화" 배지). 실패해도 sync 결과는 정상 반환.
-  // 캠페인 필터 적용된 부분 동기화는 광고주 전체 sync 가 아니므로 lastSyncAt 갱신 X.
-  if (!hasCampaignFilter) {
-    await recordSyncAt(advertiserId, "keywords")
-  }
+  // 캠페인 필터로 부분 동기화한 경우에도 갱신 — "동기화했는데 표시 안 됨" 혼란 방지.
+  await recordSyncAt(advertiserId, "keywords")
 
   revalidatePath(`/${advertiserId}/keywords`)
 
