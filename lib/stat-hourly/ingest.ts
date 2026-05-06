@@ -319,6 +319,36 @@ export async function ingestAdvertiserStatHourly(
       breakdown: "hh24",
     })
 
+    // -- 진단 로그 (TEMP — recentAvgRnk null 원인 식별용) -----------------------
+    // SA Stats API 응답에 recentAvgRnk 가 들어오는지 / 어느 hh24 가 오는지 확인.
+    // 첫 1건만 출력 (반복 폭주 방지). 원인 확인 후 제거.
+    if (rows.length > 0) {
+      const sample = rows[0] as Record<string, unknown>
+      const recentRnkCount = rows.filter(
+        (r) =>
+          (r as { recentAvgRnk?: unknown }).recentAvgRnk != null &&
+          Number.isFinite(
+            Number((r as { recentAvgRnk?: unknown }).recentAvgRnk),
+          ),
+      ).length
+      const matchedHourCount = rows.filter(
+        (r) => Number((r as { hh24?: unknown }).hh24) === hour,
+      ).length
+      console.log(
+        `[stat-hourly DIAG] level=${level} customerId=${customerId} ids=${ids.length} rows=${rows.length} matchedHour(${hour})=${matchedHourCount} recentAvgRnkNonNull=${recentRnkCount}`,
+      )
+      console.log(
+        `[stat-hourly DIAG] sample keys=${Object.keys(sample).join(",")}`,
+      )
+      console.log(
+        `[stat-hourly DIAG] sample row=${JSON.stringify(sample).slice(0, 500)}`,
+      )
+    } else {
+      console.log(
+        `[stat-hourly DIAG] level=${level} customerId=${customerId} ids=${ids.length} rows=0 (응답 빈 배열 — Stats API 데이터 없음)`,
+      )
+    }
+
     // -- 3. 직전 시간 row 만 추출 --------------------------------------------
     const inputs: Array<NonNullable<ReturnType<typeof toUpsertInput>>> = []
     for (const row of rows) {
