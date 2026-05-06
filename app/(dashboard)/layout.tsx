@@ -101,25 +101,26 @@ export default async function DashboardLayout({
 
   return (
     <div className="flex flex-1 flex-col min-h-0">
-      {/* GNB */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b bg-background px-4">
-        <div className="flex items-center gap-4">
+      {/* GNB — 모바일에서 좌측 프로젝트명 / 우측 사용자명·role / "광고주 관리" 버튼은 숨김 */}
+      <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b bg-background px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-3 sm:gap-4">
           <Link
             href="/"
-            className="font-heading text-sm font-medium leading-none whitespace-nowrap"
+            className="hidden font-heading text-sm font-medium leading-none whitespace-nowrap sm:inline-block"
           >
             네이버 SA 어드민
           </Link>
           <AdvertiserSelector advertisers={advertisers} />
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 sm:gap-3">
+          <span className="hidden text-xs text-muted-foreground sm:inline">
             {me.displayName} · {me.role}
           </span>
           {me.role === "admin" ? (
             <Button
               variant="outline"
               size="sm"
+              className="hidden sm:inline-flex"
               render={<Link href="/admin/advertisers" />}
             >
               광고주 관리
