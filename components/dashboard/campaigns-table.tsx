@@ -467,13 +467,18 @@ export function CampaignsTable({
                   className="py-8 text-center text-muted-foreground"
                 >
                   {campaigns.length === 0 ? (
-                    <>
-                      표시할 캠페인이 없습니다. 우측 상단{" "}
-                      <span className="font-medium">동기화</span>{" "}
-                      버튼으로 SA에서 가져오세요.
-                    </>
+                    <div className="flex flex-col items-center gap-1.5">
+                      <p className="font-medium text-foreground">
+                        표시할 캠페인이 없습니다.
+                      </p>
+                      <p className="text-xs">
+                        우측 상단 동기화 버튼을 눌러 SA에서 가져오세요.
+                      </p>
+                    </div>
                   ) : (
-                    <>현재 필터에 일치하는 캠페인이 없습니다.</>
+                    <p className="font-medium text-foreground">
+                      현재 필터에 일치하는 캠페인이 없습니다.
+                    </p>
                   )}
                 </TableCell>
               </TableRow>

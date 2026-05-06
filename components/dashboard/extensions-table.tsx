@@ -94,6 +94,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { AdExtensionStatusBadge } from "@/components/dashboard/ad-extension-status-badge"
+import { EmptyState } from "@/components/dashboard/empty-state"
 import { ExtensionTypeBadge } from "@/components/dashboard/extension-type-badge"
 import { InspectStatusBadge } from "@/components/dashboard/inspect-status-badge"
 import {
@@ -1192,64 +1193,49 @@ export function ExtensionsTable({
         </div>
       ) : null}
 
-      {/* 다중 선택 일괄 액션 바 */}
-      <div
-        className={cn(
-          "flex items-center gap-2 rounded-lg border px-3 py-2",
-          selectedCount > 0
-            ? "border-sky-300 bg-sky-50 dark:border-sky-900/40 dark:bg-sky-900/10"
-            : "bg-muted/10",
-        )}
-      >
-        {selectedCount === 0 ? (
-          <span className="text-xs text-muted-foreground">
-            {hasKeys
-              ? "체크박스로 확장소재를 선택해 ON/OFF 일괄 액션을 적용하세요."
-              : "키 미설정 — 일괄 액션 비활성. admin 권한자가 키를 입력해야 합니다."}
+      {/* 다중 선택 일괄 액션 바 — selectedCount > 0 일 때만 노출 */}
+      {selectedCount > 0 ? (
+        <div className="flex items-center gap-2 rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 dark:border-sky-900/40 dark:bg-sky-900/10">
+          <span className="text-sm font-medium text-sky-900 dark:text-sky-200">
+            {selectedCount.toLocaleString()}개 선택됨
           </span>
-        ) : (
-          <>
-            <span className="text-sm font-medium text-sky-900 dark:text-sky-200">
-              {selectedCount.toLocaleString()}개 선택됨
-            </span>
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={clearSelection}
-              title="선택 해제"
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={clearSelection}
+            title="선택 해제"
+          >
+            선택 해제
+          </Button>
+          {overSelectionLimit && (
+            <span
+              role="alert"
+              className="text-xs font-medium text-destructive"
             >
-              선택 해제
+              최대 {BULK_ACTION_MAX}건까지 일괄 변경 가능 (현재{" "}
+              {selectedCount.toLocaleString()}건 — 선택 줄여주세요)
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => openBulkAction("toggleOn")}
+              disabled={overSelectionLimit || !hasKeys}
+            >
+              ON으로 변경
             </Button>
-            {overSelectionLimit && (
-              <span
-                role="alert"
-                className="text-xs font-medium text-destructive"
-              >
-                최대 {BULK_ACTION_MAX}건까지 일괄 변경 가능 (현재{" "}
-                {selectedCount.toLocaleString()}건 — 선택 줄여주세요)
-              </span>
-            )}
-          </>
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => openBulkAction("toggleOn")}
-            disabled={selectedCount === 0 || overSelectionLimit || !hasKeys}
-          >
-            ON으로 변경
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => openBulkAction("toggleOff")}
-            disabled={selectedCount === 0 || overSelectionLimit || !hasKeys}
-          >
-            OFF으로 변경
-          </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => openBulkAction("toggleOff")}
+              disabled={overSelectionLimit || !hasKeys}
+            >
+              OFF으로 변경
+            </Button>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {/* 가상 스크롤 테이블 */}
       <div
@@ -1258,15 +1244,12 @@ export function ExtensionsTable({
         className="relative max-h-[calc(100dvh-280px)] min-h-[320px] overflow-auto rounded-lg border"
       >
         {extensions.length === 0 ? (
-          <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
-            표시할 확장소재가 없습니다. 우측 상단{" "}
-            <span className="mx-1 font-medium">동기화</span> 버튼을
-            눌러 SA 에서 가져오세요. (광고그룹을 먼저 동기화해야 합니다.)
-          </div>
+          <EmptyState
+            title="표시할 확장소재가 없습니다."
+            description="우측 상단 동기화 버튼을 눌러 SA 에서 가져오세요. (광고그룹을 먼저 동기화해야 합니다.)"
+          />
         ) : rows.length === 0 ? (
-          <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
-            현재 필터에 일치하는 확장소재가 없습니다.
-          </div>
+          <EmptyState title="현재 필터에 일치하는 확장소재가 없습니다." />
         ) : (
           <table className="w-full caption-bottom text-sm" style={{ tableLayout: "fixed" }}>
             {/*

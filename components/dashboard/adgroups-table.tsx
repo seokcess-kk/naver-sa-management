@@ -545,14 +545,19 @@ export function AdgroupsTable({
                   className="py-8 text-center text-muted-foreground"
                 >
                   {adgroups.length === 0 ? (
-                    <>
-                      표시할 광고그룹이 없습니다. 우측 상단{" "}
-                      <span className="font-medium">동기화</span>{" "}
-                      버튼으로 SA 에서 가져오세요. (캠페인을 먼저 동기화해야
-                      합니다.)
-                    </>
+                    <div className="flex flex-col items-center gap-1.5">
+                      <p className="font-medium text-foreground">
+                        표시할 광고그룹이 없습니다.
+                      </p>
+                      <p className="text-xs">
+                        우측 상단 동기화 버튼을 눌러 SA 에서 가져오세요.
+                        (캠페인을 먼저 동기화해야 합니다.)
+                      </p>
+                    </div>
                   ) : (
-                    <>현재 필터에 일치하는 광고그룹이 없습니다.</>
+                    <p className="font-medium text-foreground">
+                      현재 필터에 일치하는 광고그룹이 없습니다.
+                    </p>
                   )}
                 </TableCell>
               </TableRow>

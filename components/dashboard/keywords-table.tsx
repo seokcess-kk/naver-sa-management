@@ -120,6 +120,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
+import { EmptyState } from "@/components/dashboard/empty-state"
 import { KeywordStatusBadge } from "@/components/dashboard/keyword-status-badge"
 import { InspectStatusBadge } from "@/components/dashboard/inspect-status-badge"
 import { KeywordsCsvImportModal } from "@/components/dashboard/keywords-csv-import-modal"
@@ -1888,111 +1889,78 @@ export function KeywordsTable({
         </div>
       ) : null}
 
-      {/* 변경 검토 바 (F-3.2 인라인 편집 staging 카운터) */}
-      <div
-        className={cn(
-          "flex items-center gap-2 rounded-lg border px-3 py-2",
-          staging.size > 0
-            ? "border-amber-300 bg-amber-50 dark:border-amber-900/40 dark:bg-amber-900/10"
-            : "bg-muted/10",
-        )}
-      >
-        {staging.size === 0 ? (
-          <span className="text-xs text-muted-foreground">
-            {hasKeys
-              ? "셀을 클릭해 인라인 편집을 시작하세요. 변경은 일괄 미리보기 후 적용됩니다."
-              : "키 미설정 — 인라인 편집 비활성. admin 권한자가 키를 입력해야 합니다."}
-          </span>
-        ) : (
+      {/* 변경 검토 바 — staging > 0 일 때만 노출 (사용 방법 안내는 헤더 ? 도움말로 분리됨) */}
+      {staging.size > 0 ? (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 dark:border-amber-900/40 dark:bg-amber-900/10">
           <span className="text-sm font-medium text-amber-900 dark:text-amber-200">
             미확정 변경 {staging.size}건
           </span>
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={revertAll}
-            disabled={staging.size === 0}
-          >
-            전체 되돌리기
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => setModalOpen(true)}
-            disabled={staging.size === 0 || !hasKeys}
-          >
-            변경 {staging.size}건 검토
-          </Button>
-        </div>
-      </div>
-
-      {/* 다중 선택 일괄 액션 바 (F-3.3) — F-3.2 인라인 편집 staging 카운터 바와 별도 영역 */}
-      <div
-        className={cn(
-          "flex items-center gap-2 rounded-lg border px-3 py-2",
-          selectedCount > 0
-            ? "border-sky-300 bg-sky-50 dark:border-sky-900/40 dark:bg-sky-900/10"
-            : "bg-muted/10",
-        )}
-      >
-        {selectedCount === 0 ? (
-          <span className="text-xs text-muted-foreground">
-            {hasKeys
-              ? "체크박스로 키워드를 선택해 일괄 액션을 적용하세요."
-              : "키 미설정 — 일괄 액션 비활성. admin 권한자가 키를 입력해야 합니다."}
-          </span>
-        ) : (
-          <>
-            <span className="text-sm font-medium text-sky-900 dark:text-sky-200">
-              {selectedCount.toLocaleString()}개 선택됨
-            </span>
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={clearSelection}
-              title="선택 해제"
-            >
-              선택 해제
+          <div className="ml-auto flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={revertAll}>
+              전체 되돌리기
             </Button>
-            {overSelectionLimit && (
-              <span
-                role="alert"
-                className="text-xs font-medium text-destructive"
-              >
-                최대 {BULK_ACTION_MAX}건까지 일괄 변경 가능 (현재{" "}
-                {selectedCount.toLocaleString()}건 — 선택 줄여주세요)
-              </span>
-            )}
-          </>
-        )}
-        <div className="ml-auto flex items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => openBulkAction("toggleOn")}
-            disabled={selectedCount === 0 || overSelectionLimit || !hasKeys}
-          >
-            ON으로 변경
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => openBulkAction("toggleOff")}
-            disabled={selectedCount === 0 || overSelectionLimit || !hasKeys}
-          >
-            OFF로 변경
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => openBulkAction("bid")}
-            disabled={selectedCount === 0 || overSelectionLimit || !hasKeys}
-          >
-            입찰가 변경
-          </Button>
+            <Button
+              size="sm"
+              onClick={() => setModalOpen(true)}
+              disabled={!hasKeys}
+            >
+              변경 {staging.size}건 검토
+            </Button>
+          </div>
         </div>
-      </div>
+      ) : null}
+
+      {/* 다중 선택 일괄 액션 바 — selectedCount > 0 일 때만 노출 */}
+      {selectedCount > 0 ? (
+        <div className="flex items-center gap-2 rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 dark:border-sky-900/40 dark:bg-sky-900/10">
+          <span className="text-sm font-medium text-sky-900 dark:text-sky-200">
+            {selectedCount.toLocaleString()}개 선택됨
+          </span>
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={clearSelection}
+            title="선택 해제"
+          >
+            선택 해제
+          </Button>
+          {overSelectionLimit && (
+            <span
+              role="alert"
+              className="text-xs font-medium text-destructive"
+            >
+              최대 {BULK_ACTION_MAX}건까지 일괄 변경 가능 (현재{" "}
+              {selectedCount.toLocaleString()}건 — 선택 줄여주세요)
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => openBulkAction("toggleOn")}
+              disabled={overSelectionLimit || !hasKeys}
+            >
+              ON으로 변경
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => openBulkAction("toggleOff")}
+              disabled={overSelectionLimit || !hasKeys}
+            >
+              OFF로 변경
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => openBulkAction("bid")}
+              disabled={overSelectionLimit || !hasKeys}
+            >
+              입찰가 변경
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {/* 가상 스크롤 테이블 */}
       <div
@@ -2001,15 +1969,12 @@ export function KeywordsTable({
         className="relative max-h-[calc(100dvh-280px)] min-h-[320px] overflow-auto rounded-lg border"
       >
         {keywords.length === 0 ? (
-          <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
-            표시할 키워드가 없습니다. 우측 상단{" "}
-            <span className="mx-1 font-medium">동기화</span> 버튼을
-            눌러 SA 에서 가져오세요. (광고그룹을 먼저 동기화해야 합니다.)
-          </div>
+          <EmptyState
+            title="표시할 키워드가 없습니다."
+            description="우측 상단 동기화 버튼을 눌러 SA 에서 가져오세요. (광고그룹을 먼저 동기화해야 합니다.)"
+          />
         ) : rows.length === 0 ? (
-          <div className="flex h-32 items-center justify-center text-sm text-muted-foreground">
-            현재 필터에 일치하는 키워드가 없습니다.
-          </div>
+          <EmptyState title="현재 필터에 일치하는 키워드가 없습니다." />
         ) : (
           <table className="w-full caption-bottom text-sm" style={{ tableLayout: "fixed" }}>
             {/*

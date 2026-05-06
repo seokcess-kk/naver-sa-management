@@ -20,7 +20,7 @@ import { Loader2Icon } from "lucide-react"
 
 export default function AdvertiserLoading() {
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       {/* breadcrumb + PageHeader skeleton */}
       <div className="flex flex-col gap-3">
         <div className="h-3 w-40 animate-pulse rounded bg-muted" />

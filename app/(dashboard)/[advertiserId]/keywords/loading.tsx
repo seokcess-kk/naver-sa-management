@@ -18,7 +18,7 @@ import { Loader2Icon } from "lucide-react"
 
 export default function KeywordsLoading() {
   return (
-    <div className="flex flex-col gap-4 p-6">
+    <div className="flex flex-col gap-6 p-4 md:p-6">
       {/* breadcrumb + PageHeader skeleton */}
       <div className="flex flex-col gap-3">
         <div className="h-3 w-40 animate-pulse rounded bg-muted" />
@@ -34,24 +34,22 @@ export default function KeywordsLoading() {
         </div>
       </div>
 
-      {/* toolbar skeleton — 검색 + 필터 select 6개 + 우측 기간/카운터 */}
+      {/* 1차 toolbar skeleton — 검색 + 광고그룹 + 필터 + 초기화 + 우측 기간/카운터 */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/10 px-3 py-2">
         <div className="h-8 w-48 animate-pulse rounded bg-muted" />
-        <div className="h-8 w-28 animate-pulse rounded bg-muted" />
-        <div className="h-8 w-28 animate-pulse rounded bg-muted" />
-        <div className="h-8 w-28 animate-pulse rounded bg-muted" />
         <div className="h-8 w-56 animate-pulse rounded bg-muted" />
-        <div className="h-8 w-32 animate-pulse rounded bg-muted" />
-        <div className="h-8 w-36 animate-pulse rounded bg-muted" />
+        <div className="h-8 w-20 animate-pulse rounded bg-muted" />
+        <div className="h-8 w-16 animate-pulse rounded bg-muted" />
         <div className="ml-auto flex items-center gap-2">
           <div className="h-8 w-32 animate-pulse rounded bg-muted" />
           <div className="h-3 w-20 animate-pulse rounded bg-muted" />
         </div>
       </div>
 
-      {/* 변경 검토 바 + 일괄 액션 바 자리 (실제 페이지 2줄) */}
-      <div className="h-[42px] animate-pulse rounded-lg border bg-muted/10" />
-      <div className="h-[42px] animate-pulse rounded-lg border bg-muted/10" />
+      {/*
+       * staging / selection 바는 활성 시에만 노출 — skeleton 도 자리 예약 X.
+       * (이전: 84px 빈 자리 영구. 변경 후 0건 진입 시 해당 영역 사라짐.)
+       */}
 
       {/* 가상 스크롤 테이블 자리 — 실제 페이지와 동일한 max/min 높이. swap 시 시프트 최소. */}
       <div
