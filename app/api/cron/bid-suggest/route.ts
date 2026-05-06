@@ -148,13 +148,13 @@ type BudgetSuggestionStats = {
   dismissed: number
 }
 
-type BudgetConfig = {
+export type BudgetConfig = {
   budgetPacingMode: "focus" | "explore" | "protect"
   targetCpa: number | null
   targetRoas: Prisma.Decimal | number | null
 }
 
-type BudgetDecision =
+export type BudgetDecision =
   | {
       decision: "suggest"
       reasonCode: string
@@ -168,12 +168,12 @@ type BudgetDecision =
       reasonCode: string
     }
 
-function roundBudget(v: number): number {
+export function roundBudget(v: number): number {
   if (!Number.isFinite(v)) return 0
   return Math.max(0, Math.round(v / 1000) * 1000)
 }
 
-function clampBudgetChange(
+export function clampBudgetChange(
   currentBudget: number,
   suggestedBudget: number,
   mode: BudgetConfig["budgetPacingMode"],
@@ -185,7 +185,7 @@ function clampBudgetChange(
   return roundBudget(Math.min(max, Math.max(min, suggestedBudget)))
 }
 
-function decideBudgetSuggestion(input: {
+export function decideBudgetSuggestion(input: {
   campaignName: string
   currentDailyBudget: number
   costYesterday: number
