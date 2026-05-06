@@ -1,9 +1,19 @@
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+
 import type { NextConfig } from "next"
 import { withSentryConfig } from "@sentry/nextjs"
 
+// next.config.ts 파일 자체 위치 기준 — 부모 `solution/` 디렉터리에 다른
+// 프로젝트들이 함께 있어 Turbopack 의 lockfile lookup 이 root 를 부모로
+// 잘못 잡고 모듈 해석에 실패하는 것을 방지한다 (Tailwind 4 `@import "tailwindcss"`
+// 가 `solution/`에서 안 풀리는 증상). dev 서버 실행 위치와 무관하게 고정.
+const projectRoot = path.dirname(fileURLToPath(import.meta.url))
+
 const nextConfig: NextConfig = {
+  outputFileTracingRoot: projectRoot,
   turbopack: {
-    root: process.cwd(),
+    root: projectRoot,
   },
   experimental: {
     serverActions: {
