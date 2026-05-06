@@ -15,7 +15,7 @@
     },
     {
       "path": "/api/cron/stat-hourly",
-      "schedule": "5 * * * *"
+      "schedule": "35 * * * *"
     },
     {
       "path": "/api/cron/stat-cleanup",

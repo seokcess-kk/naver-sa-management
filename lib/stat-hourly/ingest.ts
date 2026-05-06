@@ -340,6 +340,49 @@ export async function ingestAdvertiserStatHourly(
       breakdown: "hh24",
     })
 
+    // -- 진단 로그 (TEMP — 16시 hour 매칭 0건 원인 식별용) -----------------------
+    // SA 응답에 hour 매칭 breakdown 이 들어오는지 / SLA 지연 케이스인지 확인.
+    // 첫 1건만 출력. 원인 확인 후 제거.
+    if (rows.length > 0) {
+      const sample = rows[0] as Record<string, unknown>
+      const breakdownsArr = (sample as { breakdowns?: unknown }).breakdowns
+      const bdNames = Array.isArray(breakdownsArr)
+        ? breakdownsArr
+            .map((b) =>
+              typeof b === "object" && b !== null
+                ? String((b as { name?: unknown }).name ?? "")
+                : "",
+            )
+            .join(", ")
+        : "(no breakdowns)"
+      const matchedBreakdownCount = rows.reduce((acc, r) => {
+        const bs = (r as { breakdowns?: unknown }).breakdowns
+        if (!Array.isArray(bs)) return acc
+        return (
+          acc +
+          bs.filter((b) => {
+            if (typeof b !== "object" || b === null) return false
+            const name = String((b as { name?: unknown }).name ?? "")
+            return parseBreakdownHour(name) === hour
+          }).length
+        )
+      }, 0)
+      const recentRnkPositive = rows.filter((r) => {
+        const v = Number((r as { recentAvgRnk?: unknown }).recentAvgRnk)
+        return Number.isFinite(v) && v > 0
+      }).length
+      console.log(
+        `[stat-hourly DIAG] level=${level} customerId=${customerId} ids=${ids.length} rows=${rows.length} matchedBreakdownHour(${hour})=${matchedBreakdownCount} recentAvgRnkPositive=${recentRnkPositive}`,
+      )
+      console.log(
+        `[stat-hourly DIAG] sample breakdowns names=[${bdNames}]`,
+      )
+    } else {
+      console.log(
+        `[stat-hourly DIAG] level=${level} customerId=${customerId} ids=${ids.length} rows=0 (응답 빈 배열 — Stats API 데이터 없음)`,
+      )
+    }
+
     // -- 3-A. Keyword.recentAvgRnk 갱신 (F-9.4) -------------------------------
     // SA Stats API 응답 형식 관찰 결과:
     //   - row level: { id, impCnt, clkCnt, salesAmt, recentAvgRnk, breakdowns: [...] }
