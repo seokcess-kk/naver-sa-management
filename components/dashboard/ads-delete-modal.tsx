@@ -151,7 +151,7 @@ export function AdsDeleteModal({
           <DialogTitle>소재 삭제</DialogTitle>
           <DialogDescription>
             {step === "confirm" &&
-              "이 작업은 되돌릴 수 없습니다 (P1 비대상). 삭제할 소재의 nccAdId 를 다시 입력해 확인하세요."}
+              "이 작업은 되돌릴 수 없습니다. 잘못된 행을 막기 위해 소재 ID 를 다시 입력해 확인하세요."}
             {step === "submitting" && "소재를 삭제하고 있습니다..."}
             {step === "result" &&
               (result?.ok
@@ -234,7 +234,7 @@ function ConfirmView({
         role="alert"
         className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive"
       >
-        이 작업은 되돌릴 수 없습니다 (P1 롤백 비대상).
+        이 작업은 되돌릴 수 없습니다.
       </div>
 
       {/* 삭제 대상 정보 */}
@@ -252,7 +252,7 @@ function ConfirmView({
             )}
           </span>
           <span className="font-mono text-[11px] text-muted-foreground">
-            nccAdId: {row.nccAdId}
+            소재 ID: {row.nccAdId}
           </span>
           <span className="text-xs text-muted-foreground">
             광고그룹: {row.adgroupName}
@@ -263,7 +263,7 @@ function ConfirmView({
       {/* 2차 확인 입력 */}
       <div className="flex flex-col gap-1.5">
         <Label htmlFor="delete-ad-confirmText" className="text-sm">
-          확인을 위해 nccAdId 를 다시 입력하세요
+          확인을 위해 위 소재 ID 를 다시 입력하세요
         </Label>
         <Input
           id="delete-ad-confirmText"
@@ -284,7 +284,7 @@ function ConfirmView({
         />
         {showMismatchError && (
           <p className="text-[11px] text-destructive">
-            ID 가 일치하지 않습니다. 위에 표시된 nccAdId 와 정확히 동일하게
+            ID 가 일치하지 않습니다. 위에 표시된 소재 ID 와 정확히 동일하게
             입력하세요.
           </p>
         )}
@@ -332,13 +332,13 @@ function SuccessView({
       <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-900/10 dark:text-emerald-300">
         <div className="font-medium">소재 삭제 완료</div>
         <div className="mt-0.5 font-mono text-[11px] text-emerald-800 dark:text-emerald-400">
-          nccAdId: {nccAdId}
+          소재 ID: {nccAdId}
         </div>
       </div>
 
       {noBatch ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-300">
-          이미 삭제된 소재 — 변경 없음 (변경 사항 없음).
+          이미 삭제된 소재 — 변경 사항이 없습니다.
         </div>
       ) : (
         <>

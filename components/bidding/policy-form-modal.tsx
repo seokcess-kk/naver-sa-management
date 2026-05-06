@@ -83,8 +83,8 @@ export function PolicyFormModal({
           </DialogTitle>
           <DialogDescription>
             {mode === "create"
-              ? "키워드 + device 단위로 목표 노출 순위 정책을 등록합니다. 자동 조정 cron(F-11.2)이 매시간 본 정책을 기준으로 입찰가를 조정합니다."
-              : "변경 가능 필드는 목표 순위 / maxBid / minBid / 활성 여부입니다. 키워드 / device 변경은 새 정책 추가 + 기존 삭제로 처리하세요."}
+              ? "키워드 + 디바이스(PC/모바일) 단위로 목표 노출 순위 정책을 등록합니다. 매시간 자동으로 본 정책을 기준으로 입찰가가 조정됩니다."
+              : "변경 가능 항목: 목표 순위 / 입찰 상한 / 입찰 하한 / 활성 여부. 키워드 또는 디바이스를 바꾸려면 새 정책을 추가하고 기존 정책을 삭제하세요."}
           </DialogDescription>
         </DialogHeader>
 

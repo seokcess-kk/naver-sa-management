@@ -160,7 +160,7 @@ export function ExtensionsDeleteModal({
           <DialogTitle>확장소재 삭제</DialogTitle>
           <DialogDescription>
             {step === "confirm" &&
-              "이 작업은 되돌릴 수 없습니다 (P1 비대상). 삭제할 확장소재의 텍스트를 다시 입력해 확인하세요."}
+              "이 작업은 되돌릴 수 없습니다. 잘못된 행을 막기 위해 확장소재 텍스트를 다시 입력해 확인하세요."}
             {step === "submitting" && "확장소재를 삭제하고 있습니다..."}
             {step === "result" &&
               (result?.ok
@@ -246,7 +246,7 @@ function ConfirmView({
         : row.type === "description"
           ? "추가설명 텍스트"
           : "확장소재 텍스트"
-      : "nccExtId"
+      : "확장소재 ID"
 
   return (
     <div className="flex flex-col gap-4">
@@ -255,7 +255,7 @@ function ConfirmView({
         role="alert"
         className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive"
       >
-        이 작업은 되돌릴 수 없습니다 (P1 롤백 비대상).
+        이 작업은 되돌릴 수 없습니다.
       </div>
 
       {/* 삭제 대상 정보 */}
@@ -273,7 +273,7 @@ function ConfirmView({
             )}
           </div>
           <span className="font-mono text-[11px] text-muted-foreground">
-            nccExtId: {row.nccExtId}
+            확장소재 ID: {row.nccExtId}
           </span>
           <span className="text-xs text-muted-foreground">
             광고그룹: {row.adgroupName}
@@ -352,7 +352,7 @@ function SuccessView({
       <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-900/10 dark:text-emerald-300">
         <div className="font-medium">확장소재 삭제 완료</div>
         <div className="mt-0.5 font-mono text-[11px] text-emerald-800 dark:text-emerald-400">
-          nccExtId: {nccExtId}
+          확장소재 ID: {nccExtId}
         </div>
       </div>
 

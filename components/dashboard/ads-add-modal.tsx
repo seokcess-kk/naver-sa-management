@@ -621,7 +621,7 @@ function ResultView({ result }: { result: CreateAdsBatchResult }) {
         <div className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900 dark:border-emerald-900/40 dark:bg-emerald-900/10 dark:text-emerald-300">
           <div className="font-medium">소재 생성 완료</div>
           <div className="mt-0.5 font-mono text-[11px] text-emerald-800 dark:text-emerald-400">
-            nccAdId: {item0.nccAdId}
+            소재 ID: {item0.nccAdId}
           </div>
         </div>
       )}
