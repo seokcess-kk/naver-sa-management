@@ -242,6 +242,25 @@ const STATS_FIELDS: StatsField[] = [
   "recentAvgRnk",
 ]
 
+/**
+ * SA Stats API breakdown=hh24 응답의 라벨을 시간(0..23)으로 파싱.
+ *
+ * 응답 형식: row.breakdowns: [{ name: "09시~10시", clkCnt, impCnt, salesAmt }, ...]
+ * 라벨 컨벤션: "HH시~HH+1시" 는 HH 시간대 데이터를 의미한다.
+ *   "00시~01시" → 0
+ *   "09시~10시" → 9
+ *   "23시~00시" → 23
+ *
+ * 매칭 실패(미상 형식)는 null — 호출부 skip.
+ */
+export function parseBreakdownHour(name: string): number | null {
+  const m = /^\s*(\d{1,2})시~/u.exec(name)
+  if (!m) return null
+  const h = Number(m[1])
+  if (!Number.isFinite(h) || h < 0 || h > 23) return null
+  return h
+}
+
 export type IngestAdvertiserHourlyArgs = {
   advertiserId: string
   customerId: string
@@ -263,8 +282,10 @@ export type IngestAdvertiserHourlyResult = {
  * 흐름:
  *   1. 활성 캠페인/광고그룹/키워드 nccId 수집 (status='on' 만)
  *   2. level 별 분리 호출 (Stats API getStatsChunked, breakdown=hh24, timeRange=같은 날짜)
- *   3. row.hh24 === hour 인 row 만 추출 → toUpsertInput → chunk 100 $transaction upsert
- *   4. keyword level row 중 recentAvgRnk non-null 만 모아 Keyword.recentAvgRnk 갱신
+ *   3-A. keyword level row 의 row level recentAvgRnk > 0 만 모아 Keyword.recentAvgRnk 갱신
+ *        (시간대별 순위는 SA 미제공 — 일별 합산 평균만 사용)
+ *   3-B. row.breakdowns 배열에서 라벨 시간(`HH시~HH+1시`) === hour 인 항목만 추출 →
+ *        toUpsertInput → chunk 100 $transaction upsert
  *
  * 실패 정책:
  *   - 어느 단계든 throw → 호출부(cron route) 가 try/catch 로 다음 광고주 진행
@@ -319,59 +340,64 @@ export async function ingestAdvertiserStatHourly(
       breakdown: "hh24",
     })
 
-    // -- 진단 로그 (TEMP — recentAvgRnk null 원인 식별용) -----------------------
-    // SA Stats API 응답에 recentAvgRnk 가 들어오는지 / 어느 hh24 가 오는지 확인.
-    // 첫 1건만 출력 (반복 폭주 방지). 원인 확인 후 제거.
-    if (rows.length > 0) {
-      const sample = rows[0] as Record<string, unknown>
-      const recentRnkCount = rows.filter(
-        (r) =>
-          (r as { recentAvgRnk?: unknown }).recentAvgRnk != null &&
-          Number.isFinite(
-            Number((r as { recentAvgRnk?: unknown }).recentAvgRnk),
-          ),
-      ).length
-      const matchedHourCount = rows.filter(
-        (r) => Number((r as { hh24?: unknown }).hh24) === hour,
-      ).length
-      console.log(
-        `[stat-hourly DIAG] level=${level} customerId=${customerId} ids=${ids.length} rows=${rows.length} matchedHour(${hour})=${matchedHourCount} recentAvgRnkNonNull=${recentRnkCount}`,
-      )
-      console.log(
-        `[stat-hourly DIAG] sample keys=${Object.keys(sample).join(",")}`,
-      )
-      console.log(
-        `[stat-hourly DIAG] sample row=${JSON.stringify(sample).slice(0, 500)}`,
-      )
-    } else {
-      console.log(
-        `[stat-hourly DIAG] level=${level} customerId=${customerId} ids=${ids.length} rows=0 (응답 빈 배열 — Stats API 데이터 없음)`,
-      )
+    // -- 3-A. Keyword.recentAvgRnk 갱신 (F-9.4) -------------------------------
+    // SA Stats API 응답 형식 관찰 결과:
+    //   - row level: { id, impCnt, clkCnt, salesAmt, recentAvgRnk, breakdowns: [...] }
+    //   - row.recentAvgRnk 는 일별 합산 평균 순위 (시간대별 분해 X — breakdowns 안에 없음)
+    //   - SA 가 데이터 부족 시 0 으로 회신 (정상 순위는 1~10 범위). 0 / 음수 / null 은
+    //     "측정 불가" 로 간주하고 갱신 안 함 — 운영 누적 후 자연 채워질 때까지 기존 값 유지.
+    // hh24 분기와 무관하게 row level 값 사용. 직전 시간 적재(3-B) 와 별개로 처리.
+    if (level === "keyword") {
+      for (const row of rows) {
+        const id = typeof row.id === "string" ? row.id : ""
+        if (id.length === 0) continue
+        const rnk = Number(row.recentAvgRnk)
+        if (!Number.isFinite(rnk) || rnk <= 0) continue
+        keywordRanks.push({ nccKeywordId: id, rnk })
+      }
     }
 
-    // -- 3. 직전 시간 row 만 추출 --------------------------------------------
+    // -- 3-B. StatHourly 시간별 적재 (F-9.2) ----------------------------------
+    // SA breakdown=hh24 응답이 row 안에 `breakdowns: [{ name: "09시~10시", clkCnt,
+    // impCnt, salesAmt }, ...]` 배열로 시간별 분해를 제공. 각 breakdown 의 라벨 시간이
+    // 직전 정시(hour) 와 일치하는 항목만 추출 → StatHourly upsert.
+    //
+    // breakdown 항목에 recentAvgRnk 는 없음 — null 로 둔다 (시간대별 순위는 SA 미제공).
+    // 다른 시간대 항목은 매시간 cron 다음 사이클이 자기 시간 슬롯을 채움.
     const inputs: Array<NonNullable<ReturnType<typeof toUpsertInput>>> = []
     for (const row of rows) {
-      // hh24: string "00".."23" 또는 number → Number 변환 후 비교
-      const hh = Number((row as { hh24?: unknown }).hh24)
-      if (!Number.isFinite(hh) || hh !== hour) {
-        // 직전 시간 외 row 는 매시간 cron 의 다른 시간 적재가 책임
-        continue
-      }
-      const inp = toUpsertInput({ advertiserId, date, hour, level, row })
-      if (inp === null) {
-        rowsSkipped++
-        continue
-      }
-      inputs.push(inp)
+      const id = typeof row.id === "string" ? row.id : ""
+      if (id.length === 0) continue
+      const breakdowns = (row as { breakdowns?: unknown }).breakdowns
+      if (!Array.isArray(breakdowns)) continue
 
-      // keyword level + recentAvgRnk non-null → Keyword 갱신 큐
-      if (level === "keyword") {
-        const id = typeof row.id === "string" ? row.id : ""
-        const rnk = row.recentAvgRnk
-        if (id.length > 0 && rnk != null && Number.isFinite(Number(rnk))) {
-          keywordRanks.push({ nccKeywordId: id, rnk: Number(rnk) })
+      for (const bd of breakdowns) {
+        if (typeof bd !== "object" || bd === null) continue
+        const b = bd as Record<string, unknown>
+        const name = typeof b.name === "string" ? b.name : ""
+        const bdHour = parseBreakdownHour(name)
+        if (bdHour === null || bdHour !== hour) continue
+
+        // breakdown row → toUpsertInput 호환 형태로 합성 (id 는 row level 공유).
+        const synthRow: StatsRow = {
+          id,
+          impCnt: typeof b.impCnt === "number" ? b.impCnt : 0,
+          clkCnt: typeof b.clkCnt === "number" ? b.clkCnt : 0,
+          salesAmt: typeof b.salesAmt === "number" ? b.salesAmt : 0,
+          recentAvgRnk: null, // 시간대별 순위 SA 미제공
         }
+        const inp = toUpsertInput({
+          advertiserId,
+          date,
+          hour: bdHour,
+          level,
+          row: synthRow,
+        })
+        if (inp === null) {
+          rowsSkipped++
+          continue
+        }
+        inputs.push(inp)
       }
     }
 
