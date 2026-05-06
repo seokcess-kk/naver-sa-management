@@ -470,18 +470,33 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
 
   // -- a-2. stat-daily stale 차단 (Phase 7) --------------------------------
   // 본 cron 은 StatDaily 7d groupBy 결과에 권고를 의존 — 적재가 정체된 광고주는
-  // 잘못된 권고 생성 위험. lastSyncAt 은 stat 키 미보유 (5종 sync 만 추적) →
-  // StatDaily.updatedAt 광고주별 max 로 stale 판정.
-  // 신규 광고주 (StatDaily 0행) 는 skip 안 함 — baseline 가드(KeywordPerformanceProfile
+  // 잘못된 권고 생성 위험.
+  //   1순위: Advertiser.lastSyncAt['stat_daily'] (stat-daily cron 적재 성공 시 갱신).
+  //   2순위(fallback): StatDaily.updatedAt 광고주별 max — lastSyncAt 키 도입 전
+  //     광고주 호환. 모든 광고주에 키가 채워지면 자연 소멸.
+  // 신규 광고주 (어느 쪽도 없음) → skip 안 함. baseline 가드(KeywordPerformanceProfile
   // dataDays=0) 가 따로 처리.
-  const lastStat = await prisma.statDaily.findFirst({
-    where: { advertiserId },
-    select: { updatedAt: true },
-    orderBy: { updatedAt: "desc" },
+  const adv = await prisma.advertiser.findUnique({
+    where: { id: advertiserId },
+    select: { lastSyncAt: true },
   })
-  if (lastStat?.updatedAt) {
+  const lastSyncMap =
+    adv?.lastSyncAt && typeof adv.lastSyncAt === "object" && !Array.isArray(adv.lastSyncAt)
+      ? (adv.lastSyncAt as Record<string, string>)
+      : {}
+  const lastStatIso = lastSyncMap["stat_daily"]
+  let lastStatTime: Date | null = lastStatIso ? new Date(lastStatIso) : null
+  if (!lastStatTime) {
+    const lastStat = await prisma.statDaily.findFirst({
+      where: { advertiserId },
+      select: { updatedAt: true },
+      orderBy: { updatedAt: "desc" },
+    })
+    lastStatTime = lastStat?.updatedAt ?? null
+  }
+  if (lastStatTime) {
     const ageHours =
-      (Date.now() - lastStat.updatedAt.getTime()) / (1000 * 60 * 60)
+      (Date.now() - lastStatTime.getTime()) / (1000 * 60 * 60)
     if (ageHours > STAT_STALENESS_HOURS) {
       stats.stale = true
       return stats

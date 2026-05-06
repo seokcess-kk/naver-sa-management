@@ -29,6 +29,7 @@ export type SyncKind =
   | "keywords"
   | "ads"
   | "extensions"
+  | "stat_daily"
 
 /** SyncKind 의 모든 값 (런타임 enum 보강 — 호출부 typo 가드). */
 export const SYNC_KINDS: readonly SyncKind[] = [
@@ -37,6 +38,7 @@ export const SYNC_KINDS: readonly SyncKind[] = [
   "keywords",
   "ads",
   "extensions",
+  "stat_daily",
 ] as const
 
 /**

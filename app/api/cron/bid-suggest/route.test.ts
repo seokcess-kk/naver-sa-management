@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const mockAdvertiserFindMany = vi.fn()
+const mockAdvertiserFindUnique = vi.fn()
 const mockBidAutomationConfigFindUnique = vi.fn()
 const mockKeywordPerformanceProfileFindUnique = vi.fn()
 const mockBiddingPolicyFindMany = vi.fn()
@@ -25,6 +26,7 @@ vi.mock("@/lib/db/prisma", () => ({
   prisma: {
     advertiser: {
       findMany: (...args: unknown[]) => mockAdvertiserFindMany(...args),
+      findUnique: (...args: unknown[]) => mockAdvertiserFindUnique(...args),
     },
     bidAutomationConfig: {
       findUnique: (...args: unknown[]) =>
@@ -103,6 +105,8 @@ beforeEach(() => {
   mockKeywordPerformanceProfileFindUnique.mockResolvedValue(null)
   mockBiddingPolicyFindMany.mockResolvedValue([])
   mockKeywordFindMany.mockResolvedValue([])
+  // 기본: lastSyncAt 키 미보유 (fallback 경로 검증) — StatDaily.updatedAt 으로 판정.
+  mockAdvertiserFindUnique.mockResolvedValue({ lastSyncAt: {} })
   // 기본: fresh stat (1시간 전) — Phase 7 stale 가드 통과.
   mockStatDailyFindFirst.mockResolvedValue({
     updatedAt: new Date(Date.now() - 60 * 60 * 1000),
@@ -424,6 +428,35 @@ describe("cron bid-suggest — stat-daily stale 차단", () => {
     expect(body.ok).toBe(true)
     expect(body.advertisersStale).toBe(0)
     // 정상 진입 — budget 흐름은 default mock 으로 진행.
+    expect(body.budgetCampaignsScanned).toBe(1)
+  })
+
+  it("lastSyncAt['stat_daily'] 31시간 전 → stale (StatDaily fallback 미호출)", async () => {
+    mockAdvertiserFindUnique.mockResolvedValue({
+      lastSyncAt: { stat_daily: new Date(Date.now() - 31 * 60 * 60 * 1000).toISOString() },
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.advertisersStale).toBe(1)
+    expect(body.budgetCampaignsScanned).toBe(0)
+    // lastSyncAt 우선 — StatDaily fallback 호출 안 됨.
+    expect(mockStatDailyFindFirst).not.toHaveBeenCalled()
+  })
+
+  it("lastSyncAt['stat_daily'] 5시간 전 + StatDaily.updatedAt 31시간 전 → fresh (lastSyncAt 우선)", async () => {
+    mockAdvertiserFindUnique.mockResolvedValue({
+      lastSyncAt: { stat_daily: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString() },
+    })
+    mockStatDailyFindFirst.mockResolvedValue({
+      updatedAt: new Date(Date.now() - 31 * 60 * 60 * 1000),
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.advertisersStale).toBe(0)
     expect(body.budgetCampaignsScanned).toBe(1)
   })
 })
