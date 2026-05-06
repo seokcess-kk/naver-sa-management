@@ -413,8 +413,8 @@ export function ApprovalQueueTable({
             <DialogTitle>선택 승인 — 미리보기</DialogTitle>
             <DialogDescription>
               선택한 신규 키워드 후보를 변경 작업으로 적재합니다.
-              cron(`/api/batch/run`) 이 1분 간격으로 픽업해 SA API 로
-              키워드를 등록합니다 (수 분 내 처리).
+              백그라운드에서 1분 간격으로 처리되어 네이버 SA 에 키워드가
+              등록됩니다 (수 분 내 반영).
             </DialogDescription>
           </DialogHeader>
 

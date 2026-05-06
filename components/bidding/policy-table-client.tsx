@@ -160,8 +160,8 @@ export function PolicyTableClient({
         <div className="rounded-md border bg-muted/20 px-4 py-12 text-center">
           <p className="text-sm font-medium">아직 비딩 정책이 없습니다</p>
           <p className="mt-1 text-xs text-muted-foreground">
-            키워드를 선택해 PC / MOBILE 별 목표 노출 순위 정책을 추가하세요.
-            자동 조정 cron(F-11.2)이 매시간 정책을 픽업합니다.
+            키워드를 선택해 PC / 모바일 별 목표 노출 순위 정책을 추가하세요.
+            매시간 자동으로 입찰가가 조정됩니다.
           </p>
           {canMutate && (
             <div className="mt-4">

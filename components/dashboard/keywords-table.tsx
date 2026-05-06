@@ -1659,7 +1659,7 @@ export function KeywordsTable({
               API 키 미설정
             </CardTitle>
             <CardDescription>
-              이 광고주는 API 키 / Secret 키가 입력되지 않았습니다. SA API 호출
+              이 광고주는 API 키 / Secret 키가 입력되지 않았습니다. 네이버 SA 호출
               (동기화 / 인라인 편집)이 차단됩니다. admin 권한자가 광고주 상세
               화면에서 키를 입력하면 활성화됩니다.
             </CardDescription>
@@ -2649,9 +2649,9 @@ function BulkActionInputForm({
       )}
 
       <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-300">
-        ⓘ 그룹입찰가 사용중인 행은 광고그룹 기본 입찰가를 baseline 으로 계산.
-        광고그룹 기본 입찰가도 없는 행은 미리보기에서 skip 표시되며, 적용
-        시점에도 적용되지 않습니다.
+        ⓘ 그룹 입찰가를 사용 중인 키워드는 광고그룹 기본 입찰가를 기준으로
+        계산합니다. 광고그룹 기본 입찰가도 없는 행은 미리보기에서 스킵 표시되며
+        적용되지 않습니다.
       </p>
 
       <div className="flex justify-end">

@@ -105,13 +105,13 @@ export default async function TargetingPage({
       <Card size="sm">
         <CardHeader className="border-b">
           <CardTitle className="text-sky-700 dark:text-sky-400">
-            본 룰의 적용 흐름
+            적용 흐름
           </CardTitle>
           <CardDescription>
-            본 가중치는 자동 비딩 cron(F-11.2)이 정책별 입찰가 계산 시
-            <strong> baseBid × hourWeight × deviceWeight</strong> 형태로
-            곱합니다. 룰 비활성화 시 모든 가중은 1.0 (효과 없음). 키 누락 시
-            기본 가중치가 적용됩니다.
+            자동 비딩이 매시간 입찰가를 계산할 때
+            <strong> 기본 입찰가 × 시간대 가중치 × 디바이스 가중치</strong> 로
+            곱해 적용됩니다. 룰을 비활성화하면 모든 가중치가 1.0 (효과 없음)
+            으로 동작하고, 빈 셀은 기본 가중치가 적용됩니다.
           </CardDescription>
         </CardHeader>
       </Card>
@@ -119,12 +119,12 @@ export default async function TargetingPage({
       <Card size="sm">
         <CardHeader className="border-b">
           <CardTitle className="text-amber-700 dark:text-amber-400">
-            지역 가중치는 모델만 보존됩니다
+            지역 가중치는 아직 자동 적용되지 않습니다
           </CardTitle>
           <CardDescription>
-            본 PR 자동 비딩 미적용 — 네이버 SA API 응답에 키워드별 노출 지역
-            정보가 분리되지 않아 매칭이 불가합니다. 모델·UI 만 보존하며 SA API
-            확장 시 후속 PR 에서 통합됩니다.
+            네이버 SA API 응답에 키워드별 노출 지역 정보가 분리되어 오지 않아
+            매칭이 어렵습니다. 모델과 입력 UI 는 보존하며, SA 응답이 확장되는
+            시점에 자동 적용으로 전환됩니다.
           </CardDescription>
         </CardHeader>
       </Card>

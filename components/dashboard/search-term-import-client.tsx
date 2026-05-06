@@ -427,7 +427,8 @@ export function SearchTermImportClient({
               <div>
                 <CardTitle className="text-base">분류 결과</CardTitle>
                 <CardDescription>
-                  광고주 baseline + 임계 룰 기반. 사유 코드별 분류 근거 표시.
+                  광고주 평균 성과 + 임계 룰 기반. 사유 코드별 분류 근거를
+                  표시합니다.
                 </CardDescription>
               </div>
               <div className="flex items-center gap-2">
@@ -540,9 +541,8 @@ export function SearchTermImportClient({
             <CardHeader>
               <CardTitle className="text-base">보고서 저장 (선택)</CardTitle>
               <CardDescription>
-                분석 결과를 SearchTermReport 로 적재합니다. 동일 광고주 +
-                동일 주차는 덮어쓰기 (upsert). 후속 PR (Phase D.4) 의 Approval
-                Queue 적재 cron 이 본 행을 픽업합니다.
+                분석 결과를 보고서로 저장합니다. 같은 광고주 · 같은 주차는
+                덮어쓰기됩니다. 저장된 보고서는 이후 승인 큐로 자동 전달됩니다.
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap items-end gap-3">
@@ -604,12 +604,12 @@ function BaselineCard({ baseline }: { baseline: BaselineForDisplay }) {
           <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-amber-700 dark:text-amber-400" />
           <div className="space-y-1 text-xs">
             <p className="font-medium text-amber-900 dark:text-amber-200">
-              광고주 baseline (KeywordPerformanceProfile) 가 없습니다.
+              광고주 평균 성과 데이터가 아직 없습니다.
             </p>
             <p className="text-amber-800 dark:text-amber-300">
               &quot;CPA 매우 높음&quot; 분기는 비활성화됩니다 — 노출/클릭 기준
-              분류만 동작합니다. baseline 은 일 1회 cron 이 자동 갱신합니다
-              (Phase A.2). 충분한 데이터가 누적될 때까지 기다리거나 수동 트리거.
+              분류만 동작합니다. 평균 성과는 매일 자동 갱신되며, 충분한 데이터가
+              누적될 때까지 기다려 주세요.
             </p>
           </div>
         </CardContent>

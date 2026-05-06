@@ -1152,7 +1152,7 @@ export function AdsTable({
               API 키 미설정
             </CardTitle>
             <CardDescription>
-              이 광고주는 API 키 / Secret 키가 입력되지 않았습니다. SA API 호출
+              이 광고주는 API 키 / Secret 키가 입력되지 않았습니다. 네이버 SA 호출
               (동기화 / 일괄 액션)이 차단됩니다. admin 권한자가 광고주 상세
               화면에서 키를 입력하면 활성화됩니다.
             </CardDescription>

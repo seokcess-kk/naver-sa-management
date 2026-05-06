@@ -739,17 +739,17 @@ function AlertRuleFormModalInner({
 
           {/* channelHint */}
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">channelHint (선택)</Label>
+            <Label className="text-xs">발송 채널 힌트 (선택)</Label>
             <Input
               value={channelHint}
               onChange={(e) => setChannelHint(e.target.value)}
-              placeholder="예: email, log (정식 채널 미정)"
+              placeholder="예: email, log"
               maxLength={64}
               className="w-full"
             />
             <p className="text-xs text-muted-foreground">
-              현재 정식 채널은 email(개발) / log(항상). 이 필드는 라우팅 힌트일
-              뿐 실제 발송 채널은 NotificationChannel 추상이 결정합니다.
+              실제 발송은 시스템이 결정합니다. 이 값은 라우팅 우선순위 힌트로만
+              사용됩니다 (현재 지원: email / log).
             </p>
           </div>
 

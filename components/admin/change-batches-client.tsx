@@ -255,7 +255,7 @@ export function ChangeBatchesClient({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">action</Label>
+            <Label className="text-xs">액션 코드</Label>
             <Input
               value={form.action}
               onChange={(e) =>
@@ -268,7 +268,7 @@ export function ChangeBatchesClient({
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">status</Label>
+            <Label className="text-xs">상태</Label>
             <Select
               value={form.status}
               onValueChange={(v) =>
