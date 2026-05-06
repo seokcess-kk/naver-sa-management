@@ -54,12 +54,21 @@ vi.mock("@/lib/db/prisma", () => ({
   },
 }))
 
-vi.mock("@/lib/auto-bidding/marginal-score", () => ({
-  decideMarginalSuggestion: vi.fn(() => ({
-    decision: "hold",
-    reason: "low_confidence_data",
-  })),
-}))
+vi.mock("@/lib/auto-bidding/marginal-score", async () => {
+  // 묶음 헬퍼는 실제 구현 필요 (cron 이 import) — bundleSuggestions 만 actual.
+  const actual = await vi.importActual<
+    typeof import("@/lib/auto-bidding/marginal-score")
+  >("@/lib/auto-bidding/marginal-score")
+  return {
+    ...actual,
+    decideMarginalSuggestion: vi.fn(() => ({
+      decision: "hold",
+      reason: "low_confidence_data",
+    })),
+  }
+})
+
+import { decideMarginalSuggestion as mockedDecideMarginal } from "@/lib/auto-bidding/marginal-score"
 
 import { GET } from "@/app/api/cron/bid-suggest/route"
 
@@ -170,5 +179,192 @@ describe("cron bid-suggest — budget suggestions", () => {
       where: { id: "s_existing", status: "pending" },
       data: { status: "dismissed" },
     })
+  })
+})
+
+// =============================================================================
+// 묶음 권고 — bid suggestion bundle path
+// =============================================================================
+//
+// 동일 광고그룹 + 동일 방향 + 동일 reasonCode 5개+ 균질 → 묶음 1건 (scope='adgroup').
+// baseline (KeywordPerformanceProfile) + StatDaily keyword level + Keyword 매핑까지
+// mock 채워야 bid 엔진 진입.
+
+describe("cron bid-suggest — keyword bundle suggestions", () => {
+  beforeEach(() => {
+    // baseline 채움 — bid 엔진 진입 가능.
+    mockKeywordPerformanceProfileFindUnique.mockResolvedValue({
+      dataDays: 28,
+      avgCtr: null,
+      avgCvr: null,
+      avgCpc: null,
+    })
+    // 캠페인 예산 권고는 비활성화 (캠페인 0건).
+    mockCampaignFindMany.mockResolvedValue([])
+    // bid 엔진용 stat groupBy (keyword level) — 5개 키워드, cost ↓ 정렬.
+    mockStatDailyGroupBy.mockImplementation(
+      (args: { where: { level: string } }) => {
+        if (args.where.level === "keyword") {
+          return Promise.resolve(
+            Array.from({ length: 5 }, (_, i) => ({
+              refId: `ncc_kw_${i}`,
+              _sum: {
+                impressions: 5000,
+                clicks: 100,
+                cost: 100_000,
+                conversions: 5,
+                revenue: 600_000, // ROAS 6.0 → up
+              },
+              _avg: { avgRnk: null },
+            })),
+          )
+        }
+        return Promise.resolve([])
+      },
+    )
+    // Keyword 5개 — 모두 같은 광고그룹.
+    mockKeywordFindMany.mockResolvedValue(
+      Array.from({ length: 5 }, (_, i) => ({
+        id: `kw_${i}`,
+        nccKeywordId: `ncc_kw_${i}`,
+        bidAmt: 1000,
+        useGroupBidAmt: false,
+        userLock: false,
+        adgroup: { id: "ag_1", name: "광고그룹 A" },
+      })),
+    )
+    // 자동화 config 에 targetRoas 추가 (ROAS 분기 활성).
+    mockBidAutomationConfigFindUnique.mockResolvedValue({
+      mode: "inbox",
+      budgetPacingMode: "focus",
+      targetCpa: null,
+      targetRoas: 4.0,
+      targetCpc: null,
+      maxCpc: null,
+      minCtr: null,
+      targetAvgRank: null,
+    })
+  })
+
+  it("5개 균질 키워드 → 묶음 BidSuggestion 1건 + 단건 0건", async () => {
+    // mock 을 실제 결정 로직으로 교체 (mock factory 의 actual 사용).
+    const actual = await vi.importActual<
+      typeof import("@/lib/auto-bidding/marginal-score")
+    >("@/lib/auto-bidding/marginal-score")
+    ;(mockedDecideMarginal as unknown as ReturnType<typeof vi.fn>)
+      .mockReset()
+      .mockImplementation(actual.decideMarginalSuggestion)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.keywordsScanned).toBe(5)
+    expect(body.bundlesCreated).toBe(1)
+    expect(body.singlesCreated).toBe(0)
+
+    // 묶음 BidSuggestion create payload 검증.
+    const bundleCalls = mockBidSuggestionCreate.mock.calls.filter(
+      (c) => c[0].data.scope === "adgroup",
+    )
+    expect(bundleCalls).toHaveLength(1)
+    const arg = bundleCalls[0][0]
+    expect(arg.data.engineSource).toBe("bid")
+    expect(arg.data.keywordId).toBeNull()
+    expect(arg.data.adgroupId).toBe("ag_1")
+    expect(arg.data.scope).toBe("adgroup")
+    expect(arg.data.affectedCount).toBe(5)
+    expect(arg.data.targetName).toBe("광고그룹 A")
+    expect(arg.data.action.kind).toBe("keyword_bid_bundle")
+    expect(arg.data.action.adgroupId).toBe("ag_1")
+    expect(arg.data.action.direction).toBe("up")
+    expect(arg.data.action.reasonCode).toBe("roas_target")
+    expect(arg.data.action.itemCount).toBe(5)
+    expect(Array.isArray(arg.data.itemsJson)).toBe(true)
+    expect(arg.data.itemsJson).toHaveLength(5)
+  })
+
+  it("4개 (임계 미만) → 단건 흐름 — bundlesCreated=0 / singlesCreated=4", async () => {
+    mockStatDailyGroupBy.mockImplementation(
+      (args: { where: { level: string } }) => {
+        if (args.where.level === "keyword") {
+          return Promise.resolve(
+            Array.from({ length: 4 }, (_, i) => ({
+              refId: `ncc_kw_${i}`,
+              _sum: {
+                impressions: 5000,
+                clicks: 100,
+                cost: 100_000,
+                conversions: 5,
+                revenue: 600_000,
+              },
+              _avg: { avgRnk: null },
+            })),
+          )
+        }
+        return Promise.resolve([])
+      },
+    )
+    mockKeywordFindMany.mockResolvedValue(
+      Array.from({ length: 4 }, (_, i) => ({
+        id: `kw_${i}`,
+        nccKeywordId: `ncc_kw_${i}`,
+        bidAmt: 1000,
+        useGroupBidAmt: false,
+        userLock: false,
+        adgroup: { id: "ag_1", name: "광고그룹 A" },
+      })),
+    )
+    const actual = await vi.importActual<
+      typeof import("@/lib/auto-bidding/marginal-score")
+    >("@/lib/auto-bidding/marginal-score")
+    ;(mockedDecideMarginal as unknown as ReturnType<typeof vi.fn>)
+      .mockReset()
+      .mockImplementation(actual.decideMarginalSuggestion)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.bundlesCreated).toBe(0)
+    expect(body.singlesCreated).toBe(4)
+
+    // 모든 create 가 scope='keyword' 인지 검증.
+    const created = mockBidSuggestionCreate.mock.calls.filter(
+      (c) => c[0].data.engineSource === "bid",
+    )
+    expect(created).toHaveLength(4)
+    for (const c of created) {
+      expect(c[0].data.scope).toBe("keyword")
+      expect(c[0].data.affectedCount).toBe(1)
+    }
+  })
+
+  it("기존 묶음 supersede — bundlesDismissed=1 (옵션 B 일괄 dismiss)", async () => {
+    // bundle supersede updateMany 가 affected count 1 반환하도록 모킹.
+    mockBidSuggestionUpdateMany.mockImplementation(
+      (args: { where: { scope?: string } }) => {
+        if (args.where.scope === "adgroup") return Promise.resolve({ count: 1 })
+        return Promise.resolve({ count: 0 })
+      },
+    )
+    const actual = await vi.importActual<
+      typeof import("@/lib/auto-bidding/marginal-score")
+    >("@/lib/auto-bidding/marginal-score")
+    ;(mockedDecideMarginal as unknown as ReturnType<typeof vi.fn>)
+      .mockReset()
+      .mockImplementation(actual.decideMarginalSuggestion)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.bundlesDismissed).toBe(1)
+
+    // updateMany 호출에 scope='adgroup' supersede 호출 포함됐는지 확인.
+    const supersedeCalls = mockBidSuggestionUpdateMany.mock.calls.filter(
+      (c) => c[0].where.scope === "adgroup",
+    )
+    expect(supersedeCalls).toHaveLength(1)
+    expect(supersedeCalls[0][0].data.status).toBe("dismissed")
+    expect(supersedeCalls[0][0].data.reason).toBe("superseded_by_new_bundle")
   })
 })

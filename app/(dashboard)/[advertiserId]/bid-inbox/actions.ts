@@ -51,10 +51,12 @@ import type {
   DecisionMetrics,
   SuggestAction,
 } from "@/lib/auto-bidding/marginal-score"
+import { BidSuggestionItemsSchema } from "@/lib/auto-bidding/schemas"
 import type { Prisma as PrismaTypes } from "@/lib/generated/prisma/client"
 import type {
   BidSuggestionSeverity,
   BidSuggestionSource,
+  SuggestionScope,
 } from "@/lib/generated/prisma/client"
 
 // =============================================================================
@@ -75,7 +77,18 @@ export type BidSuggestionRow = {
   action: BidSuggestionAction
   createdAt: string // ISO
   expiresAt: string // ISO
-  /** 키워드 메타 (engineSource='bid' 의 경우 항상 채워짐). null = 타게팅/예산 등 키워드 무관. */
+  /**
+   * 묶음/단건 구분 — Inbox 폭발 방지 (광고그룹/캠페인 1건이 N개 키워드 변경 표현).
+   *   keyword  : 단건 권고 (디폴트, 기존 흐름)
+   *   adgroup  : 광고그룹 단위 묶음 — itemsJson 의 N개 키워드 변경
+   *   campaign : 캠페인 단위 묶음 (P2 후속)
+   */
+  scope: SuggestionScope
+  /** 묶음 안 N개 키워드 카운트 (scope='keyword' 시 1). */
+  affectedCount: number
+  /** 묶음 표시명 — 광고그룹/캠페인 이름. scope='keyword' 시 null. */
+  targetName: string | null
+  /** 키워드 메타 (engineSource='bid' + scope='keyword' 의 경우 항상 채워짐). */
   keyword: {
     id: string
     nccKeywordId: string
@@ -163,6 +176,9 @@ export async function listBidSuggestions(
       action: true,
       createdAt: true,
       expiresAt: true,
+      scope: true,
+      affectedCount: true,
+      targetName: true,
       keyword: {
         select: {
           id: true,
@@ -194,6 +210,9 @@ export async function listBidSuggestions(
     action: r.action as unknown as BidSuggestionAction,
     createdAt: r.createdAt.toISOString(),
     expiresAt: r.expiresAt.toISOString(),
+    scope: r.scope,
+    affectedCount: r.affectedCount,
+    targetName: r.targetName,
     keyword: r.keyword
       ? {
           id: r.keyword.id,
@@ -1301,4 +1320,572 @@ export async function dismissBidSuggestions(
   revalidatePath(`/${advertiserId}/bid-inbox`)
 
   return { ok: true, data: { count: r.count } }
+}
+
+// =============================================================================
+// 5. approveBundleSuggestion — 묶음 권고 (scope='adgroup') 적용
+// =============================================================================
+
+export type ApproveBundleResult = {
+  /** 신규 ChangeBatch.id (감사 / UI 표시). */
+  batchId: string
+  /** ChangeItem 적재된 항목 수 (큐로 들어가 SA 호출 대기). */
+  applied: number
+  /** 모달 본 시점 vs 현재 bidAmt 가 어긋난 항목 수 — 자동 제외. */
+  skippedDrift: number
+  /** 이미 권고 입찰가와 동일한 항목 수 — 자동 제외 (no-op). */
+  skippedAlreadyApplied: number
+  /** userLock=true 또는 status='deleted' 항목 수 — 자동 제외. */
+  skippedLocked: number
+}
+
+/**
+ * 묶음 권고 (scope='adgroup') 부분 선택 적용.
+ *
+ * 입력:
+ *   - suggestionId : BidSuggestion.id (scope='adgroup' 만)
+ *   - selectedKeywordIds : 모달에서 체크된 keywordId 부분집합 (UI 가 보장)
+ *
+ * 흐름 (단건 approveBidSuggestions 와 일관 — 즉시 SA 호출 X / ChangeBatch 큐 적재):
+ *   1. 권한 검증 (viewer 차단)
+ *   2. BidSuggestion 로드 + 검증 (scope='adgroup' / status='pending' / engineSource='bid')
+ *   3. itemsJson Zod 검증
+ *   4. selectedKeywordIds ⊆ itemsJson.keywordId 부분집합 검증 (UI 버그 방어)
+ *   5. Keyword 일괄 조회 (advertiserId 한정)
+ *   6. 자동 제외 분류:
+ *      - skippedLocked         : userLock=true OR status='deleted'
+ *      - skippedAlreadyApplied : currentBid === afterBid (no-op)
+ *      - skippedDrift          : currentBid !== beforeBid (옵션 B — 자동 제외 + 토스트 표기)
+ *   7. ChangeBatch + ChangeItem 적재 (idempotencyKey 재시도 안전)
+ *   8. BidSuggestion.status='applied', appliedBatchId=batch.id
+ *   9. AuditLog
+ *  10. revalidatePath
+ *
+ * 후속 처리:
+ *   - /api/batch/run cron (action='bid_inbox.apply' 화이트리스트) 가 처리.
+ */
+export async function approveBundleSuggestion(input: {
+  advertiserId: string
+  suggestionId: string
+  selectedKeywordIds: string[]
+}): Promise<ActionResult<ApproveBundleResult>> {
+  // -- 입력 검증 --
+  let parsedSelectedIds: string[]
+  try {
+    advertiserIdSchema.parse(input.advertiserId)
+    z.string().trim().min(1).max(128).parse(input.suggestionId)
+    parsedSelectedIds = idsSchema.parse(input.selectedKeywordIds)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `잘못된 입력: ${msg}` }
+  }
+  parsedSelectedIds = Array.from(new Set(parsedSelectedIds))
+
+  // -- 권한 + 광고주 컨텍스트 --
+  const { advertiser, user } = await getCurrentAdvertiser(input.advertiserId)
+  if (user.role === "viewer") {
+    return { ok: false, error: "권한 부족 (viewer)" }
+  }
+  if (!advertiser.hasKeys) {
+    return {
+      ok: false,
+      error: "API 키/시크릿 미입력 — 적용 시 SA 호출 불가",
+    }
+  }
+
+  // -- BidSuggestion 로드 + 검증 --
+  const suggestion = await prisma.bidSuggestion.findFirst({
+    where: {
+      id: input.suggestionId,
+      advertiserId: input.advertiserId,
+    },
+    select: {
+      id: true,
+      engineSource: true,
+      scope: true,
+      status: true,
+      reason: true,
+      severity: true,
+      action: true,
+      itemsJson: true,
+      affectedCount: true,
+      expiresAt: true,
+      targetName: true,
+    },
+  })
+  if (!suggestion) {
+    return { ok: false, error: "권고를 찾을 수 없습니다" }
+  }
+  if (suggestion.scope !== "adgroup") {
+    return {
+      ok: false,
+      error:
+        "묶음 권고가 아닙니다 (scope='adgroup' 만 지원 — 단건은 approveBidSuggestions 사용)",
+    }
+  }
+  if (suggestion.engineSource !== "bid") {
+    return {
+      ok: false,
+      error: "묶음 적용은 'bid' 엔진만 지원 (현재 cron 생성 범위)",
+    }
+  }
+  if (suggestion.status !== "pending") {
+    return {
+      ok: false,
+      error: `권고 상태가 'pending' 이 아닙니다 (현재: ${suggestion.status})`,
+    }
+  }
+  if (suggestion.expiresAt && suggestion.expiresAt.getTime() <= Date.now()) {
+    return { ok: false, error: "권고가 만료되었습니다" }
+  }
+
+  // -- itemsJson 파싱 --
+  const parsedItems = BidSuggestionItemsSchema.safeParse(suggestion.itemsJson)
+  if (!parsedItems.success) {
+    return {
+      ok: false,
+      error: `itemsJson 파싱 실패: ${parsedItems.error.issues.map((i) => i.message).join(", ")}`,
+    }
+  }
+  const items = parsedItems.data
+  const itemsByKeywordId = new Map(items.map((it) => [it.keywordId, it]))
+
+  // -- selectedKeywordIds ⊆ itemsJson 부분집합 검증 (UI 버그 방어) --
+  const outOfSet = parsedSelectedIds.filter((id) => !itemsByKeywordId.has(id))
+  if (outOfSet.length > 0) {
+    return {
+      ok: false,
+      error: `선택된 키워드가 묶음 셋에 포함되지 않습니다 (${outOfSet.length}건)`,
+    }
+  }
+
+  // -- Keyword 일괄 조회 (advertiserId 한정 — 광고주 횡단 차단) --
+  // adgroup.campaign.advertiserId 조인 — Keyword 자체엔 advertiserId 컬럼 없음.
+  const keywords = await prisma.keyword.findMany({
+    where: {
+      id: { in: parsedSelectedIds },
+      adgroup: { campaign: { advertiserId: input.advertiserId } },
+    },
+    select: {
+      id: true,
+      nccKeywordId: true,
+      bidAmt: true,
+      useGroupBidAmt: true,
+      userLock: true,
+      status: true,
+      adgroupId: true,
+    },
+  })
+  const keywordById = new Map(keywords.map((k) => [k.id, k]))
+
+  // -- 자동 제외 분류 + applyTargets 추출 --
+  type ApplyTarget = {
+    keywordId: string
+    nccKeywordId: string
+    beforeBidDb: number | null
+    useGroupBidAmtDb: boolean
+    afterBid: number
+  }
+  const applyTargets: ApplyTarget[] = []
+  let skippedLocked = 0
+  let skippedAlreadyApplied = 0
+  let skippedDrift = 0
+
+  for (const keywordId of parsedSelectedIds) {
+    const k = keywordById.get(keywordId)
+    if (!k) {
+      // 광고주 횡단 / 삭제됨 → locked 그룹과 동일 취급 (적용 비대상)
+      skippedLocked++
+      continue
+    }
+    const item = itemsByKeywordId.get(keywordId)!
+    if (k.userLock || k.status === "deleted") {
+      skippedLocked++
+      continue
+    }
+    const currentBid = k.bidAmt ?? 0
+    if (currentBid === item.afterBid) {
+      skippedAlreadyApplied++
+      continue
+    }
+    if (currentBid !== item.beforeBid) {
+      // 모달 본 시점 (beforeBid) 과 다름 → drift, 자동 제외 (옵션 B)
+      skippedDrift++
+      continue
+    }
+    applyTargets.push({
+      keywordId: k.id,
+      nccKeywordId: k.nccKeywordId,
+      beforeBidDb: k.bidAmt,
+      useGroupBidAmtDb: k.useGroupBidAmt,
+      afterBid: item.afterBid,
+    })
+  }
+
+  // -- ChangeBatch 생성 --
+  const batch = await prisma.changeBatch.create({
+    data: {
+      userId: user.id,
+      action: "bid_inbox.apply",
+      status: "pending",
+      total: applyTargets.length,
+      processed: 0,
+      attempt: 0,
+      summary: {
+        advertiserId: input.advertiserId,
+        suggestionId: suggestion.id,
+        bundle: true,
+        scope: "adgroup",
+        targetName: suggestion.targetName ?? null,
+        selectedCount: parsedSelectedIds.length,
+        applied: applyTargets.length,
+        skippedDrift,
+        skippedAlreadyApplied,
+        skippedLocked,
+      },
+    },
+  })
+
+  // -- ChangeItem 적재 (apply.ts 호환 shape — Keyword UPDATE) --
+  if (applyTargets.length > 0) {
+    await prisma.changeItem.createMany({
+      data: applyTargets.map((t) => ({
+        batchId: batch.id,
+        targetType: "Keyword",
+        targetId: t.nccKeywordId,
+        before: {
+          bidAmt: t.beforeBidDb,
+          useGroupBidAmt: t.useGroupBidAmtDb,
+        } as PrismaTypes.InputJsonValue,
+        after: {
+          operation: "UPDATE" as const,
+          customerId: advertiser.customerId,
+          nccKeywordId: t.nccKeywordId,
+          fields: "bidAmt,useGroupBidAmt",
+          patch: {
+            bidAmt: t.afterBid,
+            useGroupBidAmt: false,
+          },
+          suggestionId: suggestion.id,
+          suggestionReason: suggestion.reason,
+          bundle: true,
+        } as PrismaTypes.InputJsonValue,
+        idempotencyKey: `bundle:${suggestion.id}:keyword:${t.keywordId}`,
+        status: "pending",
+      })),
+    })
+  } else {
+    // 적용 대상 0건 → ChangeBatch 즉시 done 마킹 (큐 픽업 불필요)
+    await prisma.changeBatch.update({
+      where: { id: batch.id },
+      data: {
+        status: "done",
+        processed: 0,
+        finishedAt: new Date(),
+      },
+    })
+  }
+
+  // -- BidSuggestion.applied 마킹 --
+  await prisma.bidSuggestion.updateMany({
+    where: {
+      id: suggestion.id,
+      advertiserId: input.advertiserId,
+      status: "pending",
+    },
+    data: {
+      status: "applied",
+      appliedBatchId: batch.id,
+    },
+  })
+
+  // -- AuditLog --
+  await logAudit({
+    userId: user.id,
+    action: "bid_inbox.bundle_apply",
+    targetType: "ChangeBatch",
+    targetId: batch.id,
+    before: {
+      scope: "adgroup",
+      affectedCount: suggestion.affectedCount,
+      items: suggestion.itemsJson as PrismaTypes.InputJsonValue,
+    },
+    after: {
+      advertiserId: input.advertiserId,
+      suggestionId: suggestion.id,
+      batchId: batch.id,
+      applied: applyTargets.length,
+      skippedDrift,
+      skippedAlreadyApplied,
+      skippedLocked,
+      selectedKeywordIds: parsedSelectedIds,
+    },
+  })
+
+  revalidatePath(`/${input.advertiserId}/bid-inbox`)
+
+  return {
+    ok: true,
+    data: {
+      batchId: batch.id,
+      applied: applyTargets.length,
+      skippedDrift,
+      skippedAlreadyApplied,
+      skippedLocked,
+    },
+  }
+}
+
+// =============================================================================
+// 6. getBundleSuggestionDetail — 묶음 권고 모달용 세부 조회
+// =============================================================================
+
+export type BundleSuggestionDetailItem = {
+  /** Keyword.id (cuid). 적용 시점 ChangeItem 기록의 자연 키. */
+  keywordId: string
+  /** 키워드 텍스트 (운영 데이터 — 시크릿 아님). */
+  keyword: string
+  nccKeywordId: string | null
+  matchType: string
+  /** itemsJson 적재 시점의 currentBid (drift 비교용 baseline). */
+  beforeBid: number
+  /** 권고 입찰가 (원). */
+  afterBid: number
+  /** 현재 DB 의 bidAmt — beforeBid 와 다르면 drift. */
+  currentBid: number
+  userLock: boolean
+  status: string
+  /** beforeBid !== currentBid 시 true. UI 우측 ⚠ 표시. */
+  drift: boolean
+  /** 표시용 (없으면 null) — StatDaily 7d 평균 클릭 수. */
+  avgClicks7d: number | null
+}
+
+export type BundleSuggestionDetailSummary = {
+  totalCount: number
+  driftedCount: number
+  /** 평균 변동률 % (소수점 2자리). */
+  avgDeltaPct: number
+  /**
+   * 추정 일 비용 변화 (원). 음수=절감, 양수=증액.
+   * 각 item: (afterBid - beforeBid) × avgClicksPerDay 합.
+   * avgClicksPerDay 가 모든 item 에서 0/null 이면 0 (UI 에서 "추정 불가" 표시 가능).
+   */
+  estimatedDailyCostDelta: number
+  /** estimatedDailyCostDelta 산정에 신호가 있는 item 수 — 0 이면 신뢰도 낮음. */
+  itemsWithSignal: number
+}
+
+export type BundleSuggestionDetail = {
+  suggestion: {
+    id: string
+    targetName: string
+    reasonCode: string
+    severity: BidSuggestionSeverity
+    createdAt: string
+  }
+  items: BundleSuggestionDetailItem[]
+  summary: BundleSuggestionDetailSummary
+}
+
+const STATS_WINDOW_DAYS_FOR_BUNDLE = 7
+
+/**
+ * 묶음 권고 모달용 — itemsJson 의 keywordId 들을 실제 Keyword 라벨/현재 입찰가/상태로 보강.
+ *
+ * 전제:
+ *   - scope='adgroup' 인 BidSuggestion (engineSource='bid', kind='keyword_bid_bundle')
+ *   - itemsJson = [{ keywordId, beforeBid, afterBid, reason? }, ...]
+ *
+ * 흐름:
+ *   1. 권한 검증 (viewer 도 read 가능)
+ *   2. BidSuggestion 로드 + scope='adgroup' 검증
+ *   3. itemsJson 파싱 (BidSuggestionItemsSchema)
+ *   4. Keyword 일괄 조회 (advertiserId 한정 — 광고주 횡단 차단)
+ *   5. StatDaily 7일 평균 클릭 누적 (refId=nccKeywordId)
+ *   6. drift 검사 + summary 산출
+ */
+export async function getBundleSuggestionDetail(input: {
+  advertiserId: string
+  suggestionId: string
+}): Promise<ActionResult<BundleSuggestionDetail>> {
+  // -- 입력 검증 --
+  try {
+    advertiserIdSchema.parse(input.advertiserId)
+    z.string().trim().min(1).max(128).parse(input.suggestionId)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    return { ok: false, error: `잘못된 입력: ${msg}` }
+  }
+
+  // -- 권한 검증 (viewer 도 read 가능) --
+  await getCurrentAdvertiser(input.advertiserId)
+
+  // -- BidSuggestion 로드 + scope='adgroup' 검증 --
+  const suggestion = await prisma.bidSuggestion.findFirst({
+    where: {
+      id: input.suggestionId,
+      advertiserId: input.advertiserId,
+    },
+    select: {
+      id: true,
+      engineSource: true,
+      severity: true,
+      action: true,
+      createdAt: true,
+      scope: true,
+      targetName: true,
+      itemsJson: true,
+    },
+  })
+  if (!suggestion) {
+    return { ok: false, error: "권고를 찾을 수 없습니다" }
+  }
+  if (suggestion.scope !== "adgroup") {
+    return {
+      ok: false,
+      error: "묶음 권고가 아닙니다 (scope='adgroup' 만 지원)",
+    }
+  }
+
+  // -- itemsJson 파싱 (Zod 검증) --
+  const parsed = BidSuggestionItemsSchema.safeParse(suggestion.itemsJson)
+  if (!parsed.success) {
+    return {
+      ok: false,
+      error: `itemsJson 파싱 실패: ${parsed.error.issues.map((i) => i.message).join(", ")}`,
+    }
+  }
+  const items = parsed.data
+
+  // -- Keyword 일괄 조회 (advertiserId 한정) --
+  const keywordIds = Array.from(new Set(items.map((it) => it.keywordId)))
+  const keywords = await prisma.keyword.findMany({
+    where: {
+      id: { in: keywordIds },
+      adgroup: { campaign: { advertiserId: input.advertiserId } },
+    },
+    select: {
+      id: true,
+      nccKeywordId: true,
+      keyword: true,
+      matchType: true,
+      bidAmt: true,
+      userLock: true,
+      status: true,
+    },
+  })
+  const keywordById = new Map(keywords.map((k) => [k.id, k]))
+
+  // -- StatDaily 7일 평균 클릭 (refId=nccKeywordId) ---------------------------
+  // groupBy 1회 — 키워드별 합산 → 7로 나누어 평균. nccKeywordId 미존재 키워드는 스킵.
+  const since = new Date()
+  since.setUTCDate(since.getUTCDate() - STATS_WINDOW_DAYS_FOR_BUNDLE)
+  const nccKeywordIds = keywords
+    .map((k) => k.nccKeywordId)
+    .filter((v): v is string => v != null && v.length > 0)
+  const statsByNccId = new Map<string, number>()
+  if (nccKeywordIds.length > 0) {
+    const aggs = await prisma.statDaily.groupBy({
+      by: ["refId"],
+      where: {
+        advertiserId: input.advertiserId,
+        level: "keyword",
+        refId: { in: nccKeywordIds },
+        date: { gte: since },
+      },
+      _sum: { clicks: true },
+    })
+    for (const a of aggs) {
+      const total = a._sum.clicks ?? 0
+      // 7d 평균 — 일자별 행이 없을 수도 있으므로 단순 7 분할
+      statsByNccId.set(a.refId, total / STATS_WINDOW_DAYS_FOR_BUNDLE)
+    }
+  }
+
+  // -- 행 조립 + drift 검사 ---------------------------------------------------
+  const detailItems: BundleSuggestionDetailItem[] = []
+  let driftedCount = 0
+  let totalDeltaPctSum = 0
+  let estimatedDailyCostDelta = 0
+  let itemsWithSignal = 0
+
+  for (const it of items) {
+    const k = keywordById.get(it.keywordId)
+    if (!k) {
+      // 키워드 미존재 (삭제됨) → status='deleted' 가짜 행으로 표시 (적용 비대상)
+      detailItems.push({
+        keywordId: it.keywordId,
+        keyword: "(삭제된 키워드)",
+        nccKeywordId: null,
+        matchType: "—",
+        beforeBid: it.beforeBid,
+        afterBid: it.afterBid,
+        currentBid: it.beforeBid,
+        userLock: false,
+        status: "deleted",
+        drift: false,
+        avgClicks7d: null,
+      })
+      continue
+    }
+    const currentBid = k.bidAmt ?? it.beforeBid
+    const drift = currentBid !== it.beforeBid
+    if (drift) driftedCount++
+
+    const avgClicksPerDay =
+      k.nccKeywordId != null ? (statsByNccId.get(k.nccKeywordId) ?? null) : null
+    if (avgClicksPerDay != null && avgClicksPerDay > 0) {
+      itemsWithSignal++
+      estimatedDailyCostDelta += (it.afterBid - it.beforeBid) * avgClicksPerDay
+    }
+    if (it.beforeBid > 0) {
+      totalDeltaPctSum += ((it.afterBid - it.beforeBid) / it.beforeBid) * 100
+    }
+
+    detailItems.push({
+      keywordId: it.keywordId,
+      keyword: k.keyword,
+      nccKeywordId: k.nccKeywordId,
+      matchType: k.matchType ?? "—",
+      beforeBid: it.beforeBid,
+      afterBid: it.afterBid,
+      currentBid,
+      userLock: k.userLock,
+      status: k.status,
+      drift,
+      avgClicks7d:
+        avgClicksPerDay != null ? Number(avgClicksPerDay.toFixed(2)) : null,
+    })
+  }
+
+  const totalCount = detailItems.length
+  const avgDeltaPct =
+    totalCount > 0 ? Number((totalDeltaPctSum / totalCount).toFixed(2)) : 0
+
+  // 권고 헤더 정보 (action.reasonCode / targetName) ---------------------------
+  const action = suggestion.action as Record<string, unknown> | null
+  const reasonCode =
+    action && typeof action.reasonCode === "string" ? action.reasonCode : "—"
+
+  return {
+    ok: true,
+    data: {
+      suggestion: {
+        id: suggestion.id,
+        targetName: suggestion.targetName ?? "—",
+        reasonCode,
+        severity: suggestion.severity,
+        createdAt: suggestion.createdAt.toISOString(),
+      },
+      items: detailItems,
+      summary: {
+        totalCount,
+        driftedCount,
+        avgDeltaPct,
+        estimatedDailyCostDelta: Math.round(estimatedDailyCostDelta),
+        itemsWithSignal,
+      },
+    },
+  }
 }

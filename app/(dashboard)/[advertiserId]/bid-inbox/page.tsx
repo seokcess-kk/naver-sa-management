@@ -69,6 +69,9 @@ export default async function BidInboxPage({
       action: true,
       createdAt: true,
       expiresAt: true,
+      scope: true,
+      affectedCount: true,
+      targetName: true,
       keyword: {
         select: {
           id: true,
@@ -101,6 +104,9 @@ export default async function BidInboxPage({
     action: r.action as unknown as BidSuggestionRow["action"],
     createdAt: r.createdAt.toISOString(),
     expiresAt: r.expiresAt.toISOString(),
+    scope: r.scope,
+    affectedCount: r.affectedCount,
+    targetName: r.targetName,
     keyword: r.keyword
       ? {
           id: r.keyword.id,

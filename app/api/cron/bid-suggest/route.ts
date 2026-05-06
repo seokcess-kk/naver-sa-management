@@ -46,10 +46,13 @@ import { NextRequest, NextResponse } from "next/server"
 import { prisma } from "@/lib/db/prisma"
 import { scrubString } from "@/lib/crypto/scrub-string"
 import {
+  bundleSuggestions,
   decideMarginalSuggestion,
   type AdvertiserBaselineInput,
   type AutomationTargets,
+  type BundleInputDecision,
   type KeywordPerfInput,
+  type MarginalDecision,
 } from "@/lib/auto-bidding/marginal-score"
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 
@@ -81,6 +84,14 @@ type CronResponse = {
   suggestionsCreated: number
   suggestionsUpdated: number
   suggestionsDismissed: number
+  /** 묶음 권고 (scope='adgroup') 신규 생성 카운트. */
+  bundlesCreated: number
+  /** 묶음 권고 supersede (status='dismissed' with reasonCode='superseded_by_new_bundle'). */
+  bundlesDismissed: number
+  /** 단건 (scope='keyword') 권고 신규/갱신/무시 — 기존 흐름 통계. */
+  singlesCreated: number
+  singlesUpdated: number
+  singlesDismissed: number
   ts: string
   errors: CronError[]
   error?: string
@@ -107,6 +118,11 @@ type AdvertiserStats = {
   created: number
   updated: number
   dismissed: number
+  bundlesCreated: number
+  bundlesDismissed: number
+  singlesCreated: number
+  singlesUpdated: number
+  singlesDismissed: number
 }
 
 type BudgetSuggestionStats = {
@@ -420,6 +436,11 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
     created: 0,
     updated: 0,
     dismissed: 0,
+    bundlesCreated: 0,
+    bundlesDismissed: 0,
+    singlesCreated: 0,
+    singlesUpdated: 0,
+    singlesDismissed: 0,
   }
 
   // -- a. automation config 로드 (없거나 off 면 skip — 운영자 명시 활성화 필요) ---
@@ -493,7 +514,7 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
     return stats // 데이터 없음
   }
 
-  // -- f. Keyword 매핑 -------------------------------------------------------
+  // -- f. Keyword 매핑 — adgroup name 까지 조인 (묶음 표시명 캐시) ----------
   const nccIds = top.map((t) => t.refId)
   const keywords = await prisma.keyword.findMany({
     where: {
@@ -506,13 +527,14 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
       bidAmt: true,
       useGroupBidAmt: true,
       userLock: true,
-      adgroup: { select: { id: true } },
+      adgroup: { select: { id: true, name: true } },
     },
   })
   const keywordMap = new Map(keywords.map((k) => [k.nccKeywordId, k]))
 
-  // -- g. 각 키워드 처리 -----------------------------------------------------
-  const expiresAt = addDays(new Date(), SUGGESTION_TTL_DAYS)
+  // -- g. Pass 1 — 키워드별 결정 수집 ---------------------------------------
+  const decisions: BundleInputDecision[] = []
+  const heldKeywordIds: string[] = [] // hold + dismiss-eligible 키워드 (단건 정리용)
 
   for (const row of top) {
     stats.scanned++
@@ -535,62 +557,144 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
       avgRank7d: row._avg.avgRnk != null ? Number(row._avg.avgRnk) : null,
     }
 
-    const decision = decideMarginalSuggestion({
+    const decision: MarginalDecision = decideMarginalSuggestion({
       keyword: keywordPerf,
       baseline,
       targets,
     })
 
-    if (decision.decision === "suggest") {
-      // pending 1개 보장 — 있으면 update, 없으면 create.
-      const existing = await prisma.bidSuggestion.findFirst({
-        where: {
-          keywordId: k.id,
-          engineSource: "bid",
-          status: "pending",
-        },
-        select: { id: true },
-      })
-      const data = {
-        advertiserId,
-        keywordId: k.id,
-        adgroupId: k.adgroup.id,
-        engineSource: "bid" as const,
-        action: decision.action as unknown as Prisma.InputJsonValue,
-        reason: decision.reason,
-        severity: decision.severity,
-        status: "pending" as const,
-        expiresAt,
-      }
-      if (existing) {
-        await prisma.bidSuggestion.update({
-          where: { id: existing.id },
-          data: {
-            action: data.action,
-            reason: data.reason,
-            severity: data.severity,
-            expiresAt,
-          },
-        })
-        stats.updated++
-      } else {
-        await prisma.bidSuggestion.create({ data })
-        stats.created++
-      }
-    } else {
-      // hold — low_confidence_data 외에는 기존 pending dismiss
+    if (decision.decision === "hold") {
+      // hold 는 묶음 비대상 — 기존 단건 dismiss 흐름만 유지.
       if (decision.reason !== "low_confidence_data") {
-        const r = await prisma.bidSuggestion.updateMany({
-          where: {
-            keywordId: k.id,
-            engineSource: "bid",
-            status: "pending",
-          },
-          data: { status: "dismissed" },
-        })
-        stats.dismissed += r.count
+        heldKeywordIds.push(k.id)
       }
+      continue
     }
+
+    decisions.push({
+      decision,
+      keywordId: k.id,
+      adgroupId: k.adgroup.id,
+      adgroupName: k.adgroup.name,
+    })
+  }
+
+  // -- h. Pass 2 — 묶음 / 단건 분리 ------------------------------------------
+  const { bundles, fallbackSingles } = bundleSuggestions(decisions)
+  const expiresAt = addDays(new Date(), SUGGESTION_TTL_DAYS)
+
+  // -- i. 기존 묶음 권고 supersede — 옵션 B (단순 / 변동 키워드 셋에 강건) ---
+  // 같은 광고주의 status='pending' AND scope='adgroup' AND engineSource='bid' 묶음을
+  // dismiss 처리. 이번 cron 결과가 새로운 진실. 묶음 키워드 셋이 변동돼도 안전.
+  // dismiss 사유는 reason 본문 prefix 로 표식 (운영자 inbox 에서 supersede 표시 후속).
+  const supersededBundles = await prisma.bidSuggestion.updateMany({
+    where: {
+      advertiserId,
+      engineSource: "bid",
+      scope: "adgroup",
+      status: "pending",
+    },
+    data: {
+      status: "dismissed",
+      reason: "superseded_by_new_bundle",
+    },
+  })
+  stats.bundlesDismissed += supersededBundles.count
+  stats.dismissed += supersededBundles.count
+
+  // -- j. 묶음 신규 생성 -----------------------------------------------------
+  for (const b of bundles) {
+    const action = {
+      kind: "keyword_bid_bundle",
+      adgroupId: b.adgroupId,
+      direction: b.direction,
+      reasonCode: b.reasonCode,
+      avgDeltaPct: b.avgDeltaPct,
+      itemCount: b.items.length,
+    } satisfies Prisma.InputJsonValue
+
+    const reason =
+      `${b.adgroupName} 광고그룹의 ${b.items.length}개 키워드 입찰가 ` +
+      `${b.direction === "up" ? "인상" : "인하"} 권고 (평균 ±${b.avgDeltaPct.toFixed(1)}% / ${b.reasonCode})`
+
+    await prisma.bidSuggestion.create({
+      data: {
+        advertiserId,
+        keywordId: null,
+        adgroupId: b.adgroupId,
+        engineSource: "bid",
+        action,
+        reason,
+        severity: b.maxSeverity,
+        status: "pending",
+        scope: "adgroup",
+        affectedCount: b.items.length,
+        targetName: b.adgroupName,
+        itemsJson: b.items as unknown as Prisma.InputJsonValue,
+        expiresAt,
+      },
+    })
+    stats.bundlesCreated++
+    stats.created++
+  }
+
+  // -- k. fallbackSingles 단건 BidSuggestion 적재 (기존 흐름 보존) ----------
+  for (const fs of fallbackSingles) {
+    if (fs.decision.decision !== "suggest") continue
+    const existing = await prisma.bidSuggestion.findFirst({
+      where: {
+        keywordId: fs.keywordId,
+        engineSource: "bid",
+        scope: "keyword",
+        status: "pending",
+      },
+      select: { id: true },
+    })
+    const data = {
+      advertiserId,
+      keywordId: fs.keywordId,
+      adgroupId: fs.adgroupId,
+      engineSource: "bid" as const,
+      action: fs.decision.action as unknown as Prisma.InputJsonValue,
+      reason: fs.decision.reason,
+      severity: fs.decision.severity,
+      status: "pending" as const,
+      scope: "keyword" as const,
+      affectedCount: 1,
+      expiresAt,
+    }
+    if (existing) {
+      await prisma.bidSuggestion.update({
+        where: { id: existing.id },
+        data: {
+          action: data.action,
+          reason: data.reason,
+          severity: data.severity,
+          expiresAt,
+        },
+      })
+      stats.singlesUpdated++
+      stats.updated++
+    } else {
+      await prisma.bidSuggestion.create({ data })
+      stats.singlesCreated++
+      stats.created++
+    }
+  }
+
+  // -- l. hold 된 키워드의 기존 단건 pending dismiss --------------------------
+  if (heldKeywordIds.length > 0) {
+    const r = await prisma.bidSuggestion.updateMany({
+      where: {
+        keywordId: { in: heldKeywordIds },
+        engineSource: "bid",
+        scope: "keyword",
+        status: "pending",
+      },
+      data: { status: "dismissed" },
+    })
+    stats.singlesDismissed += r.count
+    stats.dismissed += r.count
   }
 
   return stats
@@ -618,6 +722,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
         suggestionsCreated: 0,
         suggestionsUpdated: 0,
         suggestionsDismissed: 0,
+        bundlesCreated: 0,
+        bundlesDismissed: 0,
+        singlesCreated: 0,
+        singlesUpdated: 0,
+        singlesDismissed: 0,
         ts,
         errors: [],
         error: "unauthorized",
@@ -650,6 +759,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   let suggestionsCreated = 0
   let suggestionsUpdated = 0
   let suggestionsDismissed = 0
+  let bundlesCreated = 0
+  let bundlesDismissed = 0
+  let singlesCreated = 0
+  let singlesUpdated = 0
+  let singlesDismissed = 0
   const errors: CronError[] = []
 
   for (const adv of eligible) {
@@ -660,6 +774,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       suggestionsCreated += r.created
       suggestionsUpdated += r.updated
       suggestionsDismissed += r.dismissed
+      bundlesCreated += r.bundlesCreated
+      bundlesDismissed += r.bundlesDismissed
+      singlesCreated += r.singlesCreated
+      singlesUpdated += r.singlesUpdated
+      singlesDismissed += r.singlesDismissed
       if (r.scanned > 0 || r.budgetScanned > 0) advertisersOk++
       else advertisersSkipped++
     } catch (e) {
@@ -681,6 +800,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     suggestionsCreated,
     suggestionsUpdated,
     suggestionsDismissed,
+    bundlesCreated,
+    bundlesDismissed,
+    singlesCreated,
+    singlesUpdated,
+    singlesDismissed,
     ts,
     errors,
   })

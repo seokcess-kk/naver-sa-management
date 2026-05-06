@@ -182,6 +182,17 @@ enum BidSuggestionStatus {
   expired
 }
 
+// 묶음 권고 단위 — Inbox 폭발 방지 (5천 행 단위 권고 → 광고그룹/캠페인 1건 묶음).
+//   keyword  : 키워드 1:1 권고 (기존 흐름, 디폴트)
+//   adgroup  : 광고그룹 단위 묶음 — itemsJson 의 N개 키워드 변경
+//   campaign : 캠페인 단위 묶음 — itemsJson 의 N개 키워드 변경
+//   ※ 검색어 클러스터는 ApprovalQueue (search_term_*) 로 별도 분리.
+enum SuggestionScope {
+  keyword
+  adgroup
+  campaign
+}
+
 // ApprovalQueue kind — 운영자 승인 필요 액션 타입.
 //   search_term_exclude : 검색어 제외 키워드 등록
 //   search_term_promote : 검색어를 신규 키워드로 승격
@@ -903,6 +914,15 @@ model BidSuggestion {
   expiresAt      DateTime // lazy 만료 (Inbox 조회 시 필터)
   // 적용 시 ChangeBatch.id (감사 추적). 배치 삭제 시 SetNull — 제안 이력 보존.
   appliedBatchId String?
+  // 묶음 권고 — Inbox 폭발 방지 (광고그룹/캠페인 1건이 N개 키워드 변경 표현).
+  //   scope='keyword' (디폴트) 일 땐 단건 흐름 그대로. itemsJson=null 허용.
+  scope          SuggestionScope       @default(keyword)
+  // items.length 캐시 — Inbox 목록에 "38개 키워드" 표시용 (조회 시 jsonb_array_length 회피).
+  affectedCount  Int                   @default(1)
+  // 광고그룹/캠페인 표시명 redundant 캐시 — Inbox 목록에서 AdGroup/Campaign 조인 회피.
+  targetName     String?
+  // 묶음 변경 페이로드 — [{ keywordId, beforeBid, afterBid, reason? }]. scope='keyword' 시 null.
+  itemsJson      Json?
   createdAt      DateTime              @default(now())
   updatedAt      DateTime              @updatedAt
 

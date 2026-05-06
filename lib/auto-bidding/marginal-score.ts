@@ -367,3 +367,214 @@ export function decideMarginalSuggestion(
     metrics,
   }
 }
+
+// =============================================================================
+// 묶음 권고 (광고그룹 단위 그룹화)
+// =============================================================================
+
+/**
+ * 묶음 임계 / 균질성 설정.
+ *
+ * 사용자 결정 (2026-05-06):
+ *   - bundleMinKeywords=5 — 4개 이하 묶음은 시각적 가치 < 단건 노출 가치
+ *   - bundleBidStdMax=0.05 — ±5% 변동률 분산 안에서만 동일 권고 묶음
+ *
+ * 균질성 위반 시 그룹은 통째로 fallbackSingles 로 떨어져 기존 단건 흐름 유지.
+ */
+/** 묶음 임계 / 균질성 설정 — 호출자가 부분 override 가능. */
+export type BundleConfig = {
+  /** 묶음 생성 최소 키워드 수. 미만이면 단건 흐름 유지. */
+  bundleMinKeywords: number
+  /** bid 변동률 분산 허용 (절대값). 0.05 = ±5%. (max - min) / mean 비교. */
+  bundleBidStdMax: number
+}
+
+export const DEFAULT_BUNDLE_CONFIG: BundleConfig = {
+  bundleMinKeywords: 5,
+  bundleBidStdMax: 0.05,
+}
+
+/** bundleSuggestions 호출자 입력 — 키워드 결정 + 광고그룹 메타. */
+export type BundleInputDecision = {
+  decision: MarginalDecision
+  keywordId: string
+  adgroupId: string
+  adgroupName: string
+}
+
+/** 묶음 적재 후보 — BidSuggestion 1건으로 적재됨. */
+export type BundleCandidate = {
+  adgroupId: string
+  adgroupName: string
+  direction: "up" | "down"
+  reasonCode: string
+  /** 그룹 내 평균 변동률 (정률, 절대값). 예: 0.15 = 15%. action.suggestedBidPercent 표기에 사용. */
+  avgDeltaPct: number
+  /** 그룹 내 severity 의 최대값 (info < warn < critical). */
+  maxSeverity: "info" | "warn" | "critical"
+  items: Array<{
+    keywordId: string
+    beforeBid: number
+    afterBid: number
+    reason?: string
+  }>
+}
+
+export type BundleResult = {
+  /** 묶음 BidSuggestion 적재 대상 (5개+ 이고 균질). */
+  bundles: BundleCandidate[]
+  /** 묶음에 안 들어간 단건 결정들 (기존 흐름 유지). */
+  fallbackSingles: BundleInputDecision[]
+}
+
+/** reasonCode 추출 — decision.reason 본문에서 케이스를 코드 식별자로 정규화. */
+function extractReasonCode(reason: string): string {
+  // decideMarginalSuggestion 본문은 한국어 자연어 + 일부 구간 패턴 (e.g. roas_within_band).
+  // 묶음 키 안정성을 위해 첫 단어/패턴을 정규화.
+  if (reason.startsWith("ROAS")) return "roas_target"
+  if (reason.startsWith("CPA")) return "cpa_target"
+  if (reason.startsWith("CPC")) return "cpc_target"
+  if (reason.startsWith("CTR")) return "ctr_floor"
+  if (reason.startsWith("평균 순위")) return "avg_rank_target"
+  if (reason.startsWith("키워드 CPC")) return "baseline_cpc_outlier"
+  // 알 수 없는 경우 — reason 본문 첫 32자 hash 대신 통째로 사용 (그룹화 키 안정성).
+  return `other:${reason.slice(0, 32)}`
+}
+
+/** severity 우선순위 — 그룹 내 최댓값 산출. */
+function severityRank(s: "info" | "warn" | "critical"): number {
+  if (s === "critical") return 2
+  if (s === "warn") return 1
+  return 0
+}
+
+/**
+ * 단건 결정 배열을 (adgroupId + direction + reasonCode) 키로 그룹화하고
+ * 5개+ 이면서 변동률 분산이 ±bundleBidStdMax 이내일 때만 묶음으로 분리.
+ *
+ * 분리 결과:
+ *   - bundles      : 묶음 적재 후보 (BidSuggestion scope='adgroup' 1건)
+ *   - fallbackSingles : 묶음 비대상 (단건 BidSuggestion 으로 기존 흐름 유지)
+ *
+ * 분기 규칙:
+ *   - decision.kind !== 'suggest' (hold) → 그룹화 비대상 → fallbackSingles 직행
+ *   - 그룹 내 N < bundleMinKeywords → 그룹 통째로 fallbackSingles
+ *   - 그룹 내 (max - min) / mean > bundleBidStdMax → 균질성 위반 → 그룹 통째로 fallbackSingles
+ *
+ * 호출자 책임:
+ *   - adgroupName 주입 (Keyword → AdGroup 조인 책임은 cron 측)
+ *   - decision.kind === 'hold' 도 그대로 전달 가능 (본 함수가 fallbackSingles 로 분리)
+ */
+export function bundleSuggestions(
+  decisions: BundleInputDecision[],
+  config?: Partial<BundleConfig>,
+): BundleResult {
+  const cfg = { ...DEFAULT_BUNDLE_CONFIG, ...config }
+
+  const bundles: BundleCandidate[] = []
+  const fallbackSingles: BundleInputDecision[] = []
+
+  // -- 1. suggest 만 그룹화 후보. hold 는 즉시 fallback. ----------------------
+  type GroupEntry = {
+    adgroupId: string
+    adgroupName: string
+    direction: "up" | "down"
+    reasonCode: string
+    members: BundleInputDecision[]
+  }
+  const groups = new Map<string, GroupEntry>()
+
+  for (const d of decisions) {
+    if (d.decision.decision !== "suggest") {
+      fallbackSingles.push(d)
+      continue
+    }
+    const direction = d.decision.action.direction
+    const reasonCode = extractReasonCode(d.decision.reason)
+    const key = `${d.adgroupId}|${direction}|${reasonCode}`
+    const existing = groups.get(key)
+    if (existing) {
+      existing.members.push(d)
+    } else {
+      groups.set(key, {
+        adgroupId: d.adgroupId,
+        adgroupName: d.adgroupName,
+        direction,
+        reasonCode,
+        members: [d],
+      })
+    }
+  }
+
+  // -- 2. 그룹별 임계 / 균질성 검사 ------------------------------------------
+  for (const g of groups.values()) {
+    if (g.members.length < cfg.bundleMinKeywords) {
+      // 임계 미만 — 그룹 통째로 단건 흐름.
+      for (const m of g.members) fallbackSingles.push(m)
+      continue
+    }
+
+    // 변동률 (afterBid - beforeBid) / beforeBid — 절대값. beforeBid=0 은 marginal-score
+    // 가드(currentBid<=0 → hold)로 발생 불가하지만 안전상 스킵.
+    const deltas: number[] = []
+    let valid = true
+    for (const m of g.members) {
+      if (m.decision.decision !== "suggest") {
+        valid = false
+        break
+      }
+      const before = m.decision.action.currentBid
+      const after = m.decision.action.suggestedBid
+      if (before <= 0) {
+        valid = false
+        break
+      }
+      deltas.push(Math.abs((after - before) / before))
+    }
+    if (!valid || deltas.length === 0) {
+      for (const m of g.members) fallbackSingles.push(m)
+      continue
+    }
+
+    const min = Math.min(...deltas)
+    const max = Math.max(...deltas)
+    const mean = deltas.reduce((s, v) => s + v, 0) / deltas.length
+    // mean=0 인 경우 (모두 동일 입찰 = 변동 없음) 는 정상 균질 → spread 0 으로 통과.
+    const spread = mean > 0 ? (max - min) / mean : 0
+
+    if (spread > cfg.bundleBidStdMax) {
+      // 분산 위반 — 그룹 통째로 단건.
+      for (const m of g.members) fallbackSingles.push(m)
+      continue
+    }
+
+    // 균질 묶음 확정 — bundle candidate 생성.
+    let maxSev: "info" | "warn" | "critical" = "info"
+    const items: BundleCandidate["items"] = []
+    for (const m of g.members) {
+      // d.decision.decision === 'suggest' 는 위 valid 루프에서 보장.
+      if (m.decision.decision !== "suggest") continue
+      items.push({
+        keywordId: m.keywordId,
+        beforeBid: m.decision.action.currentBid,
+        afterBid: m.decision.action.suggestedBid,
+        reason: m.decision.reason,
+      })
+      if (severityRank(m.decision.severity) > severityRank(maxSev)) {
+        maxSev = m.decision.severity
+      }
+    }
+
+    bundles.push({
+      adgroupId: g.adgroupId,
+      adgroupName: g.adgroupName,
+      direction: g.direction,
+      reasonCode: g.reasonCode,
+      avgDeltaPct: Number((mean * 100).toFixed(2)),
+      maxSeverity: maxSev,
+      items,
+    })
+  }
+
+  return { bundles, fallbackSingles }
+}

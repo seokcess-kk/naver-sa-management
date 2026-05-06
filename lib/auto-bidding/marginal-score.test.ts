@@ -16,8 +16,12 @@ import { describe, expect, it } from "vitest"
 import { Prisma } from "@/lib/generated/prisma/client"
 
 import {
+  bundleSuggestions,
   decideMarginalSuggestion,
+  DEFAULT_BUNDLE_CONFIG,
   DEFAULT_MARGINAL_CONFIG,
+  type BundleInputDecision,
+  type MarginalDecision,
   type MarginalScoreInput,
 } from "./marginal-score"
 
@@ -389,5 +393,215 @@ describe("decideMarginalSuggestion — H. config 기본값", () => {
       }),
     )
     expect(r.decision).toBe("suggest") // 30 ≥ 20 통과
+  })
+})
+
+// =============================================================================
+// bundleSuggestions — 묶음 권고 생성 헬퍼
+// =============================================================================
+
+/** bundleSuggestions 입력 단건 합성 — suggest 분기 가짜 decision. */
+function makeSuggest(
+  keywordId: string,
+  adgroupId: string,
+  adgroupName: string,
+  currentBid: number,
+  suggestedBid: number,
+  reason = "ROAS 5.0x ≥ 목표 4.0x × 1.2 — 입찰 인상 여유",
+  severity: "info" | "warn" | "critical" = "info",
+): BundleInputDecision {
+  const direction: "up" | "down" = suggestedBid >= currentBid ? "up" : "down"
+  const decision: MarginalDecision = {
+    decision: "suggest",
+    reason,
+    action: {
+      currentBid,
+      suggestedBid,
+      deltaPct: 15,
+      direction,
+    },
+    severity,
+    confidence: "medium",
+    metrics: {
+      clicks7d: 100,
+      cost7d: 100_000,
+      revenue7d: 500_000,
+      currentRoas: 5,
+      currentCpa: null,
+      keywordCpc: 1000,
+      keywordCtr: 2,
+      avgRank7d: null,
+    },
+  }
+  return { decision, keywordId, adgroupId, adgroupName }
+}
+
+function makeHold(
+  keywordId: string,
+  adgroupId: string,
+  adgroupName: string,
+  reason = "low_confidence_data",
+): BundleInputDecision {
+  return {
+    decision: { decision: "hold", reason },
+    keywordId,
+    adgroupId,
+    adgroupName,
+  }
+}
+
+describe("bundleSuggestions — happy path", () => {
+  it("같은 광고그룹 + 같은 방향 + 같은 reasonCode 5개 동일 변동률 → 1 bundle", () => {
+    // 5개 키워드, 모두 currentBid 1000 → 1150 (15% up).
+    const ds = Array.from({ length: 5 }, (_, i) =>
+      makeSuggest(`kw${i}`, "ag1", "광고그룹 A", 1000, 1150),
+    )
+    const r = bundleSuggestions(ds)
+    expect(r.bundles).toHaveLength(1)
+    expect(r.fallbackSingles).toHaveLength(0)
+    expect(r.bundles[0].adgroupId).toBe("ag1")
+    expect(r.bundles[0].adgroupName).toBe("광고그룹 A")
+    expect(r.bundles[0].direction).toBe("up")
+    expect(r.bundles[0].reasonCode).toBe("roas_target")
+    expect(r.bundles[0].items).toHaveLength(5)
+    expect(r.bundles[0].avgDeltaPct).toBeCloseTo(15, 1)
+  })
+
+  it("severity 의 최댓값을 maxSeverity 로 보고", () => {
+    const ds = [
+      makeSuggest("kw1", "ag1", "A", 1000, 1150, undefined, "info"),
+      makeSuggest("kw2", "ag1", "A", 1000, 1150, undefined, "info"),
+      makeSuggest("kw3", "ag1", "A", 1000, 1150, undefined, "warn"),
+      makeSuggest("kw4", "ag1", "A", 1000, 1150, undefined, "info"),
+      makeSuggest("kw5", "ag1", "A", 1000, 1150, undefined, "critical"),
+    ]
+    const r = bundleSuggestions(ds)
+    expect(r.bundles).toHaveLength(1)
+    expect(r.bundles[0].maxSeverity).toBe("critical")
+  })
+})
+
+describe("bundleSuggestions — under threshold", () => {
+  it("4개 묶음 (임계 5 미만) → 통째로 fallbackSingles", () => {
+    const ds = Array.from({ length: 4 }, (_, i) =>
+      makeSuggest(`kw${i}`, "ag1", "A", 1000, 1150),
+    )
+    const r = bundleSuggestions(ds)
+    expect(r.bundles).toHaveLength(0)
+    expect(r.fallbackSingles).toHaveLength(4)
+  })
+
+  it("config bundleMinKeywords=3 override → 3개 그룹도 묶음", () => {
+    const ds = Array.from({ length: 3 }, (_, i) =>
+      makeSuggest(`kw${i}`, "ag1", "A", 1000, 1150),
+    )
+    const r = bundleSuggestions(ds, { bundleMinKeywords: 3 })
+    expect(r.bundles).toHaveLength(1)
+    expect(r.bundles[0].items).toHaveLength(3)
+  })
+})
+
+describe("bundleSuggestions — dispersion violation", () => {
+  it("5개 그룹 변동률 분산 ±5% 초과 → 통째로 fallback", () => {
+    // 변동률: 5%, 6%, 15%, 16%, 20% — (max-min)/mean ≈ (0.2-0.05)/0.124 ≈ 1.21 → 위반
+    const ds: BundleInputDecision[] = [
+      makeSuggest("kw1", "ag1", "A", 1000, 1050), // 5%
+      makeSuggest("kw2", "ag1", "A", 1000, 1060), // 6%
+      makeSuggest("kw3", "ag1", "A", 1000, 1150), // 15%
+      makeSuggest("kw4", "ag1", "A", 1000, 1160), // 16%
+      makeSuggest("kw5", "ag1", "A", 1000, 1200), // 20%
+    ]
+    const r = bundleSuggestions(ds)
+    expect(r.bundles).toHaveLength(0)
+    expect(r.fallbackSingles).toHaveLength(5)
+  })
+
+  it("5개 그룹 변동률 분산 ±5% 이내 (균질) → 1 bundle", () => {
+    // 변동률: 14%, 14.5%, 15%, 15%, 15.5% — (max-min)/mean ≈ 0.015/0.148 ≈ 0.10
+    // 0.10 > 0.05 위반 — 더 빡빡하게 만들어야 통과.
+    // 변동률: 14.8%, 15%, 15%, 15%, 15.2% — (max-min)/mean = 0.004/0.15 ≈ 0.027 → 통과
+    const ds: BundleInputDecision[] = [
+      makeSuggest("kw1", "ag1", "A", 1000, 1148),
+      makeSuggest("kw2", "ag1", "A", 1000, 1150),
+      makeSuggest("kw3", "ag1", "A", 1000, 1150),
+      makeSuggest("kw4", "ag1", "A", 1000, 1150),
+      makeSuggest("kw5", "ag1", "A", 1000, 1152),
+    ]
+    const r = bundleSuggestions(ds)
+    expect(r.bundles).toHaveLength(1)
+    expect(r.fallbackSingles).toHaveLength(0)
+  })
+})
+
+describe("bundleSuggestions — mixed direction / reason", () => {
+  it("같은 광고그룹 안 up/down 혼합 → 별도 그룹화 (각각 임계 검사)", () => {
+    // up 5개 + down 5개 — 두 그룹 분리.
+    const upGroup = Array.from({ length: 5 }, (_, i) =>
+      makeSuggest(`up${i}`, "ag1", "A", 1000, 1150),
+    )
+    const downGroup = Array.from({ length: 5 }, (_, i) =>
+      makeSuggest(`dn${i}`, "ag1", "A", 1000, 850),
+    )
+    const r = bundleSuggestions([...upGroup, ...downGroup])
+    expect(r.bundles).toHaveLength(2)
+    const directions = r.bundles.map((b) => b.direction).sort()
+    expect(directions).toEqual(["down", "up"])
+  })
+
+  it("같은 광고그룹 + 같은 방향이지만 reasonCode 다르면 별도 그룹", () => {
+    // 5 ROAS up + 5 CPA up — reasonCode 다름. 각각 5 → 두 묶음.
+    const roas = Array.from({ length: 5 }, (_, i) =>
+      makeSuggest(
+        `r${i}`,
+        "ag1",
+        "A",
+        1000,
+        1150,
+        "ROAS 5.0x ≥ 목표 4.0x × 1.2 — 입찰 인상 여유",
+      ),
+    )
+    const cpa = Array.from({ length: 5 }, (_, i) =>
+      makeSuggest(
+        `c${i}`,
+        "ag1",
+        "A",
+        1000,
+        1150,
+        "CPA 3000원 ≤ 목표 5000원 × 0.8 — 입찰 인상 여유",
+      ),
+    )
+    const r = bundleSuggestions([...roas, ...cpa])
+    expect(r.bundles).toHaveLength(2)
+    const codes = r.bundles.map((b) => b.reasonCode).sort()
+    expect(codes).toEqual(["cpa_target", "roas_target"])
+  })
+
+  it("hold decision 들은 즉시 fallbackSingles (그룹화 비대상)", () => {
+    const holds = Array.from({ length: 7 }, (_, i) =>
+      makeHold(`h${i}`, "ag1", "A"),
+    )
+    const r = bundleSuggestions(holds)
+    expect(r.bundles).toHaveLength(0)
+    expect(r.fallbackSingles).toHaveLength(7)
+  })
+
+  it("광고그룹이 다르면 임계 미달 — 두 그룹 모두 fallback", () => {
+    // ag1: 4 / ag2: 4 — 각 4 < 5.
+    const ag1 = Array.from({ length: 4 }, (_, i) =>
+      makeSuggest(`a1k${i}`, "ag1", "A", 1000, 1150),
+    )
+    const ag2 = Array.from({ length: 4 }, (_, i) =>
+      makeSuggest(`a2k${i}`, "ag2", "B", 1000, 1150),
+    )
+    const r = bundleSuggestions([...ag1, ...ag2])
+    expect(r.bundles).toHaveLength(0)
+    expect(r.fallbackSingles).toHaveLength(8)
+  })
+})
+
+describe("bundleSuggestions — DEFAULT_BUNDLE_CONFIG 노출", () => {
+  it("기본 임계 / 분산 값 확인", () => {
+    expect(DEFAULT_BUNDLE_CONFIG.bundleMinKeywords).toBe(5)
+    expect(DEFAULT_BUNDLE_CONFIG.bundleBidStdMax).toBe(0.05)
   })
 })

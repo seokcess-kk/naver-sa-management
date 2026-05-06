@@ -34,6 +34,7 @@ import {
   Loader2Icon,
   InfoIcon,
   SlidersHorizontalIcon,
+  PackageIcon,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -64,10 +65,12 @@ import {
 } from "@/components/ui/dialog"
 import {
   approveBidSuggestions,
+  approveBundleSuggestion,
   dismissBidSuggestions,
   enrichSuggestionReason,
   type BidSuggestionRow,
 } from "@/app/(dashboard)/[advertiserId]/bid-inbox/actions"
+import { BundleSuggestionDialog } from "@/components/bidding/bundle-suggestion-dialog"
 import { cn } from "@/lib/utils"
 
 // =============================================================================
@@ -82,6 +85,7 @@ type EngineFilter =
   | "budget"
   | "copy_policy"
 type SeverityFilter = "all" | "info" | "warn" | "critical"
+type ScopeFilter = "all" | "bundle" | "single"
 
 type ApproveResult = {
   batchId: string
@@ -133,6 +137,7 @@ export function BidSuggestionTable({
   const [engineFilter, setEngineFilter] = React.useState<EngineFilter>("all")
   const [severityFilter, setSeverityFilter] =
     React.useState<SeverityFilter>("all")
+  const [scopeFilter, setScopeFilter] = React.useState<ScopeFilter>("all")
   const [textFilter, setTextFilter] = React.useState("")
 
   // 선택 상태
@@ -144,6 +149,10 @@ export function BidSuggestionTable({
   const [submitting, setSubmitting] = React.useState(false)
   const [resultDialog, setResultDialog] =
     React.useState<ApproveResult | null>(null)
+  // 묶음 권고 모달 (scope='adgroup' 클릭 → 모달 열림)
+  const [bundleSuggestionId, setBundleSuggestionId] = React.useState<
+    string | null
+  >(null)
 
   // F.4 — 상세 모달 (행 클릭 → AI 설명 보강)
   const [detailRow, setDetailRow] = React.useState<BidSuggestionRow | null>(
@@ -163,6 +172,8 @@ export function BidSuggestionTable({
         return false
       if (severityFilter !== "all" && s.severity !== severityFilter)
         return false
+      if (scopeFilter === "bundle" && s.scope === "keyword") return false
+      if (scopeFilter === "single" && s.scope !== "keyword") return false
       if (t.length > 0) {
         const k = s.keyword
         const blob = [
@@ -170,6 +181,7 @@ export function BidSuggestionTable({
           k?.nccKeywordId ?? "",
           k?.adgroupName ?? "",
           k?.campaignName ?? "",
+          s.targetName ?? "",
           s.reason,
         ]
           .join(" ")
@@ -178,7 +190,7 @@ export function BidSuggestionTable({
       }
       return true
     })
-  }, [suggestions, engineFilter, severityFilter, textFilter])
+  }, [suggestions, engineFilter, severityFilter, scopeFilter, textFilter])
 
   const allFilteredSelected =
     filtered.length > 0 && filtered.every((s) => selectedIds.has(s.id))
@@ -444,7 +456,23 @@ export function BidSuggestionTable({
             <SelectItem value="critical">심각 (critical)</SelectItem>
           </SelectContent>
         </Select>
-        {(textFilter || engineFilter !== "all" || severityFilter !== "all") && (
+        <Select
+          value={scopeFilter}
+          onValueChange={(v) => setScopeFilter(v as ScopeFilter)}
+        >
+          <SelectTrigger aria-label="범위 필터 (묶음/단건)" className="h-8 w-32">
+            <SelectValue placeholder="범위" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">전체</SelectItem>
+            <SelectItem value="bundle">묶음만</SelectItem>
+            <SelectItem value="single">단건만</SelectItem>
+          </SelectContent>
+        </Select>
+        {(textFilter ||
+          engineFilter !== "all" ||
+          severityFilter !== "all" ||
+          scopeFilter !== "all") && (
           <Button
             variant="ghost"
             size="sm"
@@ -452,6 +480,7 @@ export function BidSuggestionTable({
               setTextFilter("")
               setEngineFilter("all")
               setSeverityFilter("all")
+              setScopeFilter("all")
             }}
           >
             초기화
@@ -498,16 +527,27 @@ export function BidSuggestionTable({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((s) => (
-                <SuggestionRow
-                  key={s.id}
-                  row={s}
-                  selected={selectedIds.has(s.id)}
-                  onToggle={() => toggleOne(s.id)}
-                  onOpenDetail={() => setDetailRow(s)}
-                  canMutate={canMutate}
-                />
-              ))}
+              {filtered.map((s) =>
+                s.scope === "adgroup" ? (
+                  <BundleSuggestionRow
+                    key={s.id}
+                    row={s}
+                    selected={selectedIds.has(s.id)}
+                    onToggle={() => toggleOne(s.id)}
+                    onOpenBundle={() => setBundleSuggestionId(s.id)}
+                    canMutate={canMutate}
+                  />
+                ) : (
+                  <SuggestionRow
+                    key={s.id}
+                    row={s}
+                    selected={selectedIds.has(s.id)}
+                    onToggle={() => toggleOne(s.id)}
+                    onOpenDetail={() => setDetailRow(s)}
+                    canMutate={canMutate}
+                  />
+                ),
+              )}
             </TableBody>
           </Table>
         </div>
@@ -782,6 +822,47 @@ export function BidSuggestionTable({
         </DialogContent>
       </Dialog>
 
+      {/* 묶음 권고 모달 (scope='adgroup') */}
+      <BundleSuggestionDialog
+        open={bundleSuggestionId !== null}
+        onOpenChange={(o) => !o && setBundleSuggestionId(null)}
+        advertiserId={advertiserId}
+        suggestionId={bundleSuggestionId}
+        canMutate={canMutate}
+        onApply={async (selectedKeywordIds) => {
+          if (!bundleSuggestionId) return
+          const res = await approveBundleSuggestion({
+            advertiserId,
+            suggestionId: bundleSuggestionId,
+            selectedKeywordIds,
+          })
+          if (!res.ok) {
+            toast.error(`적용 실패: ${res.error}`)
+            return
+          }
+          const {
+            applied,
+            skippedDrift,
+            skippedAlreadyApplied,
+            skippedLocked,
+          } = res.data
+          const skipParts: string[] = []
+          if (skippedDrift > 0) skipParts.push(`drift ${skippedDrift}건`)
+          if (skippedAlreadyApplied > 0)
+            skipParts.push(`이미 적용 ${skippedAlreadyApplied}건`)
+          if (skippedLocked > 0) skipParts.push(`잠금 ${skippedLocked}건`)
+          const skipMsg =
+            skipParts.length > 0 ? ` (${skipParts.join(", ")} 제외)` : ""
+          if (applied > 0) {
+            toast.success(`${applied}건 적용 큐 적재됨${skipMsg}`)
+          } else {
+            toast.warning(`적용 대상 없음${skipMsg}`)
+          }
+          setBundleSuggestionId(null)
+          router.refresh()
+        }}
+      />
+
       {/* 적용 결과 다이얼로그 */}
       <Dialog
         open={resultDialog !== null}
@@ -901,6 +982,8 @@ function getBudgetActionItems(row: BidSuggestionRow): BudgetActionItem[] | null 
 }
 
 function isApplicableSuggestion(row: BidSuggestionRow): boolean {
+  // 묶음 권고(scope='adgroup')는 본 일괄 적용 흐름 비대상 — 모달에서 부분 선택 적용 (4단계 후속 PR).
+  if (row.scope === "adgroup") return false
   return (
     getBidAction(row) !== null ||
     isQualityOffSuggestion(row) ||
@@ -1054,6 +1137,138 @@ function SuggestionRow({
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
         {formatDate(row.createdAt)}
+      </TableCell>
+    </TableRow>
+  )
+}
+
+// =============================================================================
+// 묶음 행 (scope='adgroup')
+// =============================================================================
+
+function BundleSuggestionRow({
+  row,
+  selected,
+  onToggle,
+  onOpenBundle,
+  canMutate,
+}: {
+  row: BidSuggestionRow
+  selected: boolean
+  onToggle: () => void
+  onOpenBundle: () => void
+  canMutate: boolean
+}) {
+  const action = row.action as Record<string, unknown>
+  const avgDeltaRaw = action.avgDeltaPct
+  const avgDeltaPct =
+    typeof avgDeltaRaw === "number" && Number.isFinite(avgDeltaRaw)
+      ? avgDeltaRaw
+      : null
+  const direction =
+    action.direction === "up" || action.direction === "down"
+      ? action.direction
+      : avgDeltaPct != null && avgDeltaPct < 0
+        ? "down"
+        : "up"
+  const isUp = direction === "up"
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTableRowElement>) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault()
+      onOpenBundle()
+    }
+  }
+
+  return (
+    <TableRow
+      className={cn(
+        "cursor-pointer border-l-4 border-primary bg-muted/30 hover:bg-muted/50",
+      )}
+      onClick={onOpenBundle}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
+    >
+      <TableCell onClick={(e) => e.stopPropagation()}>
+        <Checkbox
+          checked={selected}
+          onCheckedChange={onToggle}
+          disabled={!canMutate}
+          aria-label="선택"
+        />
+      </TableCell>
+      <TableCell>
+        <div className="flex items-center gap-1.5">
+          <PackageIcon
+            aria-hidden="true"
+            className="size-4 text-primary"
+          />
+          <span className="font-semibold">
+            광고그룹: {row.targetName ?? "—"}
+          </span>
+        </div>
+        <span className="text-[10px] text-muted-foreground">
+          {row.affectedCount}개 키워드 묶음
+        </span>
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        — (광고그룹 단위)
+      </TableCell>
+      <TableCell>
+        <EngineBadge engine={row.engineSource} />
+      </TableCell>
+      <TableCell className="text-right font-mono text-sm text-muted-foreground">
+        —
+      </TableCell>
+      <TableCell className="text-right font-mono text-sm text-muted-foreground">
+        —
+      </TableCell>
+      <TableCell className="text-right">
+        {avgDeltaPct != null ? (
+          <span
+            className={cn(
+              "inline-flex items-center justify-end gap-0.5 font-mono text-xs font-semibold",
+              isUp
+                ? "text-emerald-600 dark:text-emerald-400"
+                : "text-amber-700 dark:text-amber-400",
+            )}
+          >
+            {isUp ? (
+              <ArrowUpIcon aria-hidden="true" className="size-3" />
+            ) : (
+              <ArrowDownIcon aria-hidden="true" className="size-3" />
+            )}
+            평균 {Math.abs(avgDeltaPct).toFixed(1)}%
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        )}
+      </TableCell>
+      <TableCell>
+        <SeverityBadge severity={row.severity} />
+      </TableCell>
+      <TableCell>
+        <div
+          className="max-w-md truncate text-xs text-muted-foreground"
+          title={row.reason}
+        >
+          {row.reason}
+        </div>
+      </TableCell>
+      <TableCell
+        className="text-xs text-muted-foreground"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7"
+          onClick={onOpenBundle}
+          disabled={!canMutate}
+        >
+          묶음 보기
+        </Button>
       </TableCell>
     </TableRow>
   )
