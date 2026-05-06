@@ -11,7 +11,7 @@
  *                   충돌 행 resolution 선택, 오류는 안내만(차단 X). 확정 → applying
  *   4. applying   — applyCsvChangeBatch 호출 (즉시 batchId 반환) + GET /api/batch/{id}
  *                   5초 간격 polling. ChangeBatch.status === 'done' / 'failed' 면 result.
- *   5. result     — 카운트 카드 / 진행률 / ChangeBatch ID
+ *   5. result     — 카운트 카드 / 진행률 / 변경 ID
  *                   "닫고 새로고침" → onClosed(true) → router.refresh
  *
  * 안전장치:
@@ -974,7 +974,7 @@ function ApplyingView({
       <ProgressPanel submitted={submitted} progress={progress} />
       <p className="text-center text-[11px] text-muted-foreground">
         백그라운드 Job 으로 처리 중입니다. 모달을 닫아도 작업은 계속되며, 결과는
-        ChangeBatch ID 로 다시 확인할 수 있습니다.
+        변경 ID 로 다시 확인할 수 있습니다.
       </p>
     </div>
   )
@@ -994,7 +994,7 @@ function ResultView({
   function copyBatchId() {
     navigator.clipboard
       .writeText(submitted.batchId)
-      .then(() => toast.success("ChangeBatch ID 복사됨"))
+      .then(() => toast.success("변경 ID 복사됨"))
       .catch(() => toast.error("복사 실패"))
   }
 
@@ -1047,9 +1047,9 @@ function ResultView({
         </table>
       </div>
 
-      {/* ChangeBatch ID */}
+      {/* 변경 ID */}
       <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
-        <span className="text-xs text-muted-foreground">ChangeBatch ID</span>
+        <span className="text-xs text-muted-foreground">변경 ID</span>
         <code className="flex-1 truncate font-mono text-xs">
           {submitted.batchId}
         </code>
@@ -1082,7 +1082,7 @@ function ResultView({
       )}
       {finalStatus === "failed" && (
         <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          일부 또는 모든 변경이 실패했습니다. 실패 항목은 ChangeBatch ID 로
+          일부 또는 모든 변경이 실패했습니다. 실패 항목은 변경 ID 로
           롤백 페이지(F-6.4)에서 확인 / 재시도할 수 있습니다.
         </p>
       )}

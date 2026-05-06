@@ -412,7 +412,7 @@ export function ApprovalQueueTable({
           <DialogHeader>
             <DialogTitle>선택 승인 — 미리보기</DialogTitle>
             <DialogDescription>
-              선택한 신규 키워드 후보를 ChangeBatch 로 적재합니다.
+              선택한 신규 키워드 후보를 변경 작업으로 적재합니다.
               cron(`/api/batch/run`) 이 1분 간격으로 픽업해 SA API 로
               키워드를 등록합니다 (수 분 내 처리).
             </DialogDescription>
@@ -572,8 +572,8 @@ export function ApprovalQueueTable({
           <DialogHeader>
             <DialogTitle>승인 요청 완료</DialogTitle>
             <DialogDescription>
-              ChangeBatch 가 생성되었습니다. cron 이 1분 간격으로 픽업하여 SA
-              API 로 키워드를 등록합니다 (수 분 내 처리).
+              변경 작업이 생성되었습니다. 백그라운드에서 1분 간격으로 처리되어
+              네이버 SA 에 키워드가 등록됩니다 (수 분 내 반영).
             </DialogDescription>
           </DialogHeader>
           {resultDialog && (
@@ -606,7 +606,7 @@ export function ApprovalQueueTable({
               )}
               {resultDialog.batchId && (
                 <div className="break-all border-t pt-2">
-                  <span className="text-muted-foreground">ChangeBatch ID</span>
+                  <span className="text-muted-foreground">변경 ID</span>
                   <div className="mt-0.5 font-mono text-xs">
                     {resultDialog.batchId}
                   </div>

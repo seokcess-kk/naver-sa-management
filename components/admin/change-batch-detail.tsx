@@ -10,7 +10,7 @@
  *
  * 상태:
  *   - 재시도/롤백 결과는 본 화면에 인라인 박스로 표시 + router.refresh.
- *   - 새 ChangeBatch ID (롤백) 는 클립보드 복사 + 상세 페이지 이동 링크 노출.
+ *   - 새 변경 ID (롤백) 는 클립보드 복사 + 상세 페이지 이동 링크 노출.
  *
  * 안전장치:
  *   - 롤백 옵션 ignoreDrift 는 명시적 체크박스 + 안내문.
@@ -605,7 +605,7 @@ function RollbackResultBox({ result }: { result: RollbackResult }) {
       </div>
 
       <div className="mt-3 flex items-center gap-2 rounded-md border bg-background px-3 py-2">
-        <span className="text-xs text-muted-foreground">새 ChangeBatch ID</span>
+        <span className="text-xs text-muted-foreground">새 변경 ID</span>
         <code className="flex-1 truncate font-mono text-xs">
           {result.newBatchId}
         </code>

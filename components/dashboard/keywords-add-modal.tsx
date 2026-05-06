@@ -9,7 +9,7 @@
  *   2. submitting  — 스피너 + 진행 안내. createKeywordsBatch 호출
  *                   throw → form 복귀 + toast.error
  *   3. result      — 카운트 카드 4개 (시도 / 성공 / 실패 / 충돌)
- *                   ChangeBatch ID + 클립보드 복사 (batchId="" → "변경 없음" 안내)
+ *                   변경 ID + 클립보드 복사 (batchId="" → "변경 없음" 안내)
  *                   실패 항목 + 충돌 항목 분리 노출
  *                   "닫고 새로고침" → onClosed(true) → router.refresh
  *
@@ -24,7 +24,7 @@
  * 안전장치:
  *   - hasKeys=false / 광고그룹 0개 → 호출자(KeywordsTable) 측에서 모달 진입 차단
  *   - 100건 상한 (Zod 일치)
- *   - batchId="" 결과 (모두 충돌) → ChangeBatch ID 영역 "변경 없음" 명시
+ *   - batchId="" 결과 (모두 충돌) → 변경 ID 영역 "변경 없음" 명시
  *
  * 폼 라이브러리:
  *   useState — 6개 필드 + 동기 검증 + textarea 줄별 처리만 필요해 react-hook-form
@@ -487,7 +487,7 @@ function ResultView({ result }: { result: CreateKeywordsBatchResult }) {
   function copyBatchId() {
     navigator.clipboard
       .writeText(result.batchId)
-      .then(() => toast.success("ChangeBatch ID 복사됨"))
+      .then(() => toast.success("변경 ID 복사됨"))
       .catch(() => toast.error("복사 실패"))
   }
 
@@ -511,18 +511,18 @@ function ResultView({ result }: { result: CreateKeywordsBatchResult }) {
         />
       </div>
 
-      {/* ChangeBatch ID 영역 */}
+      {/* 변경 ID 영역 */}
       {noBatch ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-300">
           {allConflict
-            ? "변경 없음 — 모든 키워드가 이미 존재해 추가가 skip 되었습니다 (ChangeBatch 미생성)."
+            ? "변경 없음 — 모든 키워드가 이미 존재해 추가가 skip 되었습니다 (변경 사항 없음)."
             : "변경 없음 — 추가할 키워드가 없습니다."}
         </div>
       ) : (
         <>
           <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
             <span className="text-xs text-muted-foreground">
-              ChangeBatch ID
+              변경 ID
             </span>
             <code className="flex-1 truncate font-mono text-xs">
               {result.batchId}

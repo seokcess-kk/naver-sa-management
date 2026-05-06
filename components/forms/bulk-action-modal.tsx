@@ -6,7 +6,7 @@
  * 목적:
  *   F-2.1 캠페인·F-2.2 광고그룹 두 테이블이 각자 4단계 모달
  *   (`input → preview → submit → result`)을 직접 구현해 코드 중복이 컸다.
- *   본 컴포넌트는 4단계 상태 머신·진행 표시·ChangeBatch ID 노출·결과 분리만
+ *   본 컴포넌트는 4단계 상태 머신·진행 표시·변경 ID 노출·결과 분리만
  *   책임지고, **입력 폼 / 전·후 비교 표 / Server Action 호출**은 호출자가
  *   render prop / onSubmit 으로 주입한다.
  *
@@ -18,7 +18,7 @@
  *   2. preview : `renderPreview(items, input)` — 전/후 비교 표.
  *                "확정 적용" 버튼 → onSubmit(input) → submit 단계.
  *   3. submit  : 처리 중 스피너 + "처리 중 N/총 N건". onSubmit 완료 → result.
- *   4. result  : ChangeBatch ID(클립보드 복사) + 성공/실패 카운트 카드 +
+ *   4. result  : 변경 ID(클립보드 복사) + 성공/실패 카운트 카드 +
  *                실패 항목 리스트 + 닫기.
  *
  * 비책임 (호출자에 위임):
@@ -255,7 +255,7 @@ export function BulkActionModal<TItem, TInput>({
 }
 
 // =============================================================================
-// 결과 뷰 (성공/실패 분리 + ChangeBatch ID — SPEC 11.3 의무)
+// 결과 뷰 (성공/실패 분리 + 변경 ID — SPEC 11.3 의무)
 // =============================================================================
 
 function ResultView<TItem>({
@@ -284,7 +284,7 @@ function ResultView<TItem>({
   function copyBatchId() {
     navigator.clipboard
       .writeText(result.batchId)
-      .then(() => toast.success("ChangeBatch ID 복사됨"))
+      .then(() => toast.success("변경 ID 복사됨"))
       .catch(() => toast.error("복사 실패"))
   }
 
@@ -297,7 +297,7 @@ function ResultView<TItem>({
       </div>
 
       <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
-        <span className="text-xs text-muted-foreground">ChangeBatch ID</span>
+        <span className="text-xs text-muted-foreground">변경 ID</span>
         <code className="flex-1 truncate font-mono text-xs">
           {result.batchId}
         </code>

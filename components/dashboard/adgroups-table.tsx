@@ -794,7 +794,7 @@ function ChannelInput({
         <p className="mt-1">
           네이버 SA 의 PC/모바일 매체 ON/OFF 표현이 응답 샘플 마다 달라 본
           기능은 아직 호출 자체를 차단하고 있습니다. 아래 &quot;강제
-          시도&quot; 버튼은 ChangeBatch 를 의도적으로 실패 상태로 종료하여
+          시도&quot; 버튼은 변경 작업을 의도적으로 실패 상태로 종료하여
           운영자가 결과를 확인할 수 있도록 합니다 (실제 SA 변경 X).
         </p>
       </div>

@@ -60,7 +60,7 @@ import {
 const MODE_LABEL: Record<BidAutomationMode, string> = {
   inbox: "Inbox 권고",
   auto_policy_only: "정책 자동만",
-  off: "Off",
+  off: "자동화 끔",
 }
 
 const PACING_LABEL: Record<BudgetPacingMode, string> = {
@@ -276,12 +276,14 @@ function BidAutomationConfigModal({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="inbox">
-                  Inbox 권고 — bid-suggest cron 이 BidSuggestion 적재
+                  Inbox 권고 — 매시간 자동 분석 후 권고만 적재 (적용은 수동 승인)
                 </SelectItem>
                 <SelectItem value="auto_policy_only">
-                  정책 자동만 — Inbox 비활성, BiddingPolicy 키워드만 자동
+                  정책 자동만 — 비딩 정책 등록 키워드만 매시간 자동 조정 (Inbox 비활성)
                 </SelectItem>
-                <SelectItem value="off">Off — 자동화 전체 비활성</SelectItem>
+                <SelectItem value="off">
+                  자동화 끔 — 권고 / 자동 조정 모두 비활성
+                </SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -313,7 +315,7 @@ function BidAutomationConfigModal({
             <Label htmlFor="targetCpa">
               목표 CPA (원, VAT 별도)
               <span className="ml-2 text-xs text-muted-foreground">
-                선택 — 미설정 시 ROAS 또는 baseline 폴백
+                선택 — 미설정 시 ROAS 또는 광고주 평균 폴백
               </span>
             </Label>
             <Input

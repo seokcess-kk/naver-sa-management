@@ -13,7 +13,7 @@
  *                     - Error("확인 키워드 텍스트 불일치") → confirm 복귀 + inline 에러
  *                       (백엔드 안전망 발동 — race condition 케이스)
  *                     - 기타          → toast.error + confirm 복귀
- *   3. result      — ok:true 카드 + ChangeBatch ID + 클립보드 복사
+ *   3. result      — ok:true 카드 + 변경 ID + 클립보드 복사
  *                    (batchId="" idempotent 케이스: "이미 삭제된 키워드 — 변경 없음")
  *                    ok:false destructive 카드 + "닫기"
  *                    "닫고 새로고침" → onClosed(true) → router.refresh
@@ -22,7 +22,7 @@
  *   - admin 외 사용자는 호출자(KeywordsTable)에서 메뉴 자체 disabled — 본 모달 진입 X
  *   - 2차 확인 텍스트 (오타·잘못된 행 보호) — 클라이언트 검증 + 백엔드 검증 이중
  *   - destructive variant 버튼
- *   - ChangeBatch ID 노출 (감사용)
+ *   - 변경 ID 노출 (감사용)
  *   - F-3.2 staging / F-3.3 selection 흐름과 분리 — 본 모달 닫혀도 staging/selection
  *     건드리지 않음 (호출자에서 router.refresh 만)
  *
@@ -325,7 +325,7 @@ function SuccessView({
     if (noBatch) return
     navigator.clipboard
       .writeText(batchId)
-      .then(() => toast.success("ChangeBatch ID 복사됨"))
+      .then(() => toast.success("변경 ID 복사됨"))
       .catch(() => toast.error("복사 실패"))
   }
 
@@ -340,13 +340,13 @@ function SuccessView({
 
       {noBatch ? (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/10 dark:text-amber-300">
-          이미 삭제된 키워드 — 변경 없음 (ChangeBatch 미생성).
+          이미 삭제된 키워드 — 변경 없음 (변경 사항 없음).
         </div>
       ) : (
         <>
           <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2">
             <span className="text-xs text-muted-foreground">
-              ChangeBatch ID
+              변경 ID
             </span>
             <code className="flex-1 truncate font-mono text-xs">
               {batchId}

@@ -671,7 +671,7 @@ export function BidSuggestionTable({
                 </div>
               )}
               <div className="break-all border-t pt-2">
-                <span className="text-muted-foreground">ChangeBatch ID</span>
+                <span className="text-muted-foreground">변경 ID</span>
                 <div className="mt-0.5 font-mono text-xs">
                   {resultDialog.batchId}
                 </div>
