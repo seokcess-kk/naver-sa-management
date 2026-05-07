@@ -45,6 +45,7 @@ import { NextRequest, NextResponse } from "next/server"
 
 import { prisma } from "@/lib/db/prisma"
 import { scrubString } from "@/lib/crypto/scrub-string"
+import { STAT_DAILY_DEVICE_FILTER } from "@/lib/stat-daily/device-filter"
 import {
   bundleSuggestions,
   DEFAULT_MARGINAL_CONFIG,
@@ -337,6 +338,9 @@ async function processBudgetSuggestions(
       level: "campaign",
       refId: { in: campaigns.map((c) => c.nccCampaignId) },
       date: { gte: since },
+      // device 이중집계 방지 — 옵션 B (PC + MOBILE). 자세한 근거는
+      // lib/stat-daily/device-filter.ts 참조.
+      ...STAT_DAILY_DEVICE_FILTER,
     },
     _sum: {
       cost: true,
@@ -351,6 +355,7 @@ async function processBudgetSuggestions(
       level: "campaign",
       refId: { in: campaigns.map((c) => c.nccCampaignId) },
       date: yesterdayDate,
+      ...STAT_DAILY_DEVICE_FILTER,
     },
     _sum: { cost: true },
   })
@@ -570,6 +575,9 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
       advertiserId,
       level: "keyword",
       date: { gte: since },
+      // device 이중집계 방지 — 옵션 B (PC + MOBILE). 같은 (date, level, refId) 에
+      // ALL 행이 공존하여 device 필터 누락 시 cost 가 ~2배로 부풀어 TOP N 권고 왜곡.
+      ...STAT_DAILY_DEVICE_FILTER,
     },
     _sum: {
       impressions: true,

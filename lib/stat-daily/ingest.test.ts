@@ -391,4 +391,145 @@ describe("ingestAdvertiserStatDaily", () => {
     expect(r.rowsSkipped).toBe(0)
     expect(mockTransaction).toHaveBeenCalledTimes(3)
   })
+
+  // ===========================================================================
+  // a) (date, level, refId, device) 단위 합산 collapse 회귀 가드
+  // ===========================================================================
+  // 같은 unique key 의 raw row 가 시간/권역으로 분해돼 다중 출현하는 케이스.
+  // ingest 가 같은 key 에 대해 prisma.statDaily.upsert 를 1회만 호출해야 한다 (P2002 방지).
+  // 가중평균 산식 (sum(avgRnk*imp) / sum(imp)) 도 정확해야 한다.
+  it("같은 (date,level,refId,device) 3행 → upsert 1회 + avgRnk 가중평균", async () => {
+    mockCreateStatReport.mockResolvedValue({ reportJobId: "job-1", status: "REGIST" })
+    mockWaitStatReportReady.mockResolvedValue({
+      reportJobId: "job-1",
+      status: "BUILT",
+      downloadUrl: "https://s3.example/report.tsv",
+    })
+    mockDownloadStatReport.mockResolvedValue("tsv")
+    // 같은 keyword K-1 / device PC 를 시간/권역 분해된 3행으로 적재.
+    //   imp=10 / avgRnk=2  → weight 10
+    //   imp=20 / avgRnk=5  → weight 20
+    //   imp=30 / avgRnk=4  → weight 30
+    //   기대 가중평균 = (2*10 + 5*20 + 4*30) / (10+20+30) = 240 / 60 = 4.0
+    mockParseAdDetailTsv.mockResolvedValue([
+      row({ keywordId: "K-1", impressions: 10, clicks: 1, cost: 100, avgRnk: 2 }),
+      row({ keywordId: "K-1", impressions: 20, clicks: 2, cost: 200, avgRnk: 5 }),
+      row({ keywordId: "K-1", impressions: 30, clicks: 3, cost: 300, avgRnk: 4 }),
+    ])
+
+    const r = await ingestAdvertiserStatDaily({
+      advertiserId: "adv-1",
+      customerId: "cust-1",
+      statDt: new Date("2026-04-27T15:00:00.000Z"),
+    })
+
+    expect(r.rowsInserted).toBe(1)
+    expect(r.rowsSkipped).toBe(0)
+    // upsert 가 1회만 호출 — collapse 후 unique key 중복 제거됨.
+    expect(mockUpsert).toHaveBeenCalledTimes(1)
+    const arg = mockUpsert.mock.calls[0][0] as {
+      where: { date_level_refId_device: { device: string; refId: string } }
+      create: { impressions: number; clicks: number; cost: number; avgRnk: number | null }
+    }
+    expect(arg.where.date_level_refId_device.device).toBe("PC")
+    expect(arg.where.date_level_refId_device.refId).toBe("K-1")
+    expect(arg.create.impressions).toBe(60)
+    expect(arg.create.clicks).toBe(6)
+    expect(arg.create.cost).toBe(600)
+    expect(arg.create.avgRnk).toBeCloseTo(4.0, 5)
+  })
+
+  // ===========================================================================
+  // b) imp=0 또는 avgRnk=null 행은 가중평균 weight 에서 제외
+  // ===========================================================================
+  // 입력 모두 imp=0 또는 avgRnk=null 이면 가중평균 분모=0 → avgRnk 결과 null.
+  it("모든 행 imp=0 또는 avgRnk=null → avgRnk=null (전체 imp=0)", async () => {
+    mockCreateStatReport.mockResolvedValue({ reportJobId: "job-1", status: "REGIST" })
+    mockWaitStatReportReady.mockResolvedValue({
+      reportJobId: "job-1",
+      status: "BUILT",
+      downloadUrl: "https://s3.example/report.tsv",
+    })
+    mockDownloadStatReport.mockResolvedValue("tsv")
+    mockParseAdDetailTsv.mockResolvedValue([
+      // imp=0 행 — weight 에서 제외 (avgRnk=2 이지만 imp=0 이라 미반영).
+      row({ keywordId: "K-1", impressions: 0, clicks: 0, cost: 0, avgRnk: 2 }),
+      // avgRnk=null 행 — 합산엔 imp 카운트, 가중평균 weight 엔 미반영.
+      row({ keywordId: "K-1", impressions: 0, clicks: 0, cost: 0, avgRnk: null }),
+    ])
+
+    await ingestAdvertiserStatDaily({
+      advertiserId: "adv-1",
+      customerId: "cust-1",
+      statDt: new Date("2026-04-27T15:00:00.000Z"),
+    })
+
+    expect(mockUpsert).toHaveBeenCalledTimes(1)
+    const arg = mockUpsert.mock.calls[0][0] as {
+      create: { impressions: number; avgRnk: number | null }
+    }
+    expect(arg.create.impressions).toBe(0)
+    // 모든 weight=0 → avgRnk null
+    expect(arg.create.avgRnk).toBeNull()
+  })
+
+  // ===========================================================================
+  // c) Stats API 보강 적재 — device='ALL' 로 upsert 호출
+  // ===========================================================================
+  // ingest 의 두 경로 (AD_DETAIL collapse + Stats API 보강) 가 같은 (date, level, refId)
+  // 에 대해 device 가 다른 행을 적재한다는 사실을 회귀 가드.
+  // schema 주석 + lib/stat-daily/device-filter.ts 정책 일관성 검증.
+  it("Stats API 보강 — keyword/adgroup/campaign 모두 device='ALL' 로 upsert", async () => {
+    mockCreateStatReport.mockResolvedValue({ reportJobId: "job-1", status: "REGIST" })
+    mockWaitStatReportReady.mockResolvedValue({
+      reportJobId: "job-1",
+      status: "BUILT",
+      downloadUrl: "https://s3.example/report.tsv",
+    })
+    mockDownloadStatReport.mockResolvedValue("tsv")
+    mockParseAdDetailTsv.mockResolvedValue([]) // AD_DETAIL 단계는 빈 행 — 보강만 검증
+    // 활성 캠페인/광고그룹/키워드 각 1개 — 보강 적재 진입.
+    mockCampaignFindMany.mockResolvedValue([{ nccCampaignId: "ncc_cmp_1" }])
+    mockAdGroupFindMany.mockResolvedValue([{ nccAdgroupId: "ncc_ag_1" }])
+    mockKeywordFindMany.mockResolvedValue([{ nccKeywordId: "ncc_kw_1" }])
+    // getStatsChunked 가 level 별 1행씩 반환 (id = ncc*).
+    mockGetStatsChunked.mockImplementation(
+      async (_customerId: string, args: { ids: string[] }) => {
+        return args.ids.map((id) => ({
+          id,
+          impCnt: 100,
+          clkCnt: 5,
+          salesAmt: 1000,
+          recentAvgRnk: 1.5,
+        }))
+      },
+    )
+
+    const r = await ingestAdvertiserStatDaily({
+      advertiserId: "adv-1",
+      customerId: "cust-1",
+      statDt: new Date("2026-04-27T15:00:00.000Z"),
+    })
+
+    // 3 level × 1 row = 3 upsert.
+    expect(r.rowsInserted).toBe(3)
+    expect(mockUpsert).toHaveBeenCalledTimes(3)
+    // 모든 upsert 가 device='ALL' 로 호출됐는지 검증 — 정책 회귀 가드.
+    for (const call of mockUpsert.mock.calls) {
+      const arg = call[0] as {
+        where: { date_level_refId_device: { device: string; level: string; refId: string } }
+        create: { device: string; advertiserId: string }
+      }
+      expect(arg.where.date_level_refId_device.device).toBe("ALL")
+      expect(arg.create.device).toBe("ALL")
+      expect(arg.create.advertiserId).toBe("adv-1")
+    }
+    // level 분포 검증 — campaign/adgroup/keyword 1건씩.
+    const levels = mockUpsert.mock.calls.map(
+      (c) =>
+        (c[0] as { where: { date_level_refId_device: { level: string } } }).where
+          .date_level_refId_device.level,
+    )
+    expect(levels.sort()).toEqual(["adgroup", "campaign", "keyword"])
+  })
 })

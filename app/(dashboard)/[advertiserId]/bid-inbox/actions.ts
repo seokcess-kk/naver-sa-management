@@ -40,6 +40,7 @@ import { revalidatePath } from "next/cache"
 import { z } from "zod"
 
 import { prisma } from "@/lib/db/prisma"
+import { STAT_DAILY_DEVICE_FILTER } from "@/lib/stat-daily/device-filter"
 import { getCurrentAdvertiser } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
 import { enrichBidReason } from "@/lib/llm/bid-reason"
@@ -1145,6 +1146,8 @@ export async function enrichSuggestionReason(
       level: "keyword",
       refId: keyword.nccKeywordId,
       date: { gte: since },
+      // device 이중집계 방지 — lib/stat-daily/device-filter.ts 참조.
+      ...STAT_DAILY_DEVICE_FILTER,
     },
     _sum: {
       impressions: true,
@@ -1793,6 +1796,8 @@ export async function getBundleSuggestionDetail(input: {
         level: "keyword",
         refId: { in: nccKeywordIds },
         date: { gte: since },
+        // device 이중집계 방지 — lib/stat-daily/device-filter.ts 참조.
+        ...STAT_DAILY_DEVICE_FILTER,
       },
       _sum: { clicks: true },
     })

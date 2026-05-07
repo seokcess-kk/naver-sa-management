@@ -20,6 +20,7 @@
  */
 
 import { prisma } from "@/lib/db/prisma"
+import { STAT_DAILY_DEVICE_FILTER } from "@/lib/stat-daily/device-filter"
 
 // =============================================================================
 // 타입
@@ -79,12 +80,14 @@ export async function scanQualityCandidates(
   since.setUTCDate(since.getUTCDate() - cfg.windowDays)
 
   // StatDaily 14일 합산 — 비용 표본 충족 키워드만 (groupBy + having 필터)
+  // device 이중집계 방지 — lib/stat-daily/device-filter.ts 참조.
   const stats = await prisma.statDaily.groupBy({
     by: ["refId"],
     where: {
       advertiserId,
       level: "keyword",
       date: { gte: since },
+      ...STAT_DAILY_DEVICE_FILTER,
     },
     _sum: { impressions: true, clicks: true, cost: true },
   })

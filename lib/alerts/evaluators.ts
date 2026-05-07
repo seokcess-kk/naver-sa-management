@@ -19,6 +19,7 @@
  */
 
 import { prisma } from "@/lib/db/prisma"
+import { STAT_DAILY_DEVICE_FILTER } from "@/lib/stat-daily/device-filter"
 import { getStats } from "@/lib/naver-sa/stats"
 import { getBizmoney } from "@/lib/naver-sa/billing"
 import { NaverSaError } from "@/lib/naver-sa/errors"
@@ -1012,6 +1013,8 @@ export async function evaluateMobileFirstPage(
       level: "keyword",
       date: { gte: since },
       refId: { in: keywords.map((k) => k.nccKeywordId) },
+      // device 이중집계 방지 — lib/stat-daily/device-filter.ts 참조.
+      ...STAT_DAILY_DEVICE_FILTER,
     },
     _sum: { clicks: true },
   })

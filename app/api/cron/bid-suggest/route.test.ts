@@ -460,3 +460,166 @@ describe("cron bid-suggest — stat-daily stale 차단", () => {
     expect(body.budgetCampaignsScanned).toBe(1)
   })
 })
+
+// =============================================================================
+// d) confidence threshold — kpp.dataDays 비례
+// =============================================================================
+// dataDays=1 (신규 광고주) 일 때 minClicksForConfidence / minImpressionsForConfidence 가
+// 더 보수적(작은 임계 5/100)으로 적용되는지 검증. dataDays=7 이면 DEFAULT (50/1000).
+//
+// 검증 방식: cron 의 decideMarginalSuggestion 호출 시 config 인자를 캡처해 임계 수치 직접 비교.
+
+describe("cron bid-suggest — confidence threshold (kpp.dataDays 비례)", () => {
+  beforeEach(() => {
+    // bid 엔진 진입 가능하도록 keyword level stat + Keyword 매핑 채움.
+    mockStatDailyGroupBy.mockImplementation(
+      (args: { where: { level: string } }) => {
+        if (args.where.level === "keyword") {
+          return Promise.resolve([
+            {
+              refId: "ncc_kw_1",
+              _sum: {
+                impressions: 5000,
+                clicks: 100,
+                cost: 100_000,
+                conversions: 5,
+                revenue: 600_000,
+              },
+              _avg: { avgRnk: null },
+            },
+          ])
+        }
+        return Promise.resolve([])
+      },
+    )
+    mockKeywordFindMany.mockResolvedValue([
+      {
+        id: "kw_1",
+        nccKeywordId: "ncc_kw_1",
+        bidAmt: 1000,
+        useGroupBidAmt: false,
+        userLock: false,
+        adgroup: { id: "ag_1", name: "광고그룹 A" },
+      },
+    ])
+    // 캠페인 예산 권고 비활성화 (분기 격리).
+    mockCampaignFindMany.mockResolvedValue([])
+  })
+
+  it("dataDays=1 → confidenceConfig 가 minClicks=5 / minImp=100 으로 보수적 적용", async () => {
+    mockKeywordPerformanceProfileFindUnique.mockResolvedValue({
+      dataDays: 1,
+      avgCtr: null,
+      avgCvr: null,
+      avgCpc: null,
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+
+    // decideMarginalSuggestion 가 1회 이상 호출 — config 인자 캡처.
+    expect(mockedDecideMarginal).toHaveBeenCalled()
+    const arg = (mockedDecideMarginal as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls[0][0] as { config?: { minClicksForConfidence?: number; minImpressionsForConfidence?: number } }
+    expect(arg.config).toBeDefined()
+    // dataDays=1 → confidenceProgress=0 → 임계 5 / 100 (가장 보수적).
+    expect(arg.config?.minClicksForConfidence).toBe(5)
+    expect(arg.config?.minImpressionsForConfidence).toBe(100)
+  })
+
+  it("dataDays=7 (full window) → confidenceConfig=undefined (DEFAULT 50/1000 사용)", async () => {
+    mockKeywordPerformanceProfileFindUnique.mockResolvedValue({
+      dataDays: 7,
+      avgCtr: null,
+      avgCvr: null,
+      avgCpc: null,
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+
+    expect(mockedDecideMarginal).toHaveBeenCalled()
+    const arg = (mockedDecideMarginal as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls[0][0] as { config?: unknown }
+    // 풀 윈도 → cron 은 config override 미전달 (decideMarginal 이 DEFAULT 사용).
+    expect(arg.config).toBeUndefined()
+  })
+
+  it("dataDays=4 (중간) → 임계가 5..50 사이 / 100..1000 사이로 점진 보정", async () => {
+    mockKeywordPerformanceProfileFindUnique.mockResolvedValue({
+      dataDays: 4,
+      avgCtr: null,
+      avgCvr: null,
+      avgCpc: null,
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+
+    const arg = (mockedDecideMarginal as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls[0][0] as { config?: { minClicksForConfidence?: number; minImpressionsForConfidence?: number } }
+    expect(arg.config).toBeDefined()
+    // dataDays=4 → progress = 3/6 = 0.5
+    //   minClicks  = ceil(5 + (50-5)*0.5)  = ceil(27.5)  = 28
+    //   minImpress = ceil(100 + (1000-100)*0.5) = 550
+    expect(arg.config?.minClicksForConfidence).toBe(28)
+    expect(arg.config?.minImpressionsForConfidence).toBe(550)
+  })
+})
+
+// =============================================================================
+// e) device 필터 가드 — top N groupBy 가 PC + MOBILE 만 합산
+// =============================================================================
+// device 이중집계 방지 정책 (lib/stat-daily/device-filter.ts) 회귀 가드.
+// keyword level groupBy 호출의 where 에 device IN ('PC','MOBILE') 가 포함됐는지 검증.
+
+describe("cron bid-suggest — device 필터 가드 (이중집계 방지)", () => {
+  it("level='keyword' top groupBy 가 device IN ('PC','MOBILE') 필터 포함", async () => {
+    mockKeywordPerformanceProfileFindUnique.mockResolvedValue({
+      dataDays: 28,
+      avgCtr: null,
+      avgCvr: null,
+      avgCpc: null,
+    })
+    mockCampaignFindMany.mockResolvedValue([])
+    mockStatDailyGroupBy.mockImplementation(() => Promise.resolve([]))
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+
+    // keyword level groupBy 호출 추출 — where.level='keyword'.
+    const keywordCalls = mockStatDailyGroupBy.mock.calls.filter(
+      (c) => (c[0] as { where: { level: string } }).where.level === "keyword",
+    )
+    expect(keywordCalls.length).toBeGreaterThan(0)
+    for (const call of keywordCalls) {
+      const where = (call[0] as { where: Record<string, unknown> }).where as {
+        device?: { in?: string[] }
+      }
+      expect(where.device).toBeDefined()
+      expect(where.device?.in).toEqual(expect.arrayContaining(["PC", "MOBILE"]))
+      // ALL 미포함 — 이중집계 방지 핵심 가드.
+      expect(where.device?.in).not.toContain("ALL")
+    }
+  })
+
+  it("level='campaign' (예산 권고용) groupBy 도 동일 device 필터", async () => {
+    mockKeywordPerformanceProfileFindUnique.mockResolvedValue(null)
+    // default mock — campaign 1건 (mockCampaignFindMany default).
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+
+    const campaignCalls = mockStatDailyGroupBy.mock.calls.filter(
+      (c) => (c[0] as { where: { level: string } }).where.level === "campaign",
+    )
+    expect(campaignCalls.length).toBeGreaterThan(0)
+    for (const call of campaignCalls) {
+      const where = (call[0] as { where: Record<string, unknown> }).where as {
+        device?: { in?: string[] }
+      }
+      expect(where.device?.in).toEqual(expect.arrayContaining(["PC", "MOBILE"]))
+      expect(where.device?.in).not.toContain("ALL")
+    }
+  })
+})

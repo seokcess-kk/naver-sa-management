@@ -22,6 +22,7 @@
 
 import { prisma } from "@/lib/db/prisma"
 import { Prisma } from "@/lib/generated/prisma/client"
+import { STAT_DAILY_DEVICE_FILTER } from "@/lib/stat-daily/device-filter"
 
 /** 기본 baseline 윈도 (일). */
 export const DEFAULT_BASELINE_DAYS = 28
@@ -60,11 +61,14 @@ export async function calculateBaseline(
   since.setUTCDate(since.getUTCDate() - days)
 
   // 합산 — level='campaign' 으로 광고주 전체 누적 (level 간 중복 합산 회피).
+  // device 이중집계 방지 — 옵션 B (PC + MOBILE). 자세한 근거는
+  // lib/stat-daily/device-filter.ts 참조.
   const agg = await prisma.statDaily.aggregate({
     where: {
       advertiserId,
       date: { gte: since },
       level: "campaign",
+      ...STAT_DAILY_DEVICE_FILTER,
     },
     _sum: {
       impressions: true,
@@ -75,11 +79,13 @@ export async function calculateBaseline(
   })
 
   // 신뢰도 — 데이터 있는 distinct 일수 (0..days)
+  // 같은 device 필터 적용해 dataDays 가 PC/MOBILE 적재 누락 일자를 정확히 반영.
   const distinctDates = await prisma.statDaily.findMany({
     where: {
       advertiserId,
       date: { gte: since },
       level: "campaign",
+      ...STAT_DAILY_DEVICE_FILTER,
     },
     distinct: ["date"],
     select: { date: true },

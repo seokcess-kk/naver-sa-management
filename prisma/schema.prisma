@@ -112,7 +112,17 @@ enum StatDevice {
   // F-9.2: StatHourly 적재는 Stats API hh24 breakdown 만 사용 (시간 분해).
   // Stats API 의 hh24 와 pcMblTp 동시 breakdown 은 미지원으로 관찰됨 → 시간×디바이스
   // 분해는 P2 후속에서 결정. StatHourly 는 device='ALL' 단일 행으로 적재한다.
-  // StatDaily 는 PC/MOBILE 만 사용 (코드 정책). DB 레벨 enum 분리 강제는 하지 않음.
+  //
+  // StatDaily 정책 (사고 복구 후 명문화):
+  //   AD_DETAIL TSV collapse 적재 (lib/stat-daily/ingest.ts toUpsertInput)
+  //     → device='PC' / 'MOBILE' (시간/권역 raw row 를 device 별 합산)
+  //   Stats API 보강 적재 (lib/stat-daily/ingest.ts statsRowToUpsertInput)
+  //     → device='ALL' (광고주 단위 campaign/adgroup/keyword 일별 집계)
+  //   같은 (date, level, refId) 에 PC / MOBILE / ALL 3행이 공존한다.
+  //   조회 시 device 필터 없이 _sum/groupBy 하면 (PC + MOBILE) + ALL = 이중집계.
+  //   따라서 StatDaily 모든 _sum/groupBy/aggregate 호출은 단일 device 분기 선택 필수.
+  //   현재 코드 정책: 옵션 B — device IN ('PC','MOBILE') 합산.
+  //   공통 헬퍼: lib/stat-daily/device-filter.ts STAT_DAILY_DEVICE_FILTER
   ALL
 }
 
