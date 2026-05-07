@@ -1,12 +1,17 @@
 /**
- * 키워드 목록 페이지 (F-3.1)
+ * 키워드 목록 페이지 (F-3.1) — 서버 페이지네이션 + 서버 정렬·필터·검색
  *
  * - RSC. 권한 검증 → advertiserId 한정 prisma 쿼리 (Keyword → AdGroup → Campaign join) → 클라이언트 테이블 위임
- * - raw 컬럼 select X (1MB 응답 회피 — 5천 행 페이로드 절감)
+ * - raw 컬럼 select X (1MB 응답 회피)
  * - Decimal / Date 필드는 클라이언트로 넘기기 전에 number / string 으로 변환
- * - take: 5000 — F-3.1 가상 스크롤 5천 행 안전 상한
  *
- * URL 패턴: `/[advertiserId]/keywords` (광고주별 컨텍스트 — SPEC 11.2)
+ * 페이지네이션 가정 (이전 5천 행 in-memory 모델 폐기):
+ *   - URL `?page=N&pageSize=M&q=...&status=...&sort=...` 로 이동 → RSC 재조회
+ *   - 한 광고주 = 키워드 4만+ 가능 → 클라이언트 메모리 5천 행 모델은 한계 부딪힘
+ *   - Prisma findMany(skip, take) + count 동시 수행 (Promise.all)
+ *   - 정렬·필터·검색 모두 서버 → 클라이언트는 표시만 담당 (manualPagination/Sorting)
+ *
+ * URL 패턴: `/[advertiserId]/keywords?page=1&pageSize=100&...` (광고주별 컨텍스트 — SPEC 11.2)
  *
  * 권한 (F-1.6 / lib/auth/access.ts):
  *   - getCurrentAdvertiser 가 광고주 존재 + 사용자 화이트리스트 검사
@@ -43,10 +48,50 @@ import {
   parseCampaignScopeIds,
   type CampaignScopeSearchParams,
 } from "@/lib/navigation/campaign-scope"
+import {
+  parseKeywordPageParams,
+  type KeywordPageParams,
+  type KeywordSort,
+} from "@/lib/navigation/keyword-page-params"
 import { EMPTY_METRICS, parsePeriod } from "@/lib/dashboard/metrics"
+import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 
 type KeywordsSearchParams = CampaignScopeSearchParams & {
   period?: string | string[]
+  page?: string | string[]
+  pageSize?: string | string[]
+  q?: string | string[]
+  status?: string | string[]
+  sort?: string | string[]
+}
+
+/**
+ * KeywordSort 토큰 → Prisma orderBy 매핑.
+ *
+ * - recentAvgRnk 는 NULL 후순위 (낮을수록 좋은 지표라도 데이터 없는 행을 위로 올리지 않음).
+ * - 그 외 단순 필드는 `{ field: dir }`.
+ */
+function sortToPrismaOrderBy(
+  sort: KeywordSort,
+): Prisma.KeywordOrderByWithRelationInput | Prisma.KeywordOrderByWithRelationInput[] {
+  switch (sort) {
+    case "updatedAt:desc":
+      return { updatedAt: "desc" }
+    case "updatedAt:asc":
+      return { updatedAt: "asc" }
+    case "keyword:asc":
+      return { keyword: "asc" }
+    case "keyword:desc":
+      return { keyword: "desc" }
+    case "bidAmt:desc":
+      return { bidAmt: "desc" }
+    case "bidAmt:asc":
+      return { bidAmt: "asc" }
+    case "recentAvgRnk:asc":
+      return [{ recentAvgRnk: { sort: "asc", nulls: "last" } }]
+    case "recentAvgRnk:desc":
+      return [{ recentAvgRnk: { sort: "desc", nulls: "last" } }]
+  }
 }
 
 // Server Action 단기 timeout fix — syncKeywords 가 광고그룹 N회 listKeywords 호출.
@@ -66,6 +111,7 @@ export default async function KeywordsPage({
   const campaignScopeIds = parseCampaignScopeIds(scopeSearchParams)
   const adgroupScopeIds = parseAdgroupScopeIds(scopeSearchParams)
   const period = parsePeriod(scopeSearchParams.period)
+  const pageParams: KeywordPageParams = parseKeywordPageParams(scopeSearchParams)
   const campaignWhere =
     campaignScopeIds.length > 0
       ? { advertiserId, id: { in: campaignScopeIds } }
@@ -74,6 +120,19 @@ export default async function KeywordsPage({
     adgroupScopeIds.length > 0
       ? { id: { in: adgroupScopeIds }, campaign: campaignWhere }
       : { campaign: campaignWhere }
+
+  // Keyword where — 광고주 횡단 차단(adgroup.campaign join) + status / 검색어 필터.
+  // q 는 case-insensitive contains. 빈 문자열이면 필터 미적용.
+  const keywordWhere: Prisma.KeywordWhereInput = {
+    adgroup: adgroupWhere,
+    ...(adgroupScopeIds.length > 0 ? { adgroupId: { in: adgroupScopeIds } } : {}),
+    ...(pageParams.status !== "all" ? { status: pageParams.status } : {}),
+    ...(pageParams.q
+      ? { keyword: { contains: pageParams.q, mode: "insensitive" as const } }
+      : {}),
+  }
+  const orderBy = sortToPrismaOrderBy(pageParams.sort)
+  const skip = (pageParams.page - 1) * pageParams.pageSize
 
   let advertiser
   let userRole: "admin" | "operator" | "viewer"
@@ -95,60 +154,66 @@ export default async function KeywordsPage({
     throw e
   }
 
-  // 4개 호출 병렬 실행 (서로 독립).
+  // 5개 호출 병렬 실행 (서로 독립).
   //   - lastSync:         마지막 동기화 시각 배지
-  //   - rows:             메인 키워드 데이터 (5천행 상한)
+  //   - rows:             현재 페이지 키워드 (skip / take = pageSize)
+  //   - total:            서버 페이지네이션 — 전체 건수(필터 적용 후)
   //   - adgroupRows:      F-3.6 추가 모달 광고그룹 옵션
   //   - syncCampaignRows: F-3.1 동기화 캠페인 필터
   // raw 컬럼 select 안 함. 광고주 횡단 차단: adgroup.campaign.advertiserId join.
-  const [lastSync, rows, adgroupRows, syncCampaignRows] = await Promise.all([
-    getLastSyncAt(advertiserId),
-    prisma.keyword.findMany({
-      where: { adgroup: adgroupWhere },
-      select: {
-        id: true,
-        nccKeywordId: true,
-        keyword: true,
-        matchType: true,
-        bidAmt: true,
-        useGroupBidAmt: true,
-        userLock: true,
-        externalId: true, // F-3.5 CSV 내보내기 — UPDATE 행에 함께 출력 (재업로드 멱등키 보존)
-        status: true,
-        inspectStatus: true,
-        recentAvgRnk: true,
-        updatedAt: true,
-        adgroup: {
-          select: {
-            id: true,
-            name: true,
-            nccAdgroupId: true,
-            campaign: { select: { id: true, name: true } },
+  const [lastSync, rows, total, adgroupRows, syncCampaignRows] =
+    await Promise.all([
+      getLastSyncAt(advertiserId),
+      prisma.keyword.findMany({
+        where: keywordWhere,
+        select: {
+          id: true,
+          nccKeywordId: true,
+          keyword: true,
+          matchType: true,
+          bidAmt: true,
+          useGroupBidAmt: true,
+          userLock: true,
+          externalId: true, // F-3.5 CSV 내보내기 — UPDATE 행에 함께 출력 (재업로드 멱등키 보존)
+          status: true,
+          inspectStatus: true,
+          recentAvgRnk: true,
+          updatedAt: true,
+          adgroup: {
+            select: {
+              id: true,
+              name: true,
+              nccAdgroupId: true,
+              campaign: { select: { id: true, name: true } },
+            },
           },
         },
-      },
-      orderBy: { updatedAt: "desc" },
-      take: 5000, // F-3.1 가상 스크롤 5천 행 안전 상한
-    }),
-    prisma.adGroup.findMany({
-      where: {
-        ...adgroupWhere,
-        status: { not: "deleted" },
-      },
-      select: {
-        id: true,
-        nccAdgroupId: true,
-        name: true,
-        campaign: { select: { id: true, name: true } },
-      },
-      orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
-    }),
-    prisma.campaign.findMany({
-      where: { advertiserId, status: { not: "deleted" } },
-      select: { id: true, name: true, nccCampaignId: true, status: true },
-      orderBy: { name: "asc" },
-    }),
-  ])
+        orderBy,
+        skip,
+        take: pageParams.pageSize,
+      }),
+      prisma.keyword.count({ where: keywordWhere }),
+      prisma.adGroup.findMany({
+        where: {
+          ...adgroupWhere,
+          status: { not: "deleted" },
+        },
+        select: {
+          id: true,
+          nccAdgroupId: true,
+          name: true,
+          campaign: { select: { id: true, name: true } },
+        },
+        orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+      }),
+      prisma.campaign.findMany({
+        where: { advertiserId, status: { not: "deleted" } },
+        select: { id: true, name: true, nccCampaignId: true, status: true },
+        orderBy: { name: "asc" },
+      }),
+    ])
+
+  const totalPages = Math.max(1, Math.ceil(total / pageParams.pageSize))
 
   const keywordsLastSync = lastSync.keywords
 
@@ -239,6 +304,17 @@ export default async function KeywordsPage({
         advertiserId={advertiserId}
         hasKeys={advertiser.hasKeys}
         keywords={keywords}
+        total={total}
+        pagination={{
+          page: pageParams.page,
+          pageSize: pageParams.pageSize,
+          totalPages,
+        }}
+        filters={{
+          q: pageParams.q,
+          status: pageParams.status,
+          sort: pageParams.sort,
+        }}
         adgroups={adgroups}
         userRole={userRole}
         period={period}

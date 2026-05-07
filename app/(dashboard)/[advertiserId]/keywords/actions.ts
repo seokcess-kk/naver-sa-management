@@ -2952,3 +2952,155 @@ export async function fetchKeywordsStats(
     return { ok: false, error }
   }
 }
+
+// =============================================================================
+// 9. exportKeywordsCsv — F-3.5 CSV 내보내기 (서버 페이지네이션 호환)
+// =============================================================================
+//
+// 배경:
+//   - 서버 페이지네이션 도입 후 클라이언트 표시 행 = 현재 페이지뿐 → 클라이언트
+//     직렬화로는 "현재 페이지만" export 되는 회귀 발생.
+//   - 서버에서 필터(q / status / campaign / adgroup) 동일 조건으로 전체 fetch 후 CSV 직렬화.
+//
+// 정책:
+//   - 광고주 횡단 차단: adgroup.campaign.advertiserId join
+//   - raw 컬럼 select 안 함 — 페이로드 절감
+//   - 직렬화 정렬: keyword asc (export 산출물 안정성)
+//   - 안전 상한: 50,000 행 (대용량 광고주 보호 — 초과 시 truncated=true 표시)
+//   - 시크릿 X (Keyword 응답엔 키 없음) → AuditLog 1건
+//
+// SPEC 6.3 CSV 컬럼:
+//   operation, nccKeywordId, nccAdgroupId, keyword, matchType,
+//   bidAmt, useGroupBidAmt, userLock, externalId
+// - operation = "UPDATE" 고정 (재업로드 시 UPDATE 흐름 호환)
+// - 인코딩: UTF-8 + BOM (\uFEFF) → 한글 엑셀 호환
+// - 파일명: 클라이언트가 결정 (서버는 csv 본문만 반환)
+
+const EXPORT_KEYWORDS_HARD_LIMIT = 50_000
+
+const exportKeywordsOptionsSchema = z.object({
+  campaignIds: z.array(z.string().min(1)).max(500).optional(),
+  adgroupIds: z.array(z.string().min(1)).max(2000).optional(),
+  q: z.string().max(200).optional(),
+  status: z.enum(["all", "on", "off", "deleted"]).optional(),
+})
+
+export type ExportKeywordsOptions = z.infer<typeof exportKeywordsOptionsSchema>
+
+export type ExportKeywordsCsvResult =
+  | {
+      ok: true
+      /** UTF-8 BOM 포함 CSV 본문 (클라이언트가 그대로 Blob 으로 감싸 다운로드) */
+      csv: string
+      total: number
+      /** EXPORT_KEYWORDS_HARD_LIMIT 초과로 일부 누락 됐는지 */
+      truncated: boolean
+    }
+  | { ok: false; error: string }
+
+export async function exportKeywordsCsv(
+  advertiserId: string,
+  options: ExportKeywordsOptions = {},
+): Promise<ExportKeywordsCsvResult> {
+  const { user } = await getCurrentAdvertiser(advertiserId)
+  // hasKeys 검사는 export 에 불필요 (DB only) — 키 미설정 광고주도 기 적재된 키워드 export 허용
+
+  const parsed = exportKeywordsOptionsSchema.parse(options)
+
+  // -- where 조립 — 광고주 횡단 차단 + 필터 적용 ------------------------------
+  const campaignWhere =
+    parsed.campaignIds && parsed.campaignIds.length > 0
+      ? { advertiserId, id: { in: parsed.campaignIds } }
+      : { advertiserId }
+  const adgroupWhere =
+    parsed.adgroupIds && parsed.adgroupIds.length > 0
+      ? { id: { in: parsed.adgroupIds }, campaign: campaignWhere }
+      : { campaign: campaignWhere }
+
+  const trimmedQ = parsed.q?.trim() ?? ""
+
+  const where = {
+    adgroup: adgroupWhere,
+    ...(parsed.adgroupIds && parsed.adgroupIds.length > 0
+      ? { adgroupId: { in: parsed.adgroupIds } }
+      : {}),
+    ...(parsed.status && parsed.status !== "all"
+      ? { status: parsed.status }
+      : {}),
+    ...(trimmedQ
+      ? { keyword: { contains: trimmedQ, mode: "insensitive" as const } }
+      : {}),
+  }
+
+  // -- 전체 count (truncated 여부 판단) ---------------------------------------
+  const total = await prisma.keyword.count({ where })
+
+  const take = Math.min(total, EXPORT_KEYWORDS_HARD_LIMIT)
+  const truncated = total > EXPORT_KEYWORDS_HARD_LIMIT
+
+  const rows = take === 0
+    ? []
+    : await prisma.keyword.findMany({
+        where,
+        select: {
+          nccKeywordId: true,
+          keyword: true,
+          matchType: true,
+          bidAmt: true,
+          useGroupBidAmt: true,
+          userLock: true,
+          externalId: true,
+          adgroup: { select: { nccAdgroupId: true } },
+        },
+        orderBy: { keyword: "asc" },
+        take,
+      })
+
+  // -- CSV 직렬화 -------------------------------------------------------------
+  const data = rows.map((r) => ({
+    operation: "UPDATE",
+    nccKeywordId: r.nccKeywordId,
+    nccAdgroupId: r.adgroup.nccAdgroupId,
+    keyword: r.keyword,
+    matchType: r.matchType ?? "",
+    bidAmt: r.bidAmt === null ? "" : Number(r.bidAmt),
+    useGroupBidAmt: String(r.useGroupBidAmt),
+    userLock: String(r.userLock),
+    externalId: r.externalId ?? "",
+  }))
+
+  const KEYWORD_CSV_COLUMNS = [
+    "operation",
+    "nccKeywordId",
+    "nccAdgroupId",
+    "keyword",
+    "matchType",
+    "bidAmt",
+    "useGroupBidAmt",
+    "userLock",
+    "externalId",
+  ]
+
+  const csvBody = Papa.unparse(data, { columns: KEYWORD_CSV_COLUMNS })
+  const csv = `\uFEFF${csvBody}`
+
+  // AuditLog (시크릿 X — count / 필터 요약만)
+  await logAudit({
+    userId: user.id,
+    action: "keyword.export_csv",
+    targetType: "Advertiser",
+    targetId: advertiserId,
+    after: {
+      total,
+      truncated,
+      filters: {
+        q: trimmedQ || null,
+        status: parsed.status ?? "all",
+        campaignIds: parsed.campaignIds ?? null,
+        adgroupIds: parsed.adgroupIds ?? null,
+      },
+    },
+  })
+
+  return { ok: true, csv, total: rows.length, truncated }
+}
