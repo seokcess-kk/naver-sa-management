@@ -32,11 +32,14 @@
  *   - 다른 액션(bulkActionKeywords 등) 픽업 — action='keyword.csv' 한정
  */
 
+import { revalidatePath } from "next/cache"
 import { NextRequest, NextResponse } from "next/server"
 
 import { applyChange } from "@/lib/batch/apply"
 import { scrubString } from "@/lib/crypto/scrub-string"
 import { prisma } from "@/lib/db/prisma"
+import { recordSyncAt } from "@/lib/sync/last-sync-at"
+import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 
 // Prisma 사용 → Edge 가 아닌 Node 런타임 강제.
 export const runtime = "nodejs"
@@ -79,6 +82,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
   //     · 'keyword.csv'         — F-3.4 CSV 일괄 가져오기
   //     · 'bid_inbox.apply'     — F-11.4 Phase B.3 Inbox 일괄 적용 (Keyword UPDATE 만)
   //     · 'approval_queue.apply' — F-12 D.4 ApprovalQueue 승인 (Keyword CREATE — search_term_promote)
+  //     · 'sync_keywords'       — F-3.1 키워드 동기화 (광고그룹별 listKeywords + Keyword upsert)
   //   다른 액션은 동기 처리(Server Action 안에서 SA 호출) 그대로 두어 보호.
   const acquired = await prisma.$queryRaw<{ id: string }[]>`
     UPDATE "ChangeBatch"
@@ -89,7 +93,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
      WHERE "id" = (
        SELECT "id" FROM "ChangeBatch"
         WHERE "status" IN ('pending','running')
-          AND "action" IN ('keyword.csv','bid_inbox.apply','approval_queue.apply')
+          AND "action" IN ('keyword.csv','bid_inbox.apply','approval_queue.apply','sync_keywords')
           AND ("leaseExpiresAt" IS NULL OR "leaseExpiresAt" < now())
         ORDER BY "createdAt" ASC
         LIMIT 1
@@ -122,12 +126,22 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
     for (const item of items) {
       try {
         const result = await applyChange(item)
+        // sync_keywords 분기 — syncSummary 를 기존 after JSON 에 머지(보존 + 합산값 추가).
+        // 다른 분기(Keyword CREATE/UPDATE/OFF)는 result.syncSummary 미반환 → after 변경 X.
+        const itemAfter = (item.after ?? {}) as Record<string, unknown>
+        const mergedAfter = result.syncSummary
+          ? { ...itemAfter, ...result.syncSummary }
+          : itemAfter
         await prisma.changeItem.update({
           where: { id: item.id },
           data: {
             status: "done",
             // CREATE 성공 시 nccKeywordId 갱신 (UPDATE/OFF 는 미반환 → 기존 targetId 유지)
             targetId: result.nccKeywordId ?? item.targetId,
+            // syncSummary 가 있을 때만 after 갱신 (없으면 기존 JSON 보존)
+            ...(result.syncSummary
+              ? { after: mergedAfter as Prisma.InputJsonValue }
+              : {}),
           },
         })
       } catch (e) {
@@ -173,6 +187,13 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
         leaseExpiresAt: null,
       },
     })
+
+    // -- sync_keywords 전용 finalize hook -----------------------------------
+    // - 모든 done ChangeItem.after 의 syncedKeywords / skipped 합산
+    // - ChangeBatch.summary 갱신 (scannedAdgroups = done 카운트)
+    // - recordSyncAt(advertiserId, 'keywords') — UI 헤더 "마지막 동기화" 배지
+    // - revalidatePath — 키워드 목록 갱신 (Cron context 에서 호출 가능 — Next 16 OK)
+    await finalizeSyncKeywordsBatch(batchId)
   } else {
     // 시간 한계 도달 — lease 해제하여 다음 Cron 이 이어 처리.
     // status 는 "running" 유지 (lease 쿼리가 IS NULL OR < now() 로 픽업).
@@ -192,4 +213,82 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
     processed: processedThisRun,
     remaining,
   })
+}
+
+// =============================================================================
+// finalizeSyncKeywordsBatch — sync_keywords 종료 hook
+// =============================================================================
+//
+// 호출 시점: ChangeBatch 가 done/failed 로 갱신된 직후 (remaining===0).
+// - batch.action !== 'sync_keywords' 면 즉시 return (no-op)
+// - 모든 done ChangeItem.after 에서 syncedKeywords / skipped 합산
+// - summary 갱신 (scannedAdgroups = done 카운트)
+// - recordSyncAt(advertiserId, 'keywords') — UI "마지막 동기화" 배지
+// - revalidatePath(`/${advertiserId}/keywords`) — Next 16 cron context 호출 가능
+//
+// 시크릿 X — summary.advertiserId / customerId 만 (키 없음).
+
+async function finalizeSyncKeywordsBatch(batchId: string): Promise<void> {
+  const batch = await prisma.changeBatch.findUnique({
+    where: { id: batchId },
+    select: { id: true, action: true, summary: true },
+  })
+  if (!batch) return
+  if (batch.action !== "sync_keywords") return
+
+  const summary =
+    batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary)
+      ? (batch.summary as Record<string, unknown>)
+      : {}
+  const advertiserId =
+    typeof summary.advertiserId === "string" ? summary.advertiserId : null
+
+  // -- done ChangeItem 의 syncedKeywords / skipped 합산 -----------------------
+  // sync_keywords 광고그룹 단위라 batch.total = adgroups.length (수백 단위) → findMany 안전.
+  const doneItems = await prisma.changeItem.findMany({
+    where: { batchId, status: "done" },
+    select: { after: true },
+  })
+
+  let syncedKeywords = 0
+  let skipped = 0
+  for (const it of doneItems) {
+    const after =
+      it.after && typeof it.after === "object" && !Array.isArray(it.after)
+        ? (it.after as Record<string, unknown>)
+        : {}
+    if (typeof after.syncedKeywords === "number") {
+      syncedKeywords += after.syncedKeywords
+    }
+    if (typeof after.skipped === "number") {
+      skipped += after.skipped
+    }
+  }
+
+  const updatedSummary: Record<string, unknown> = {
+    ...summary,
+    scannedAdgroups: doneItems.length,
+    syncedKeywords,
+    skipped,
+  }
+
+  await prisma.changeBatch.update({
+    where: { id: batchId },
+    data: { summary: updatedSummary as Prisma.InputJsonValue },
+  })
+
+  if (advertiserId) {
+    // lastSyncAt 갱신 (실패 무관 — 동기화 시도 완료 표시)
+    try {
+      await recordSyncAt(advertiserId, "keywords")
+    } catch (e) {
+      console.warn("[batch.run] recordSyncAt failed:", e)
+    }
+    // UI 갱신 — Next 16 은 cron/route handler context 에서도 revalidatePath 호출 가능.
+    try {
+      revalidatePath(`/${advertiserId}/keywords`)
+    } catch (e) {
+      console.warn("[batch.run] revalidatePath failed:", e)
+    }
+  }
 }

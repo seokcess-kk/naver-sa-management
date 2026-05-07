@@ -6,10 +6,11 @@
  *   - 성공 시 DB(Keyword 등) upsert/update
  *   - 실패 시 throw — 호출자(`/api/batch/run`)가 ChangeItem.status='failed' + error 기록
  *
- * 본 PR(F-3.4) 범위:
- *   - targetType="Keyword" 만 (CSV 일괄 가져오기 — operation: CREATE / UPDATE / OFF)
- *   - 그 외 targetType (Ad / AdExtension / Campaign / AdGroup) 은 throw
- *     ("unsupported targetType for chunk executor") — 후속 PR 에서 화이트리스트 확장
+ * 화이트리스트 (targetType / action):
+ *   - targetType="Keyword"  → CSV 일괄 가져오기 (operation: CREATE / UPDATE / OFF)
+ *                            + bid_inbox.apply / approval_queue.apply
+ *   - targetType="AdGroup"  → sync_keywords (광고그룹별 listKeywords 청크 동기화)
+ *   - 그 외 targetType 은 throw ("unsupported targetType for chunk executor")
  *
  * 호출 진입점:
  *   - app/api/batch/run/route.ts — Vercel Cron 매분 호출 → lease 획득 → 본 함수 호출
@@ -22,6 +23,7 @@ import { prisma } from "@/lib/db/prisma"
 import "@/lib/naver-sa/credentials"
 import {
   createKeywords,
+  listKeywords,
   updateKeywordsBulk,
   type Keyword as SaKeyword,
   type KeywordBulkUpdateItem,
@@ -29,7 +31,10 @@ import {
   type KeywordUpdatePatch,
 } from "@/lib/naver-sa/keywords"
 import type { ChangeItem } from "@/lib/generated/prisma/client"
-import type { KeywordStatus } from "@/lib/generated/prisma/client"
+import type {
+  InspectStatus,
+  KeywordStatus,
+} from "@/lib/generated/prisma/client"
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 
 // =============================================================================
@@ -40,9 +45,15 @@ import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
  * applyChange 반환:
  *   - CREATE 성공: nccKeywordId 채움 (호출자가 ChangeItem.targetId 갱신)
  *   - UPDATE / OFF 성공: nccKeywordId 미반환 (이미 ChangeItem.targetId 에 채워짐)
+ *   - sync_keywords (AdGroup 처리) 성공: syncSummary 채움 — 호출자가 ChangeItem.after 에 머지
  */
 export type ApplyChangeResult = {
   nccKeywordId?: string
+  /** sync_keywords 분기 전용. 호출자(/api/batch/run)가 after JSON 에 머지하여 finalize 합산. */
+  syncSummary?: {
+    syncedKeywords: number
+    skipped: number
+  }
 }
 
 // =============================================================================
@@ -62,6 +73,12 @@ export type ApplyChangeResult = {
  * 동기 처리. 외부 변경 + DB 반영 모두 본 함수 안에서.
  */
 export async function applyChange(item: ChangeItem): Promise<ApplyChangeResult> {
+  // sync_keywords 분기 — targetType='AdGroup' (광고그룹별 listKeywords + Keyword upsert).
+  // 본 분기는 operation 미사용 (after = { customerId, dbAdgroupId, advertiserId } 만).
+  if (item.targetType === "AdGroup") {
+    return applySyncKeywordsAdgroup(item)
+  }
+
   if (item.targetType !== "Keyword") {
     throw new Error(
       `unsupported targetType for chunk executor: ${item.targetType}`,
@@ -350,5 +367,213 @@ function mapKeywordStatusFromSa(k: SaKeyword): KeywordStatus {
     return "off"
   }
   return "on"
+}
+
+/**
+ * 네이버 SA Keyword.inspectStatus → 앱 InspectStatus enum 매핑.
+ *
+ * keywords/actions.ts 의 mapInspectStatus 와 동일 정책. 정책 변경 시 양쪽 동기화 필요.
+ *   - APPROVED / PASSED / OK / ELIGIBLE   → approved
+ *   - REJECTED / FAILED / DENIED          → rejected
+ *   - 그 외 (UNDER_REVIEW / 미정 / 누락)  → pending
+ */
+function mapInspectStatusFromSa(k: SaKeyword): InspectStatus {
+  const raw = (k.inspectStatus ?? "").toString().toUpperCase().trim()
+  if (
+    raw === "APPROVED" ||
+    raw === "PASSED" ||
+    raw === "OK" ||
+    raw === "ELIGIBLE"
+  ) {
+    return "approved"
+  }
+  if (raw === "REJECTED" || raw === "FAILED" || raw === "DENIED") {
+    return "rejected"
+  }
+  return "pending"
+}
+
+/**
+ * recentAvgRnk 응답 파싱 — 숫자 / 문자열 / null 모두 받아 number | null 반환.
+ * keywords/actions.ts 와 동일한 안전 캐스팅 패턴.
+ */
+function parseRecentAvgRnk(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value
+  if (typeof value === "string") {
+    const n = Number(value)
+    if (Number.isFinite(n)) return n
+  }
+  return null
+}
+
+// =============================================================================
+// sync_keywords (AdGroup 단위) — listKeywords + Keyword upsert
+// =============================================================================
+//
+// 흐름:
+//   1. item.after 검증 (customerId / dbAdgroupId / advertiserId 모두 string)
+//   2. 광고그룹 DB 재검증 (시간차 외부 변경 / 광고주 횡단 차단)
+//   3. listKeywords(customerId, { nccAdgroupId }) — 토큰 버킷 큐잉 (client.ts 자동 처리)
+//   4. 응답 키워드 배열을 nccKeywordId unique 로 prisma.keyword.upsert (자연 멱등)
+//      - 응답의 nccAdgroupId 가 dbAdgroupId 와 다르면 (정상 케이스 X) skip 카운트
+//   5. syncSummary 반환 — 호출자(/api/batch/run)가 ChangeItem.after 에 머지
+//
+// 멱등성:
+//   - ChangeItem 재시도 시 동일 nccAdgroupId 로 listKeywords 재호출 + upsert 자연 멱등.
+//
+// 광고주 횡단 차단:
+//   - actions.ts(enqueue) 시점 검증 + 본 함수에서 dbAdgroupId.campaign.advertiserId 재검증
+//     (시간차로 광고그룹 deleted 됐거나 캠페인 이동 시 throw → ChangeItem.status='failed').
+
+async function applySyncKeywordsAdgroup(
+  item: ChangeItem,
+): Promise<ApplyChangeResult> {
+  const after = (item.after ?? {}) as Record<string, unknown>
+  const customerId = String(after.customerId ?? "")
+  const dbAdgroupId = String(after.dbAdgroupId ?? "")
+  const advertiserId = String(after.advertiserId ?? "")
+  const nccAdgroupId = item.targetId ?? ""
+
+  if (!customerId) {
+    throw new Error("sync_keywords: customerId 누락 (after.customerId)")
+  }
+  if (!dbAdgroupId) {
+    throw new Error("sync_keywords: dbAdgroupId 누락 (after.dbAdgroupId)")
+  }
+  if (!advertiserId) {
+    throw new Error("sync_keywords: advertiserId 누락 (after.advertiserId)")
+  }
+  if (!nccAdgroupId) {
+    throw new Error("sync_keywords: targetId(nccAdgroupId) 누락")
+  }
+
+  // -- 광고그룹 재검증 (시간차 / 광고주 횡단 가드) -----------------------------
+  // enqueue 후 Cron 픽업 사이에 광고그룹이 deleted 됐거나, 같은 nccAdgroupId 가 다른 광고주로
+  // 이동했을 가능성 (운영상 드물지만 가드).
+  const dbAdgroup = await prisma.adGroup.findUnique({
+    where: { id: dbAdgroupId },
+    select: {
+      id: true,
+      nccAdgroupId: true,
+      campaign: { select: { advertiserId: true } },
+    },
+  })
+  if (!dbAdgroup) {
+    throw new Error(`sync_keywords: 광고그룹 미존재(DB) id=${dbAdgroupId}`)
+  }
+  if (dbAdgroup.nccAdgroupId !== nccAdgroupId) {
+    // enqueue 시점 nccAdgroupId 와 현재 DB 값이 불일치 — drift. throw 로 가시성 확보.
+    throw new Error(
+      `sync_keywords: nccAdgroupId drift (item=${nccAdgroupId} db=${dbAdgroup.nccAdgroupId})`,
+    )
+  }
+  if (dbAdgroup.campaign.advertiserId !== advertiserId) {
+    throw new Error("sync_keywords: 광고주 일치 검증 실패")
+  }
+
+  // -- listKeywords 호출 (토큰 버킷이 광고주별 큐잉 자동) ---------------------
+  const remote: SaKeyword[] = await listKeywords(customerId, { nccAdgroupId })
+
+  // -- 응답 키워드 upsert (nccKeywordId unique 자연 멱등) --------------------
+  let syncedKeywords = 0
+  let skipped = 0
+
+  for (const k of remote) {
+    // 응답의 nccAdgroupId 가 우리가 요청한 광고그룹과 다르면 skip (정상 케이스 X — 안전 가드).
+    if (k.nccAdgroupId !== nccAdgroupId) {
+      skipped++
+      continue
+    }
+
+    const mappedStatus = mapKeywordStatusFromSa(k)
+    const mappedInspect = mapInspectStatusFromSa(k)
+    const bidAmtVal = typeof k.bidAmt === "number" ? k.bidAmt : null
+    const useGroupBidAmtVal =
+      typeof k.useGroupBidAmt === "boolean" ? k.useGroupBidAmt : true
+    const userLockVal =
+      typeof k.userLock === "boolean" ? k.userLock : false
+
+    // matchType / recentAvgRnk 는 응답에 있을 때만 update 에 포함 (없으면 기존값 유지).
+    // KeywordSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
+    const anyK = k as unknown as {
+      matchType?: string
+      recentAvgRnk?: number | string | null
+    }
+    const matchTypeVal =
+      typeof anyK.matchType === "string" && anyK.matchType.length > 0
+        ? anyK.matchType.toUpperCase()
+        : null
+    const recentAvgRnkVal = parseRecentAvgRnk(anyK.recentAvgRnk)
+
+    const rawJson = k as unknown as Prisma.InputJsonValue
+
+    const baseCreateData: {
+      adgroupId: string
+      nccKeywordId: string
+      keyword: string
+      matchType: string | null
+      bidAmt: number | null
+      useGroupBidAmt: boolean
+      userLock: boolean
+      status: KeywordStatus
+      inspectStatus: InspectStatus
+      raw: Prisma.InputJsonValue
+      recentAvgRnk?: number
+    } = {
+      adgroupId: dbAdgroupId,
+      nccKeywordId: k.nccKeywordId,
+      keyword: k.keyword,
+      matchType: matchTypeVal,
+      bidAmt: bidAmtVal,
+      useGroupBidAmt: useGroupBidAmtVal,
+      userLock: userLockVal,
+      status: mappedStatus,
+      inspectStatus: mappedInspect,
+      raw: rawJson,
+    }
+    if (recentAvgRnkVal !== null) {
+      baseCreateData.recentAvgRnk = recentAvgRnkVal
+    }
+
+    // update 페이로드: 응답에 없는 필드(matchType / recentAvgRnk)는 빼서 기존값 유지.
+    const baseUpdateData: {
+      adgroupId: string
+      keyword: string
+      bidAmt: number | null
+      useGroupBidAmt: boolean
+      userLock: boolean
+      status: KeywordStatus
+      inspectStatus: InspectStatus
+      raw: Prisma.InputJsonValue
+      matchType?: string
+      recentAvgRnk?: number
+    } = {
+      adgroupId: dbAdgroupId,
+      keyword: k.keyword,
+      bidAmt: bidAmtVal,
+      useGroupBidAmt: useGroupBidAmtVal,
+      userLock: userLockVal,
+      status: mappedStatus,
+      inspectStatus: mappedInspect,
+      raw: rawJson,
+    }
+    if (matchTypeVal !== null) {
+      baseUpdateData.matchType = matchTypeVal
+    }
+    if (recentAvgRnkVal !== null) {
+      baseUpdateData.recentAvgRnk = recentAvgRnkVal
+    }
+
+    await prisma.keyword.upsert({
+      where: { nccKeywordId: k.nccKeywordId },
+      create: baseCreateData,
+      update: baseUpdateData,
+    })
+    syncedKeywords++
+  }
+
+  return {
+    syncSummary: { syncedKeywords, skipped },
+  }
 }
 

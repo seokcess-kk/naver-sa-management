@@ -51,15 +51,8 @@ import { getCurrentAdvertiser, assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
 import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import {
-  getAdgroupChunkSize,
-  logSyncTiming,
-  mapWithConcurrency,
-  UPSERT_CONCURRENCY,
-} from "@/lib/sync/concurrency"
-import {
   createKeywords,
   deleteKeyword,
-  listKeywords,
   updateKeywordsBulk,
   type Keyword as SaKeyword,
   type KeywordBulkUpdateItem,
@@ -75,16 +68,22 @@ import type {
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 
 // =============================================================================
-// 1. syncKeywords — NAVER → DB upsert
+// 1. syncKeywords — ChangeBatch enqueue (SPEC v0.2.1 3.5 Job Table + Chunk Executor)
 // =============================================================================
 
+/**
+ * 반환:
+ *   - 광고그룹 0개  → batchId=null, total=0  (UI 는 polling 생략)
+ *   - 광고그룹 ≥1개 → batchId=batch.id, total=adgroups.length (UI 는 5초 polling)
+ *
+ * `scope` 는 캠페인 필터 여부를 UI 로 알려주기 위한 표시용 — "전체 동기화" / "선택 캠페인" 라벨용.
+ */
 export type SyncKeywordsResult =
   | {
       ok: true
-      syncedKeywords: number
-      scannedAdgroups: number
-      skipped: number
-      durationMs: number
+      batchId: string | null
+      total: number
+      scope: "all" | "campaigns"
     }
   | { ok: false; error: string }
 
@@ -101,27 +100,26 @@ export type SyncKeywordsOptions = {
 }
 
 /**
- * 키워드 동기화 (광고주 단위 — 모든 광고그룹 순회).
+ * 키워드 동기화 enqueue (광고주 단위 — 모든 광고그룹 순회).
  *
+ * 동기 흐름 폐기 사유 (이관 배경):
+ *   - 200 광고그룹 / 5천 키워드 환경에서 listKeywords 가 토큰 버킷(분당 50회 보수 설정)에
+ *     직렬화 → 동기 호출 5분 초과로 Vercel maxDuration=300s 한계 초과.
+ *   - SA 키워드 조회가 광고그룹 단위만 제공 → N=200 호출. chunk 분산이 필수.
+ *
+ * 신규 흐름 (SPEC v0.2.1 3.5):
  *   1. getCurrentAdvertiser — 권한 검증 + 광고주 객체
  *   2. hasKeys 확인 (시크릿 미입력이면 즉시 차단)
- *   3. DB AdGroup 매핑 테이블 구성 (nccAdgroupId → AdGroup.id)
- *      - 광고주 한정 (campaign.advertiserId join). 캠페인/광고그룹 사전 동기화 필요.
- *   4. 광고그룹 마다 listKeywords(customerId, { nccAdgroupId }) 순차 호출
- *      - Rate Limit 토큰 버킷이 광고주별로 큐잉 (client.ts) → 별도 throttle 불필요
- *      - 단일 광고그룹 호출 실패는 부분 실패로 처리 (다른 광고그룹은 계속)
- *   5. 각 row upsert (nccKeywordId unique)
- *      - adgroupIdMap 누락 시 skip + skippedCount (광고그룹 미동기화 또는 삭제됨)
- *      - matchType / recentAvgRnk 는 응답에 있을 때만 update
- *   6. AuditLog 1건 (요약, 시크릿 X)
+ *   3. DB AdGroup query (광고주 한정 + 캠페인 필터). 0개면 즉시 종료.
+ *   4. ChangeBatch (action='sync_keywords', status='pending') + ChangeItem N개 createMany
+ *      - ChangeItem.targetType = 'AdGroup'
+ *      - ChangeItem.after = { customerId, dbAdgroupId, advertiserId } (Cron 실행 시 필요)
+ *      - idempotencyKey = `${batchId}:${nccAdgroupId}` (재실행 시 중복 방지)
+ *   5. AuditLog 1건 (action='keyword.sync.enqueue')
+ *   6. revalidatePath 미호출 (실제 갱신은 Cron finalize 시점)
  *
- * 본 액션은 "조회 → 적재" 만 — 외부 변경 X → ChangeBatch 미사용 (정책상 OK).
- *
- * 시간 한계 (BACKLOG: 동기화 시간 한계 / 1차 개선):
- *   - maxDuration=300s + 광고그룹 chunk N(env SYNC_ADGROUP_CHUNK_SIZE, 기본 5) 병렬 list
- *     + chunk 내부 keyword upsert 10 병렬화 (UPSERT_CONCURRENCY).
- *   - 종료 시 logSyncTiming 으로 totalMs 출력 — totalMs > maxDuration*0.8 (240s) 지속 발생 시
- *     ChangeBatch + Chunk Executor (SPEC 3.5) 이관 트리거.
+ * Cron 처리 흐름은 lib/batch/apply.ts (applySyncKeywordsAdgroup) +
+ * app/api/batch/run/route.ts (sync_keywords 화이트리스트 + finalize hook) 참조.
  */
 export async function syncKeywords(
   advertiserId: string,
@@ -135,8 +133,7 @@ export async function syncKeywords(
   const { campaignIds } = options
   const hasCampaignFilter =
     Array.isArray(campaignIds) && campaignIds.length > 0
-
-  const start = Date.now()
+  const scope: "all" | "campaigns" = hasCampaignFilter ? "campaigns" : "all"
 
   // -- DB 광고그룹 매핑 테이블 (광고주 한정 + 선택한 캠페인 한정) ---------------
   // 응답의 nccAdgroupId → DB AdGroup.id 룩업용. Keyword.adgroupId 는 AdGroup.id (cuid).
@@ -152,19 +149,21 @@ export async function syncKeywords(
   })
 
   if (adgroups.length === 0) {
-    // 광고그룹이 없으면 동기화할 키워드도 없음. 정상 종료.
+    // 광고그룹이 없으면 동기화할 키워드도 없음. ChangeBatch 미생성, 즉시 종료.
+    // (UI 에서 polling 생략 — batchId=null 이면 finished 상태로 간주)
     await logAudit({
       userId: user.id,
-      action: "keyword.sync",
+      action: "keyword.sync.enqueue",
       targetType: "Advertiser",
       targetId: advertiserId,
       before: null,
       after: {
-        syncedKeywords: 0,
-        scannedAdgroups: 0,
-        skipped: 0,
+        advertiserId,
         customerId: advertiser.customerId,
         campaignIds: hasCampaignFilter ? campaignIds : undefined,
+        scannedAdgroups: 0,
+        syncedKeywords: 0,
+        skipped: 0,
         note: "no-adgroups",
       },
     })
@@ -174,202 +173,85 @@ export async function syncKeywords(
     revalidatePath(`/${advertiserId}/keywords`)
     return {
       ok: true,
-      syncedKeywords: 0,
-      scannedAdgroups: 0,
-      skipped: 0,
-      durationMs: Date.now() - start,
+      batchId: null,
+      total: 0,
+      scope,
     }
   }
 
-  const adgroupIdMap = new Map<string, string>(
-    adgroups.map((g) => [g.nccAdgroupId, g.id]),
-  )
-
-  // -- 광고그룹 단위 listKeywords 반복 ----------------------------------------
-  // SA 키워드 조회는 광고그룹 단위만 제공. 광고그룹 N개 → 호출 N번.
-  // 부분 실패 허용 (Promise.allSettled): 단일 광고그룹 실패는 다른 광고그룹 동기화에 영향 X.
-  //
-  // 성능 1차 개선 (BACKLOG: 동기화 시간 한계):
-  //   - 광고그룹 chunk N(env SYNC_ADGROUP_CHUNK_SIZE, 기본 5) 병렬 listKeywords (Rate Limit
-  //     토큰 버킷이 광고주별 큐잉 → 자동 wait).
-  //   - chunk 결과 도착 즉시 keyword upsert 도 UPSERT_CONCURRENCY=10 병렬화
-  //     (Supabase pool 안전선 내) — 5천 행 sequential ~150s → 병렬 ~15s 약 10배 단축.
-  let syncedKeywords = 0
-  let skipped = 0
-  let scannedAdgroups = 0
-
-  const CHUNK_SIZE = getAdgroupChunkSize()
-
-  try {
-    for (let i = 0; i < adgroups.length; i += CHUNK_SIZE) {
-      const slice = adgroups.slice(i, i + CHUNK_SIZE)
-      const settled = await Promise.allSettled(
-        slice.map((ag) =>
-          listKeywords(advertiser.customerId, { nccAdgroupId: ag.nccAdgroupId }),
-        ),
-      )
-
-      for (let j = 0; j < slice.length; j++) {
-        const ag = slice[j]
-        const r = settled[j]
-        if (r.status === "rejected") {
-          // 단일 광고그룹 실패는 로그만 남기고 다음으로 (부분 동기화).
-          const e = r.reason
-          if (e instanceof NaverSaError) {
-            console.warn(
-              `[syncKeywords] listKeywords failed for nccAdgroupId=${ag.nccAdgroupId}: ${e.message}`,
-            )
-          } else {
-            console.warn(
-              `[syncKeywords] listKeywords unknown error for nccAdgroupId=${ag.nccAdgroupId}:`,
-              e,
-            )
-          }
-          scannedAdgroups++
-          continue
-        }
-        const remote: SaKeyword[] = r.value
-
-        // -- upsert 병렬 (UPSERT_CONCURRENCY) -------------------------------
-        // chunk 내부의 keyword 목록을 동시 N개씩 upsert. parent 광고그룹 미존재 행은 skip.
-        // 결과 합산은 worker 외부에서 (closure 변수 race 회피 — mapWithConcurrency 가
-        // results 배열 반환).
-        const upsertResults = await mapWithConcurrency(
-          remote,
-          UPSERT_CONCURRENCY,
-          async (k): Promise<"ok" | "skip"> => {
-            const dbAdgroupId = adgroupIdMap.get(k.nccAdgroupId)
-            if (!dbAdgroupId) {
-              console.warn(
-                `[syncKeywords] skip nccKeywordId=${k.nccKeywordId}: ` +
-                  `parent nccAdgroupId=${k.nccAdgroupId} not found in DB`,
-              )
-              return "skip"
-            }
-
-            const mappedStatus = mapKeywordStatus(k)
-            const mappedInspect = mapInspectStatus(k)
-            const bidAmtVal = typeof k.bidAmt === "number" ? k.bidAmt : null
-            const useGroupBidAmtVal =
-              typeof k.useGroupBidAmt === "boolean" ? k.useGroupBidAmt : true
-            const userLockVal =
-              typeof k.userLock === "boolean" ? k.userLock : false
-
-            // matchType / recentAvgRnk 는 응답에 있을 때만 반영 (없으면 기존값 유지).
-            // KeywordSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
-            const anyK = k as unknown as {
-              matchType?: string
-              recentAvgRnk?: number | string | null
-            }
-            const matchTypeVal =
-              typeof anyK.matchType === "string" && anyK.matchType.length > 0
-                ? anyK.matchType.toUpperCase()
-                : null
-
-            const rawJson = k as unknown as Prisma.InputJsonValue
-
-            // upsert: matchType / recentAvgRnk 는 update 시점엔 값이 있을 때만 덮어쓰기.
-            // create 시에는 응답에 없으면 null 로 둠 (P1 표시 OK).
-            const baseCreateData = {
-              adgroupId: dbAdgroupId,
-              nccKeywordId: k.nccKeywordId,
-              keyword: k.keyword,
-              matchType: matchTypeVal,
-              bidAmt: bidAmtVal,
-              useGroupBidAmt: useGroupBidAmtVal,
-              userLock: userLockVal,
-              status: mappedStatus,
-              inspectStatus: mappedInspect,
-              raw: rawJson,
-            }
-
-            // update 페이로드: 응답에 없는 필드(matchType)는 빼서 기존값 유지.
-            const baseUpdateData: {
-              adgroupId: string
-              keyword: string
-              bidAmt: number | null
-              useGroupBidAmt: boolean
-              userLock: boolean
-              status: KeywordStatus
-              inspectStatus: InspectStatus
-              raw: Prisma.InputJsonValue
-              matchType?: string
-            } = {
-              adgroupId: dbAdgroupId,
-              keyword: k.keyword,
-              bidAmt: bidAmtVal,
-              useGroupBidAmt: useGroupBidAmtVal,
-              userLock: userLockVal,
-              status: mappedStatus,
-              inspectStatus: mappedInspect,
-              raw: rawJson,
-            }
-            if (matchTypeVal !== null) {
-              baseUpdateData.matchType = matchTypeVal
-            }
-
-            await prisma.keyword.upsert({
-              where: { nccKeywordId: k.nccKeywordId },
-              create: baseCreateData,
-              update: baseUpdateData,
-            })
-            return "ok"
-          },
-        )
-
-        for (const r of upsertResults) {
-          if (r === "ok") syncedKeywords++
-          else skipped++
-        }
-
-        scannedAdgroups++
-      }
-    }
-  } catch (e) {
-    // upsert 단계 자체 실패 (DB 연결 등 치명 오류).
-    console.error("[syncKeywords] upsert failed:", e)
-    return { ok: false, error: "DB 적재 중 오류" }
-  }
-
-  await logAudit({
-    userId: user.id,
-    action: "keyword.sync",
-    targetType: "Advertiser",
-    targetId: advertiserId,
-    before: null,
-    after: {
-      syncedKeywords,
-      scannedAdgroups,
-      skipped,
-      customerId: advertiser.customerId,
-      campaignIds: hasCampaignFilter ? campaignIds : undefined,
+  // -- ChangeBatch 생성 (status='pending', lease 컬럼 NULL) -------------------
+  // Cron(/api/batch/run) 이 화이트리스트(action='sync_keywords') 픽업 → 광고그룹별
+  // applySyncKeywordsAdgroup(item) 호출 → listKeywords + Keyword upsert.
+  // summary 는 finalize hook 에서 합산값(scannedAdgroups, syncedKeywords, skipped) 추가됨.
+  const batch = await prisma.changeBatch.create({
+    data: {
+      userId: user.id,
+      action: "sync_keywords",
+      status: "pending",
+      total: adgroups.length,
+      processed: 0,
+      attempt: 0,
+      summary: {
+        advertiserId,
+        customerId: advertiser.customerId,
+        campaignIds: hasCampaignFilter ? campaignIds : undefined,
+        scope,
+        scannedAdgroups: 0,
+        syncedKeywords: 0,
+        skipped: 0,
+      },
     },
   })
 
-  // lastSyncAt 갱신 (UI 헤더 "마지막 동기화" 배지). 실패해도 sync 결과는 정상 반환.
-  // 캠페인 필터로 부분 동기화한 경우에도 갱신 — "동기화했는데 표시 안 됨" 혼란 방지.
-  await recordSyncAt(advertiserId, "keywords")
-
-  revalidatePath(`/${advertiserId}/keywords`)
-
-  const totalMs = Date.now() - start
-  // 운영 측정 데이터 — totalMs > maxDuration*0.8 시 trigger 표시.
-  // maxDuration = 300s (Server Action 진입 page.tsx 설정).
-  logSyncTiming({
-    kind: "keywords",
-    advertiserId,
-    totalMs,
-    scannedAdgroups,
-    upserts: syncedKeywords,
-    maxDurationMs: 300_000,
+  // -- ChangeItem 일괄 생성 (각 광고그룹 1행) ---------------------------------
+  // - targetType='AdGroup' → applyChange(item) 의 분기에서 applySyncKeywordsAdgroup 호출
+  // - targetId=nccAdgroupId (외부 식별자 — listKeywords 호출에 사용)
+  // - after={ customerId, dbAdgroupId, advertiserId } (Cron 실행 시 필요한 컨텍스트)
+  // - idempotencyKey 는 (batchId, idempotencyKey) unique 제약 충족
+  // ChangeItem.before 는 schema 상 nullable JSON — Prisma 의 createMany 입력은
+  // null 대신 필드 생략(undefined) 권장. 본 enqueue 는 before 가 의미 없으므로 미설정.
+  await prisma.changeItem.createMany({
+    data: adgroups.map((ag) => ({
+      batchId: batch.id,
+      targetType: "AdGroup",
+      targetId: ag.nccAdgroupId,
+      after: {
+        customerId: advertiser.customerId,
+        dbAdgroupId: ag.id,
+        advertiserId,
+      },
+      idempotencyKey: `${batch.id}:${ag.nccAdgroupId}`,
+      status: "pending",
+      attempt: 0,
+    })),
   })
+
+  // AuditLog enqueue (시크릿 X — customerId / advertiserId 만)
+  await logAudit({
+    userId: user.id,
+    action: "keyword.sync.enqueue",
+    targetType: "ChangeBatch",
+    targetId: batch.id,
+    before: null,
+    after: {
+      advertiserId,
+      customerId: advertiser.customerId,
+      campaignIds: hasCampaignFilter ? campaignIds : undefined,
+      scannedAdgroups: 0,
+      syncedKeywords: 0,
+      skipped: 0,
+      total: adgroups.length,
+    },
+  })
+
+  // revalidatePath 는 enqueue 시점 호출하지 않음 — 실제 데이터 갱신은 Cron finalize 시점.
+  // UI 는 batchId 로 polling → status === 'done' 또는 'failed' 시 router.refresh().
 
   return {
     ok: true,
-    syncedKeywords,
-    scannedAdgroups,
-    skipped,
-    durationMs: totalMs,
+    batchId: batch.id,
+    total: adgroups.length,
+    scope,
   }
 }
 

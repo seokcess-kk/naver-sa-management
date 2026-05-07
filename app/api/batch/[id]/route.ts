@@ -54,6 +54,16 @@ export type BatchProgressResponse = {
     finishedAt: string | null
   }
   counts: Record<string, number>
+  /**
+   * ChangeBatch.summary (Json | null).
+   *
+   * F-3.1 sync_keywords 진행률 / 결과 표시용 — finalize hook 이 done 시점에
+   * scannedAdgroups / syncedKeywords / skipped 를 합산해 갱신함.
+   * 시크릿 컬럼은 summary 에 들어가지 않음 (advertiserId / customerId 만).
+   *
+   * 기존 CSV 업로드 모달 등은 본 필드 미사용 → 추가만 (기존 필드 변경 X).
+   */
+  summary: unknown | null
 }
 
 type ErrorResponse = { error: string }
@@ -147,5 +157,6 @@ export async function GET(
       finishedAt: batch.finishedAt ? batch.finishedAt.toISOString() : null,
     },
     counts: Object.fromEntries(counts.map((c) => [c.status, c._count])),
+    summary: batch.summary ?? null,
   })
 }

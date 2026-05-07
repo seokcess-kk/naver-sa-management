@@ -1,7 +1,7 @@
 "use client"
 
 /**
- * 키워드 동기화 + 캠페인 필터 (F-3.1)
+ * 키워드 동기화 + 캠페인 필터 (F-3.1) — ChangeBatch 진행률 polling 패턴
  *
  * sync-extensions-with-filter.tsx 패턴 복제. server action `syncKeywords(advertiserId, options?)` 호출.
  *   options: { campaignIds?: string[] }
@@ -9,7 +9,10 @@
  * 동작:
  * - 캠페인 0개 선택 → 광고주 전체 동기화 (기본 동작 유지)
  * - 캠페인 N개 선택 → `syncKeywords(advertiserId, { campaignIds })` 로 부분 동기화
- * - 응답: { ok: true; syncedKeywords; scannedAdgroups; skipped; durationMs } | { ok: false; error }
+ * - 결과 → `useSyncBatchPolling.start()` 위임 (sync-keywords-button.tsx 와 동일):
+ *     · ok=false              → toast.error
+ *     · batchId=null,total=0  → toast.info ("동기화할 광고그룹이 없습니다")
+ *     · batchId !== null      → toast.loading + GET /api/batch/{id} 5초 polling
  *
  * 키 미설정(`hasKeys=false`) → 비활성화 + 안내 tooltip (sync-keywords-button 동일).
  *
@@ -19,9 +22,11 @@
  * - 캠페인 ≥ 10 → 검색 input 노출
  * - 모바일(<sm) → Popover/Dropdown 대신 Dialog 사용
  *
- * 본 컴포넌트는 KeywordsPage 만 사용. sync-keywords-button.tsx 는 무변경 (다른 페이지 영향 X).
+ * 본 컴포넌트는 KeywordsPage 만 사용.
  *
- * SPEC 6.2 F-3.1 / 11.2.
+ * polling 로직은 `useSyncBatchPolling` hook 으로 추출 — sync-keywords-button.tsx 와 공유.
+ *
+ * SPEC v0.2.1 6.2 F-3.1 / 11.2 / 3.5 (Job Table + Chunk Executor).
  */
 
 import * as React from "react"
@@ -47,6 +52,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { syncKeywords } from "@/app/(dashboard)/[advertiserId]/keywords/actions"
+import { useSyncBatchPolling } from "@/lib/sync/use-batch-polling"
 import { cn } from "@/lib/utils"
 
 // =============================================================================
@@ -82,6 +88,10 @@ export function SyncKeywordsWithFilter({
   initialCampaignIds = [],
 }: SyncKeywordsWithFilterProps) {
   const router = useRouter()
+  const { start, running } = useSyncBatchPolling({
+    kind: "키워드",
+    onDone: () => router.refresh(),
+  })
 
   const visibleCampaigns = React.useMemo(
     () => campaigns.filter((c) => c.status !== "deleted"),
@@ -93,57 +103,30 @@ export function SyncKeywordsWithFilter({
   const [selectedIds, setSelectedIds] = React.useState<string[]>(
     initialCampaignIds,
   )
-  const [running, setRunning] = React.useState(false)
 
-  const handleSync = React.useCallback(() => {
+  const handleSync = React.useCallback(async () => {
     if (!hasKeys) {
       toast.error("키 미설정 — API 키 / Secret 키를 먼저 입력하세요")
       return
     }
     if (running) return
-    setRunning(true)
 
     const ids = selectedIds.filter((id) =>
       visibleCampaigns.some((c) => c.id === id),
     )
     const useFilter = ids.length > 0
-    const loadingMsg = useFilter
-      ? `키워드 동기화 중... (선택 ${ids.length}개 캠페인)`
-      : "키워드 동기화 중..."
 
-    toast.promise(
-      (async () => {
-        const res = await syncKeywords(
-          advertiserId,
-          useFilter ? { campaignIds: ids } : undefined,
-        )
-        if (!res.ok) throw new Error(res.error)
-        return res
-      })(),
-      {
-        loading: loadingMsg,
-        success: (res) => {
-          const seconds = (res.durationMs / 1000).toFixed(1)
-          const skippedNote =
-            res.skipped > 0
-              ? ` / ${res.skipped}건 스킵 (광고그룹 매핑 누락)`
-              : ""
-          router.refresh()
-          return (
-            `키워드 ${res.syncedKeywords}개 동기화 완료 ` +
-            `(${res.scannedAdgroups}개 그룹${skippedNote} / ${seconds}s)`
-          )
-        },
-        error: (err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err)
-          return `동기화 실패: ${msg}`
-        },
-        finally: () => {
-          setRunning(false)
-        },
-      },
-    )
-  }, [advertiserId, hasKeys, running, router, selectedIds, visibleCampaigns])
+    try {
+      const res = await syncKeywords(
+        advertiserId,
+        useFilter ? { campaignIds: ids } : undefined,
+      )
+      start(res)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      toast.error(`키워드 동기화 실패: ${msg}`)
+    }
+  }, [advertiserId, hasKeys, running, selectedIds, visibleCampaigns, start])
 
   if (!showFilter) {
     return (
