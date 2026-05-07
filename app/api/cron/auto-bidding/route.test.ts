@@ -32,6 +32,7 @@ vi.mock("@/lib/naver-sa/credentials", () => ({}))
 const mockAdvertiserFindMany = vi.fn()
 const mockBiddingPolicyFindMany = vi.fn()
 const mockORCreate = vi.fn()
+const mockORCount = vi.fn()
 const mockTargetingRuleFindUnique = vi.fn()
 
 vi.mock("@/lib/db/prisma", () => ({
@@ -44,11 +45,21 @@ vi.mock("@/lib/db/prisma", () => ({
     },
     optimizationRun: {
       create: (...args: unknown[]) => mockORCreate(...args),
+      count: (...args: unknown[]) => mockORCount(...args),
     },
     targetingRule: {
       findUnique: (...args: unknown[]) => mockTargetingRuleFindUnique(...args),
     },
   },
+}))
+
+// notifier dispatch / throttle — 외부 호출 0
+const mockDispatch = vi.fn().mockResolvedValue({ ok: true, results: [] })
+vi.mock("@/lib/notifier", () => ({
+  dispatch: (...args: unknown[]) => mockDispatch(...args),
+}))
+vi.mock("@/lib/notifier/throttle", () => ({
+  shouldThrottle: vi.fn().mockResolvedValue(false),
 }))
 
 const mockGetCached = vi.fn()
@@ -86,11 +97,13 @@ function makeReq(authHeader: string | null): {
 
 const ADV = {
   id: "adv_1",
+  name: "광고주1",
   customerId: "c-1",
   guardrailEnabled: true,
   guardrailMaxBidChangePct: 20,
   guardrailMaxChangesPerKeyword: 3,
   guardrailMaxChangesPerDay: 50,
+  biddingKillSwitch: false,
 }
 
 const POLICY = {
@@ -129,6 +142,8 @@ beforeEach(() => {
   mockCheckAdvGuardrail.mockResolvedValue({ ok: true, count: 0 })
   mockCheckKwGuardrail.mockResolvedValue({ ok: true, count: 0 })
   mockORCreate.mockResolvedValue({ id: "or_1" })
+  // 기본: 본 cron run 신규 skipped_guardrail OR 0건 (알림 미호출 보장)
+  mockORCount.mockResolvedValue(0)
   mockUpdateKeyword.mockResolvedValue({ nccKeywordId: "ncc_kw_1" })
   mockGetCached.mockResolvedValue({ data: ESTIMATE_ROWS, cachedAll: true })
   // F-11.4 — TargetingRule 기본 null (룰 없음 = weight 1.0 fallback). 기존 케이스 무회귀.
@@ -532,5 +547,81 @@ describe("cron auto-bidding — 시크릿 마스킹", () => {
     expect(body.errors[0].message).not.toContain(
       "abcdef1234567890abcdef1234567890",
     )
+  })
+})
+
+// =============================================================================
+// Event 3 — guardrail_triggered 알림
+// =============================================================================
+
+describe("cron auto-bidding — guardrail_triggered dispatch", () => {
+  it("광고주 단위 한도 초과 → dispatch 1회 (warn / dailyLimit 카운트 채움)", async () => {
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    // 광고주 단위 한도 초과 — 정책 진입 X. dailyLimitOverride 와 함께 dispatch.
+    mockCheckAdvGuardrail.mockResolvedValue({ ok: false, count: 99 })
+    // (정책 진입 X — biddingPolicy.findMany / OR.count 호출 X)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1)
+    const payload = mockDispatch.mock.calls[0][0]
+    expect(payload.ruleType).toBe("guardrail_triggered")
+    expect(payload.severity).toBe("warn")
+    expect(payload.title).toContain("광고주1")
+    expect(payload.title).toContain("99건")
+    expect(payload.meta.advertiserId).toBe("adv_1")
+    expect(payload.meta.customerId).toBe("c-1")
+    expect(payload.meta.killSwitch).toBe(false)
+    expect(payload.meta.breakdowns).toEqual({
+      keywordLimit: 0,
+      dailyLimit: 99,
+    })
+    // 정책 진입 X
+    expect(mockBiddingPolicyFindMany).not.toHaveBeenCalled()
+  })
+
+  it("정책 루프 종료 후 keywordLimit 발동 → dispatch 1회 (breakdowns.keywordLimit)", async () => {
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    // 정책 루프 안에서 keyword guardrail 1건 발동 — OR.count 가 1 리턴
+    mockBiddingPolicyFindMany.mockResolvedValue([POLICY])
+    mockCheckKwGuardrail.mockResolvedValue({ ok: false, count: 5 })
+    mockORCount.mockResolvedValue(1)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1)
+    const payload = mockDispatch.mock.calls[0][0]
+    expect(payload.ruleType).toBe("guardrail_triggered")
+    expect(payload.severity).toBe("warn")
+    expect(payload.title).toContain("1건")
+    expect(payload.meta.breakdowns).toEqual({
+      keywordLimit: 1,
+      dailyLimit: 0,
+    })
+  })
+
+  it("발동 0건이면 dispatch 미호출 (정책 happy path)", async () => {
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    mockBiddingPolicyFindMany.mockResolvedValue([POLICY])
+    // OR.count = 0 → 발동 없음
+    mockORCount.mockResolvedValue(0)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it("payload meta 시크릿 평문 노출 X", async () => {
+    mockAdvertiserFindMany.mockResolvedValue([ADV])
+    mockCheckAdvGuardrail.mockResolvedValue({ ok: false, count: 1 })
+    await GET(makeReq("Bearer test-secret") as never)
+    expect(mockDispatch).toHaveBeenCalledTimes(1)
+    const payload = mockDispatch.mock.calls[0][0]
+    const all = JSON.stringify(payload)
+    expect(all).not.toMatch(/Bearer\s+[A-Za-z0-9._\-]{12,}/u)
+    expect(all).not.toMatch(/[A-Fa-f0-9]{32,}/u)
+    expect(all).not.toContain("ENCRYPTION_KEY")
   })
 })

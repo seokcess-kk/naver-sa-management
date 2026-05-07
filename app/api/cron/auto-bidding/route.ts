@@ -48,6 +48,8 @@ import { NextRequest, NextResponse } from "next/server"
 
 import { prisma } from "@/lib/db/prisma"
 import { scrubString } from "@/lib/crypto/scrub-string"
+import { dispatch } from "@/lib/notifier"
+import { shouldThrottle } from "@/lib/notifier/throttle"
 import { updateKeyword } from "@/lib/naver-sa/keywords"
 import { getCachedAveragePositionBid } from "@/lib/auto-bidding/estimate-cached"
 import {
@@ -148,14 +150,19 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     },
     select: {
       id: true,
+      name: true,
       customerId: true,
       guardrailEnabled: true,
       guardrailMaxBidChangePct: true,
       guardrailMaxChangesPerKeyword: true,
       guardrailMaxChangesPerDay: true,
+      biddingKillSwitch: true,
     },
     orderBy: { id: "asc" },
   })
+
+  // 본 cron run 시작 시각 — 광고주별 guardrail 발동 카운트 기준점.
+  const cronStartedAt = new Date()
 
   let advertisersOk = 0
   let advertisersSkipped = 0
@@ -181,6 +188,15 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       if (!advCheck.ok) {
         // 광고주 단위 한도 초과 — 정책 진입 X. OR 미적재 (광고주 단위 skip 은 폭주 방지).
         advertisersSkipped++
+        // 광고주 단위 한도라도 알림은 남김 (운영자 가시성).
+        await maybeNotifyGuardrailTriggered({
+          advertiserId: adv.id,
+          advertiserName: adv.name,
+          customerId: adv.customerId,
+          killSwitchActive: adv.biddingKillSwitch,
+          cronStartedAt,
+          dailyLimitOverride: advCheck.count,
+        })
         continue
       }
     } catch (e) {
@@ -463,6 +479,18 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     } else {
       advertisersOk++
     }
+
+    // -- guardrail_triggered 알림 (Event 3) -------------------------------
+    // 광고주 정책 루프 종료 후 본 cron run 에서 OR.result='skipped_guardrail' 발생 카운트
+    // 조회. 1+ 건이면 dispatch (광고주별 묶음 1회). cron schedule 매시간 분 10 → 50분
+    // throttle 로 광고주당 시간당 1회 보장.
+    await maybeNotifyGuardrailTriggered({
+      advertiserId: adv.id,
+      advertiserName: adv.name,
+      customerId: adv.customerId,
+      killSwitchActive: adv.biddingKillSwitch,
+      cronStartedAt,
+    })
   }
 
   return NextResponse.json({
@@ -561,5 +589,100 @@ async function tryCreateRun(args: {
     })
   } catch (e) {
     console.error("[cron/auto-bidding] OptimizationRun.create failed:", scrubString(String(e)))
+  }
+}
+
+// =============================================================================
+// maybeNotifyGuardrailTriggered — Event 3: Guardrail 발동 알림 (광고주별 묶음)
+// =============================================================================
+//
+// 호출 시점:
+//   1) 광고주 단위 한도 초과 → 정책 진입 차단 직전 (dailyLimitOverride 포함 호출)
+//   2) 광고주 정책 루프 종료 후 — OR.result='skipped_guardrail' 카운트 조회 후 발송
+//
+// 조건:
+//   - cronStartedAt 이후 OptimizationRun 적재 중 result IN ('skipped_guardrail') 카운트
+//   - dailyLimitOverride > 0 또는 위 카운트 1+ → dispatch
+//   - 모두 0 이면 스킵 (호출은 항상 안전)
+//
+// 시크릿 정책:
+//   - title/body/meta 에 BOT_TOKEN / API key 평문 X
+//   - customerId / advertiserName 만 (시크릿 아님)
+//
+// Throttle:
+//   - 광고주별 50분 (cron 매시간 분 10 — 다음 cron 시점에 풀림)
+//
+// 실패 격리:
+//   - 본 함수 throw 는 호출부 try/catch 가 흡수 — cron 다른 광고주 진행 막지 않음.
+
+async function maybeNotifyGuardrailTriggered(args: {
+  advertiserId: string
+  advertiserName: string
+  customerId: string
+  killSwitchActive: boolean
+  cronStartedAt: Date
+  /** 광고주 단위 한도 초과 카운트 (advertiserSkip 분기에서 호출 시). */
+  dailyLimitOverride?: number
+}): Promise<void> {
+  try {
+    const {
+      advertiserId,
+      advertiserName,
+      customerId,
+      killSwitchActive,
+      cronStartedAt,
+      dailyLimitOverride,
+    } = args
+
+    // 키워드 단위 한도 초과 카운트 — OR.skipped_guardrail (cronStartedAt 이후 적재 한정).
+    const keywordLimitCount = await prisma.optimizationRun.count({
+      where: {
+        advertiserId,
+        result: "skipped_guardrail",
+        triggeredAt: { gte: cronStartedAt },
+      },
+    })
+    const dailyLimitCount = dailyLimitOverride ?? 0
+    const triggeredCount = keywordLimitCount + dailyLimitCount
+
+    if (triggeredCount === 0) return
+
+    const throttled = await shouldThrottle(
+      `nsa:notify:guardrail_triggered:${advertiserId}`,
+      50 * 60,
+    )
+    if (throttled) return
+
+    // breakdowns: 분류 가능한 카운트만 채움. maxBid/minBid 도달은 decide.ts 가 cap 만
+    // 적용하고 별도 OR.result 를 안 내므로 본 알림 분류 X (운영 룰).
+    const breakdowns = {
+      keywordLimit: keywordLimitCount,
+      dailyLimit: dailyLimitCount,
+    }
+
+    console.info(
+      `[cron/auto-bidding] notify guardrail_triggered advertiser=${advertiserId} keywordLimit=${keywordLimitCount} dailyLimit=${dailyLimitCount} killSwitch=${killSwitchActive}`,
+    )
+
+    await dispatch({
+      ruleType: "guardrail_triggered",
+      severity: "warn",
+      title: `[Guardrail] ${advertiserName} - ${triggeredCount}건 차단`,
+      body:
+        `${killSwitchActive ? "Kill Switch 활성 — 자동 입찰 중단 중. " : ""}` +
+        `Guardrail 발동: keywordLimit=${keywordLimitCount} dailyLimit=${dailyLimitCount}`,
+      meta: {
+        advertiserId,
+        customerId,
+        triggeredCount,
+        killSwitch: killSwitchActive,
+        breakdowns,
+      },
+    })
+  } catch (e) {
+    console.warn(
+      "[cron/auto-bidding] maybeNotifyGuardrailTriggered failed:",
+      e instanceof Error ? e.message : String(e),
+    )
   }
 }

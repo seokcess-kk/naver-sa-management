@@ -17,6 +17,7 @@ const mockStatDailyGroupBy = vi.fn()
 const mockStatDailyFindFirst = vi.fn()
 const mockKeywordFindMany = vi.fn()
 const mockBidSuggestionFindFirst = vi.fn()
+const mockBidSuggestionFindMany = vi.fn()
 const mockBidSuggestionCreate = vi.fn()
 const mockBidSuggestionUpdate = vi.fn()
 const mockBidSuggestionUpdateMany = vi.fn()
@@ -51,11 +52,22 @@ vi.mock("@/lib/db/prisma", () => ({
     },
     bidSuggestion: {
       findFirst: (...args: unknown[]) => mockBidSuggestionFindFirst(...args),
+      findMany: (...args: unknown[]) => mockBidSuggestionFindMany(...args),
       create: (...args: unknown[]) => mockBidSuggestionCreate(...args),
       update: (...args: unknown[]) => mockBidSuggestionUpdate(...args),
       updateMany: (...args: unknown[]) => mockBidSuggestionUpdateMany(...args),
     },
   },
+}))
+
+// notifier — bid_suggestion_new dispatch hook 테스트는 별도 파일.
+// 본 파일은 dispatch 호출 자체를 막지 않되 외부 발송은 차단 (no-op mock).
+const mockDispatch = vi.fn().mockResolvedValue({ ok: true, results: [] })
+vi.mock("@/lib/notifier", () => ({
+  dispatch: (...args: unknown[]) => mockDispatch(...args),
+}))
+vi.mock("@/lib/notifier/throttle", () => ({
+  shouldThrottle: vi.fn().mockResolvedValue(false),
 }))
 
 vi.mock("@/lib/auto-bidding/marginal-score", async () => {
@@ -90,7 +102,12 @@ beforeEach(() => {
   vi.clearAllMocks()
   process.env.CRON_SECRET = "test-secret"
   mockAdvertiserFindMany.mockResolvedValue([
-    { id: "adv_1", bidAutomationConfig: { mode: "inbox" } },
+    {
+      id: "adv_1",
+      name: "광고주1",
+      customerId: "1234567",
+      bidAutomationConfig: { mode: "inbox" },
+    },
   ])
   mockBidAutomationConfigFindUnique.mockResolvedValue({
     mode: "inbox",
@@ -112,6 +129,7 @@ beforeEach(() => {
     updatedAt: new Date(Date.now() - 60 * 60 * 1000),
   })
   mockBidSuggestionFindFirst.mockResolvedValue(null)
+  mockBidSuggestionFindMany.mockResolvedValue([])
   mockBidSuggestionCreate.mockResolvedValue({ id: "s_budget" })
   mockBidSuggestionUpdate.mockResolvedValue({ id: "s_budget" })
   mockBidSuggestionUpdateMany.mockResolvedValue({ count: 1 })
@@ -621,5 +639,84 @@ describe("cron bid-suggest — device 필터 가드 (이중집계 방지)", () =
       expect(where.device?.in).toEqual(expect.arrayContaining(["PC", "MOBILE"]))
       expect(where.device?.in).not.toContain("ALL")
     }
+  })
+})
+
+// =============================================================================
+// Event 1 — bid_suggestion_new 알림 hook
+// =============================================================================
+
+describe("cron bid-suggest — bid_suggestion_new dispatch", () => {
+  it("신규 BidSuggestion 1+ 건 생성 시 광고주별 dispatch 호출 (info severity)", async () => {
+    // 기본 setup 이 budget 1건 created — fresh suggestion 1건 mock
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        adgroupId: "ag_1",
+        keywordId: "kw_1",
+        targetName: null,
+        keyword: { keyword: "신발" },
+      },
+      {
+        adgroupId: "ag_1",
+        keywordId: "kw_2",
+        targetName: null,
+        keyword: { keyword: "운동화" },
+      },
+      {
+        adgroupId: "ag_2",
+        keywordId: "kw_3",
+        targetName: null,
+        keyword: { keyword: "가방" },
+      },
+    ])
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1)
+    const payload = mockDispatch.mock.calls[0][0]
+    expect(payload.ruleType).toBe("bid_suggestion_new")
+    expect(payload.severity).toBe("info")
+    expect(payload.title).toContain("광고주1")
+    expect(payload.title).toContain("3건")
+    expect(payload.meta.advertiserId).toBe("adv_1")
+    expect(payload.meta.customerId).toBe("1234567")
+    expect(payload.meta.count).toBe(3)
+    expect(payload.meta.groupCount).toBe(2)
+    expect(payload.meta.sampleKeywords).toEqual(["신발", "운동화", "가방"])
+  })
+
+  it("created=0 이면 dispatch 호출 X", async () => {
+    // budget create 자체를 막아 created=0 보장: 7d 비용을 0으로 (no_budget_signal hold)
+    mockStatDailyGroupBy.mockImplementation(
+      (args: { where: { level: string; date?: unknown } }) => {
+        if (args.where.level !== "campaign") return Promise.resolve([])
+        return Promise.resolve([])
+      },
+    )
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it("payload.meta 에 BOT_TOKEN / API key / secret 평문 노출 X", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        adgroupId: "ag_1",
+        keywordId: "kw_1",
+        targetName: null,
+        keyword: { keyword: "테스트" },
+      },
+    ])
+    await GET(makeReq("Bearer test-secret") as never)
+    expect(mockDispatch).toHaveBeenCalledTimes(1)
+    const payload = mockDispatch.mock.calls[0][0]
+    const all = JSON.stringify(payload)
+    // 1) Bearer 토큰
+    expect(all).not.toMatch(/Bearer\s+[A-Za-z0-9._\-]{12,}/u)
+    // 2) 32+ hex (HMAC / API key 패턴)
+    expect(all).not.toMatch(/[A-Fa-f0-9]{32,}/u)
+    // 3) 시크릿 키 환경변수명
+    expect(all).not.toContain("ENCRYPTION_KEY")
+    expect(all).not.toContain("TELEGRAM_BOT_TOKEN")
   })
 })

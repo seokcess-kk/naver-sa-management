@@ -38,6 +38,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { applyChange } from "@/lib/batch/apply"
 import { scrubString } from "@/lib/crypto/scrub-string"
 import { prisma } from "@/lib/db/prisma"
+import { dispatch } from "@/lib/notifier"
 import { recordSyncAt } from "@/lib/sync/last-sync-at"
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 
@@ -197,6 +198,13 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
       },
     })
 
+    // -- change_batch_failed 알림 (Event 2) ---------------------------------
+    // failedCount > 0 일 때만 dispatch. finalize 분기는 batch 당 자연 1회 호출 — 별도
+    // throttle 불필요 (재시도로 다시 finalize 진입 시에도 batch 1건당 1번 알림이 정상).
+    if (failedCount > 0) {
+      await notifyChangeBatchFailed(batchId, failedCount)
+    }
+
     // -- sync_keywords 전용 finalize hook -----------------------------------
     // - 모든 done ChangeItem.after 의 syncedKeywords / skipped 합산
     // - ChangeBatch.summary 갱신 (scannedAdgroups = done 카운트)
@@ -299,5 +307,108 @@ async function finalizeSyncKeywordsBatch(batchId: string): Promise<void> {
     } catch (e) {
       console.warn("[batch.run] revalidatePath failed:", e)
     }
+  }
+}
+
+// =============================================================================
+// notifyChangeBatchFailed — Event 2: ChangeBatch 실패 알림
+// =============================================================================
+//
+// 호출 시점: finalize 분기에서 failedCount > 0 일 때.
+//
+// 동작:
+//   - ChangeBatch 메타 + summary.advertiserId 로드
+//   - advertiserId 가 summary 에 있으면 광고주명 추가 조회 (옵셔널)
+//   - failed ChangeItem.error 메시지를 그룹핑 → top 3 (scrubString 통과)
+//   - dispatch payload: 시크릿 평문 X (batchId, action, failedCount, attempt, advertiserId, topErrors)
+//
+// 시크릿 정책:
+//   - ChangeItem.error 는 applyChange catch 단계에서 이미 scrubString 적용 — 본 함수에서도
+//     2차 scrubString (방어).
+//
+// 실패 격리:
+//   - dispatch throw 는 try/catch 흡수. cron 다른 batch 진행 막지 않음.
+
+async function notifyChangeBatchFailed(
+  batchId: string,
+  failedCount: number,
+): Promise<void> {
+  try {
+    const batch = await prisma.changeBatch.findUnique({
+      where: { id: batchId },
+      select: {
+        id: true,
+        action: true,
+        total: true,
+        attempt: true,
+        summary: true,
+      },
+    })
+    if (!batch) return
+
+    const summary =
+      batch.summary &&
+      typeof batch.summary === "object" &&
+      !Array.isArray(batch.summary)
+        ? (batch.summary as Record<string, unknown>)
+        : {}
+    const advertiserId =
+      typeof summary.advertiserId === "string" ? summary.advertiserId : null
+
+    let advertiserName: string | null = null
+    if (advertiserId) {
+      const adv = await prisma.advertiser.findUnique({
+        where: { id: advertiserId },
+        select: { name: true },
+      })
+      advertiserName = adv?.name ?? null
+    }
+
+    // -- 에러 메시지 그룹핑 — 상위 3 ----------------------------------------
+    // ChangeItem.error 는 NULL 가능. failed 인데 NULL 인 행은 'unknown' 으로 분류.
+    const failedItems = await prisma.changeItem.findMany({
+      where: { batchId, status: "failed" },
+      select: { error: true },
+      take: 1000, // 알림 메시지 그룹핑 입력 캡 — 전체 카운트는 failedCount 인자 기준
+    })
+    const errorCounts = new Map<string, number>()
+    for (const it of failedItems) {
+      const raw = it.error ?? "unknown_error"
+      // 2차 scrubString (Bearer / 32+ hex 마스킹). slice 200 — 알림 메시지 길이 보호.
+      const key = scrubString(raw).slice(0, 200)
+      errorCounts.set(key, (errorCounts.get(key) ?? 0) + 1)
+    }
+    const topErrors = [...errorCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([msg, n]) => `[${n}] ${msg}`)
+
+    console.info(
+      `[batch.run] notify change_batch_failed batchId=${batchId} action=${batch.action} failedCount=${failedCount}/${batch.total} attempt=${batch.attempt}`,
+    )
+
+    await dispatch({
+      ruleType: "change_batch_failed",
+      severity: "critical",
+      title: `[일괄 작업 실패] ${batch.action} (${failedCount}/${batch.total})`,
+      body:
+        `batchId=${batch.id} attempt=${batch.attempt} ` +
+        `광고주=${advertiserName ?? advertiserId ?? "(unknown)"}`,
+      meta: {
+        batchId: batch.id,
+        action: batch.action,
+        total: batch.total,
+        failedCount,
+        attempt: batch.attempt,
+        advertiserId,
+        topErrors,
+      },
+    })
+  } catch (e) {
+    // 알림 실패가 batch finalize 를 막지 않게.
+    console.warn(
+      "[batch.run] notifyChangeBatchFailed failed:",
+      e instanceof Error ? e.message : String(e),
+    )
   }
 }

@@ -45,6 +45,8 @@ import { NextRequest, NextResponse } from "next/server"
 
 import { prisma } from "@/lib/db/prisma"
 import { scrubString } from "@/lib/crypto/scrub-string"
+import { dispatch } from "@/lib/notifier"
+import { shouldThrottle } from "@/lib/notifier/throttle"
 import { STAT_DAILY_DEVICE_FILTER } from "@/lib/stat-daily/device-filter"
 import {
   bundleSuggestions,
@@ -823,6 +825,8 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     where: { status: "active" },
     select: {
       id: true,
+      name: true,
+      customerId: true,
       bidAutomationConfig: { select: { mode: true } },
     },
     orderBy: { id: "asc" },
@@ -833,6 +837,10 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       a.bidAutomationConfig != null &&
       a.bidAutomationConfig.mode !== "off",
   )
+
+  // 본 cron run 시작 시각 — 광고주별 신규 BidSuggestion 카운트 기준점.
+  // processAdvertiser 가 createdAt >= cronStartedAt 인 행만 "이번 run 신규" 로 판정.
+  const cronStartedAt = new Date()
 
   // -- 3. 광고주 직렬 처리 ---------------------------------------------------
   let advertisersOk = 0
@@ -866,6 +874,19 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       if (r.stale) advertisersStale++
       else if (r.scanned > 0 || r.budgetScanned > 0) advertisersOk++
       else advertisersSkipped++
+
+      // -- bid_suggestion_new 알림 (Event 1) ---------------------------------
+      // 본 cron run 에서 status='pending' 으로 신규 생성된 BidSuggestion 이 1+ 면
+      // 광고주당 1회 dispatch. 광고주별 1 cron 1 dispatch (cron 매시간 = 광고주당
+      // 시간당 최대 1회 — 자연 throttle).
+      if (r.created > 0) {
+        await maybeNotifyBidSuggestionNew({
+          advertiserId: adv.id,
+          advertiserName: adv.name,
+          customerId: adv.customerId,
+          cronStartedAt,
+        })
+      }
     } catch (e) {
       const message = safeError(e)
       errors.push({ advertiserId: adv.id, message })
@@ -893,5 +914,96 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     singlesDismissed,
     ts,
     errors,
+  })
+}
+
+// =============================================================================
+// maybeNotifyBidSuggestionNew — 본 cron run 신규 BidSuggestion 알림 (Event 1)
+// =============================================================================
+//
+// 동작:
+//   - status='pending' AND createdAt >= cronStartedAt AND advertiserId 매치 행 조회
+//   - count / groupCount(adgroupId distinct, null 제외) / sample 키워드 텍스트 추출
+//   - count===0 이면 발송 생략 (호출부가 r.created>0 가드. 방어 코드)
+//   - dispatch payload: 광고주명 / 카운트 / 묶음 그룹 수 / sampleKeywords (시크릿 X)
+//   - throttle: 광고주별 50분 키 — 광고주당 시간당 최대 1회 (cron schedule 매시간 분 20)
+//
+// 시크릿 정책:
+//   - title/body/meta 에 BOT_TOKEN / API key 평문 X
+//   - sampleKeywords 는 키워드 텍스트만 (외부 검색어 — 시크릿 아님)
+//
+// 실패 격리:
+//   - dispatch throw 는 호출부 try/catch 가 흡수 — cron 다른 광고주 진행 막지 않음.
+
+async function maybeNotifyBidSuggestionNew(args: {
+  advertiserId: string
+  advertiserName: string
+  customerId: string
+  cronStartedAt: Date
+}): Promise<void> {
+  const { advertiserId, advertiserName, customerId, cronStartedAt } = args
+
+  // 50분 throttle — cron schedule "20 * * * *" 매시간 1회. 50분이면 다음 cron 시점에 풀림.
+  const throttled = await shouldThrottle(
+    `nsa:notify:bid_suggestion_new:${advertiserId}`,
+    50 * 60,
+  )
+  if (throttled) return
+
+  const fresh = await prisma.bidSuggestion.findMany({
+    where: {
+      advertiserId,
+      status: "pending",
+      createdAt: { gte: cronStartedAt },
+    },
+    select: {
+      adgroupId: true,
+      keywordId: true,
+      // targetName 은 묶음 권고의 광고그룹명 캐시 — sample 표시에 적합
+      targetName: true,
+      keyword: { select: { keyword: true } },
+    },
+    take: 200, // 묶음 + 단건 합산 — 알림 sample 추출용 캡 (전체 카운트는 r.created 기준)
+  })
+
+  if (fresh.length === 0) {
+    // r.created>0 인데 조회 0 — 다른 cron 의 cleanup 으로 사라진 케이스. 발송 스킵.
+    return
+  }
+
+  const count = fresh.length
+  const groupSet = new Set<string>()
+  for (const s of fresh) {
+    if (s.adgroupId) groupSet.add(s.adgroupId)
+  }
+  const groupCount = groupSet.size
+
+  const sampleKeywords: string[] = []
+  for (const s of fresh) {
+    const kw = s.keyword?.keyword ?? s.targetName
+    if (kw && !sampleKeywords.includes(kw)) {
+      sampleKeywords.push(kw)
+      if (sampleKeywords.length >= 3) break
+    }
+  }
+
+  console.info(
+    `[cron/bid-suggest] notify bid_suggestion_new advertiser=${advertiserId} count=${count} groupCount=${groupCount}`,
+  )
+
+  await dispatch({
+    ruleType: "bid_suggestion_new",
+    severity: "info",
+    title: `신규 권고 ${count}건 (광고주 ${advertiserName})`,
+    body:
+      `광고그룹 ${groupCount}개 / 전체 ${count}건. ` +
+      `운영 Inbox 에서 확인 후 적용/거절`,
+    meta: {
+      advertiserId,
+      customerId,
+      count,
+      groupCount,
+      sampleKeywords,
+    },
   })
 }

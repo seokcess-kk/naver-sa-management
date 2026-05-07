@@ -78,6 +78,12 @@ vi.mock("@/lib/crypto/secret", () => ({
   encrypt: vi.fn(() => ({ enc: new Uint8Array([1, 2, 3]), version: 1 })),
 }))
 
+// notifier dispatch — Event 3b kill_switch_triggered 검증용. 외부 호출 X.
+const mockDispatch = vi.fn().mockResolvedValue({ ok: true, results: [] })
+vi.mock("@/lib/notifier", () => ({
+  dispatch: (...args: unknown[]) => mockDispatch(...args),
+}))
+
 // import 본체 — mock 등록 이후
 import { toggleBiddingKillSwitch } from "@/app/admin/advertisers/actions"
 
@@ -136,6 +142,8 @@ describe("toggleBiddingKillSwitch", () => {
   it("archived 광고주 — ok:false", async () => {
     mockAdvertiserFindUnique.mockResolvedValue({
       id: ADV_ID,
+      name: "광고주1",
+      customerId: "1234567",
       status: "archived",
       biddingKillSwitch: false,
       biddingKillSwitchAt: null,
@@ -153,6 +161,8 @@ describe("toggleBiddingKillSwitch", () => {
   it("정지 (enabled=true) — At/By 갱신 + AuditLog before=false / after=true", async () => {
     mockAdvertiserFindUnique.mockResolvedValue({
       id: ADV_ID,
+      name: "광고주1",
+      customerId: "1234567",
       status: "active",
       biddingKillSwitch: false,
       biddingKillSwitchAt: null,
@@ -205,6 +215,8 @@ describe("toggleBiddingKillSwitch", () => {
     const prevAt = new Date("2026-04-29T01:00:00.000Z")
     mockAdvertiserFindUnique.mockResolvedValue({
       id: ADV_ID,
+      name: "광고주1",
+      customerId: "1234567",
       status: "active",
       biddingKillSwitch: true,
       biddingKillSwitchAt: prevAt,
@@ -247,6 +259,8 @@ describe("toggleBiddingKillSwitch", () => {
   it("revalidatePath: admin 상세 + 광고주 컨텍스트 + 정책 페이지", async () => {
     mockAdvertiserFindUnique.mockResolvedValue({
       id: ADV_ID,
+      name: "광고주1",
+      customerId: "1234567",
       status: "active",
       biddingKillSwitch: false,
       biddingKillSwitchAt: null,
@@ -263,5 +277,107 @@ describe("toggleBiddingKillSwitch", () => {
     expect(calls).toContain(`/admin/advertisers/${ADV_ID}`)
     expect(calls).toContain(`/${ADV_ID}`)
     expect(calls).toContain(`/${ADV_ID}/bidding-policies`)
+  })
+
+  // ===========================================================================
+  // Event 3b — kill_switch_triggered dispatch
+  // ===========================================================================
+
+  it("false → true 전환 시 dispatch 1회 (critical / kill_switch_triggered)", async () => {
+    mockAdvertiserFindUnique.mockResolvedValue({
+      id: ADV_ID,
+      name: "광고주1",
+      customerId: "1234567",
+      status: "active",
+      biddingKillSwitch: false,
+      biddingKillSwitchAt: null,
+      biddingKillSwitchBy: null,
+    })
+    mockAdvertiserUpdate.mockResolvedValue({})
+
+    await toggleBiddingKillSwitch({
+      advertiserId: ADV_ID,
+      enabled: true,
+    })
+
+    expect(mockDispatch).toHaveBeenCalledTimes(1)
+    const payload = mockDispatch.mock.calls[0][0]
+    expect(payload.ruleType).toBe("kill_switch_triggered")
+    expect(payload.severity).toBe("critical")
+    expect(payload.title).toContain("Kill Switch ON")
+    expect(payload.title).toContain("광고주1")
+    expect(payload.body).toContain("자동 비딩 중단됨")
+    expect(payload.body).toContain(ADMIN_ID)
+    expect(payload.meta.advertiserId).toBe(ADV_ID)
+    expect(payload.meta.customerId).toBe("1234567")
+    expect(payload.meta.advertiserName).toBe("광고주1")
+    expect(payload.meta.by).toBe(ADMIN_ID)
+    expect(payload.meta.source).toBe("manual_admin_toggle")
+  })
+
+  it("true → false 전환 (재개) 시 dispatch 미호출 — critical 폭주 방지", async () => {
+    mockAdvertiserFindUnique.mockResolvedValue({
+      id: ADV_ID,
+      name: "광고주1",
+      customerId: "1234567",
+      status: "active",
+      biddingKillSwitch: true,
+      biddingKillSwitchAt: new Date("2026-04-29T01:00:00.000Z"),
+      biddingKillSwitchBy: "u_prev",
+    })
+    mockAdvertiserUpdate.mockResolvedValue({})
+
+    await toggleBiddingKillSwitch({
+      advertiserId: ADV_ID,
+      enabled: false,
+    })
+
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it("true → true 동일 전환 (이미 ON) 시 dispatch 미호출", async () => {
+    mockAdvertiserFindUnique.mockResolvedValue({
+      id: ADV_ID,
+      name: "광고주1",
+      customerId: "1234567",
+      status: "active",
+      biddingKillSwitch: true,
+      biddingKillSwitchAt: new Date("2026-04-29T01:00:00.000Z"),
+      biddingKillSwitchBy: "u_prev",
+    })
+    mockAdvertiserUpdate.mockResolvedValue({})
+
+    await toggleBiddingKillSwitch({
+      advertiserId: ADV_ID,
+      enabled: true,
+    })
+
+    // before.biddingKillSwitch === true 라 발동 시점이 아님 (재발동 알림 X).
+    expect(mockDispatch).not.toHaveBeenCalled()
+  })
+
+  it("dispatch payload 시크릿 평문 노출 X", async () => {
+    mockAdvertiserFindUnique.mockResolvedValue({
+      id: ADV_ID,
+      name: "광고주1",
+      customerId: "1234567",
+      status: "active",
+      biddingKillSwitch: false,
+      biddingKillSwitchAt: null,
+      biddingKillSwitchBy: null,
+    })
+    mockAdvertiserUpdate.mockResolvedValue({})
+
+    await toggleBiddingKillSwitch({
+      advertiserId: ADV_ID,
+      enabled: true,
+    })
+
+    const payload = mockDispatch.mock.calls[0][0]
+    const all = JSON.stringify(payload)
+    expect(all).not.toMatch(/Bearer\s+[A-Za-z0-9._\-]{12,}/u)
+    expect(all).not.toMatch(/[A-Fa-f0-9]{32,}/u)
+    expect(all).not.toContain("ENCRYPTION_KEY")
+    expect(all).not.toContain("TELEGRAM_BOT_TOKEN")
   })
 })

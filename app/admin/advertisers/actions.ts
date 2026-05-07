@@ -27,6 +27,7 @@ import { encrypt } from "@/lib/crypto/secret"
 import { assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
 import { getBizmoney } from "@/lib/naver-sa/billing"
+import { dispatch } from "@/lib/notifier"
 import {
   NaverSaAuthError,
   NaverSaError,
@@ -755,6 +756,8 @@ export async function toggleBiddingKillSwitch(
     where: { id: advertiserId },
     select: {
       id: true,
+      name: true,
+      customerId: true,
       status: true,
       biddingKillSwitch: true,
       biddingKillSwitchAt: true,
@@ -803,6 +806,40 @@ export async function toggleBiddingKillSwitch(
   revalidatePath(`/admin/advertisers/${advertiserId}`)
   revalidatePath(`/${advertiserId}`)
   revalidatePath(`/${advertiserId}/bidding-policies`)
+
+  // -- kill_switch_triggered 알림 (Event 3b) -------------------------------
+  // false → true 전환 시점에만 dispatch (다시 false 로 풀 때는 알림 X — critical 알림 폭주 방지).
+  // toggle 1회 = 자연 1회 호출 — 별도 throttle 불필요.
+  if (!before.biddingKillSwitch && enabled) {
+    try {
+      console.info(
+        `[advertiser.kill_switch_toggle] notify kill_switch_triggered advertiserId=${advertiserId} customerId=${before.customerId}`,
+      )
+      await dispatch({
+        ruleType: "kill_switch_triggered",
+        severity: "critical",
+        title: `[Kill Switch ON] 광고주 ${before.name}`,
+        body:
+          `자동 비딩 중단됨. ` +
+          `발동 시각=${at.toISOString()} 발동자=${me.id}`,
+        meta: {
+          advertiserId,
+          customerId: before.customerId,
+          advertiserName: before.name,
+          at: at.toISOString(),
+          by: me.id,
+          // manual 토글 출처 — 향후 자동 발동(예: 비즈머니 부족) 추가 시 'auto' 분기.
+          source: "manual_admin_toggle",
+        },
+      })
+    } catch (e) {
+      // 알림 실패가 toggle 자체를 막지 않게.
+      console.warn(
+        "[advertiser.kill_switch_toggle] dispatch failed:",
+        e instanceof Error ? e.message : String(e),
+      )
+    }
+  }
 
   return { ok: true, enabled, at: at.toISOString(), by: me.id }
 }
