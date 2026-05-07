@@ -156,7 +156,9 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       advertisersOk++
       // bid-suggest cron 의 stale 차단 가드(Phase 7) 가 lastSyncAt['stat_daily']
       // 우선 사용 — 적재 성공 시점에만 갱신해 부분 실패 광고주는 stale 판정 유지.
-      await recordSyncAt(adv.id, "stat_daily")
+      if (r.rowsInserted > 0) {
+        await recordSyncAt(adv.id, "stat_daily")
+      }
     } catch (e) {
       advertisersFailed++
       const message = safeErrorMessage(e)

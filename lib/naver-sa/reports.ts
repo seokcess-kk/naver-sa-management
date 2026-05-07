@@ -10,7 +10,7 @@
  * 권장 호출 시퀀스 (backend cron 일별 적재):
  *   1. createStatReport(customerId, { reportTp: "AD_DETAIL", statDt: yesterday })
  *   2. waitStatReportReady(customerId, reportJobId)
- *   3. downloadStatReport(downloadUrl)
+ *   3. downloadStatReport(customerId, downloadUrl)  ← HMAC + X-Customer 필요 (SA 자기 도메인)
  *   4. parseAdDetailTsv(tsv)
  *   5. (적재 완료 후) deleteStatReport(customerId, reportJobId)
  *
@@ -18,10 +18,10 @@
  *
  * Rate Limit:
  *   - POST/GET/DELETE /stat-reports*  → client.ts 토큰 버킷 자동 통과
- *   - downloadUrl 외부 S3 fetch       → 토큰 버킷 외부 (광고주별 동시성은 backend가 직렬화 책임)
+ *   - downloadUrl GET (자기 도메인)     → client.ts 경유 → 토큰 버킷 자동 통과
  *
  * HMAC 서명 / X-Customer / 재시도(429,1016)는 `lib/naver-sa/client.ts`만 수행.
- * 본 모듈에서 fetch 또는 직접 서명 금지 (단, downloadStatReport 만 외부 S3 raw GET).
+ * 본 모듈에서 fetch 또는 직접 서명 금지.
  *
  * 시크릿 운영:
  *   - customerId 만 인자 — 평문 키/시크릿 직접 처리 X
@@ -88,7 +88,8 @@ export type StatReportJob = z.infer<typeof StatReportJobSchema>
 /**
  * 다운로드 가능 상태(BUILT / DONE) 응답.
  *
- * downloadUrl 은 외부 S3 공인 URL — HMAC 헤더 없이 단순 GET.
+ * downloadUrl 은 네이버 SA 자기 도메인 (예: api.searchad.naver.com/report-download).
+ * → HMAC + X-Customer 헤더 필수 (raw fetch 시 400 Missing Header). client.ts 경유 호출.
  */
 export const StatReportReadySchema = StatReportJobSchema.extend({
   downloadUrl: z.string().url(),
@@ -131,13 +132,20 @@ export type AdDetailRow = z.infer<typeof AdDetailRowSchema>
 // =============================================================================
 
 /**
- * Date → ISO 자정 UTC 문자열 (네이버 statDt 형식).
- * 예: 2026-04-29 → "2026-04-29T00:00:00.000Z"
+ * Date → ISO 자정 UTC 문자열 (네이버 statDt 형식, KST 일자 기준).
+ *
+ * 입력 d 는 "KST 자정"의 절대 epoch 가정 (호출부 previousDayKstAsUtc 반환).
+ * 예: d = 2026-05-05T15:00:00.000Z (= KST 2026-05-06 0시)
+ *     → "2026-05-06T00:00:00.000Z"
+ *
+ * SA spec 은 KST 기준 일자를 받으므로 +9h 후 UTC year/month/day 추출.
+ * 단순히 d.getUTCDate() 로 추출하면 KST 어제 자정 = UTC 그제 15:00 → "그제" 일자로 깎임 (회귀 차단).
  */
 function toStatDtString(d: Date): string {
-  const y = d.getUTCFullYear()
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0")
-  const day = String(d.getUTCDate()).padStart(2, "0")
+  const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000)
+  const y = kst.getUTCFullYear()
+  const m = String(kst.getUTCMonth() + 1).padStart(2, "0")
+  const day = String(kst.getUTCDate()).padStart(2, "0")
   return `${y}-${m}-${day}T00:00:00.000Z`
 }
 
@@ -236,44 +244,6 @@ function normalizeCell(raw: string | undefined): string | undefined {
   const v = raw.trim()
   if (v === "" || v === "-" || v.toLowerCase() === "null") return undefined
   return v
-}
-
-/**
- * downloadStatReport 용 외부 fetch 재시도 (지수 백오프).
- *
- * 사유: client.ts는 NAVER_SA_BASE_URL 기준 호출 + HMAC 강제라
- * S3 공인 URL 다운로드는 별도 raw fetch 필요. 단, 재시도/timeout 만 갖춤.
- */
-async function fetchWithRetry(url: string, maxAttempts = 3): Promise<Response> {
-  let lastErr: unknown = null
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      const res = await fetch(url, { method: "GET", cache: "no-store" })
-      if (res.ok) return res
-      // 4xx 는 재시도 의미 없음 (S3 만료 등) — 즉시 throw
-      if (res.status >= 400 && res.status < 500) {
-        throw new NaverSaUnknownError(`download failed: HTTP ${res.status}`, {
-          status: res.status,
-          method: "GET",
-        })
-      }
-      lastErr = new NaverSaUnknownError(`download failed: HTTP ${res.status}`, {
-        status: res.status,
-        method: "GET",
-      })
-    } catch (e) {
-      if (e instanceof NaverSaUnknownError) {
-        // 4xx 는 위에서 throw 했으므로 그대로 전파
-        throw e
-      }
-      lastErr = e
-    }
-    await sleep(250 * Math.pow(2, attempt) + Math.floor(Math.random() * 100))
-  }
-  if (lastErr instanceof Error) {
-    throw new NaverSaUnknownError(`download failed: ${lastErr.message}`, { method: "GET" })
-  }
-  throw new NaverSaUnknownError("download failed: unknown", { method: "GET" })
 }
 
 // =============================================================================
@@ -438,35 +408,118 @@ export async function waitStatReportReady(
 }
 
 /**
- * 외부 S3 downloadUrl 에서 TSV 본문 다운로드.
+ * downloadUrl 에서 TSV 본문 다운로드.
  *
- * - HMAC / X-Customer 헤더 X (S3 공인 URL — pre-signed)
- * - 5xx / 네트워크 오류는 3회 재시도 (지수 백오프)
- * - 4xx (URL 만료 등) 는 즉시 throw
- * - 응답 size 제한 미설정 (광고주 1일치 일반적으로 수 MB 이내)
+ * 네이버 SA 의 downloadUrl 은 자기 도메인 `/report-download?reportJobId=...` 를 반환하며
+ * HMAC + X-Customer 헤더가 필수. client.ts 경유로 호출해 서명·토큰 버킷·재시도를 통과시킨다.
+ *
+ * - URL origin 이 NAVER_SA_BASE_URL 과 다르면 NaverSaValidationError (예상 외 응답 방어)
+ * - 토큰 버킷 / 5xx 재시도 / 캐시 비대상 (TSV 일별 1회)
  */
-export async function downloadStatReport(downloadUrl: string): Promise<string> {
+export async function downloadStatReport(
+  customerId: string,
+  downloadUrl: string,
+): Promise<string> {
+  if (!customerId) {
+    throw new NaverSaValidationError("downloadStatReport: customerId is required")
+  }
   if (!downloadUrl) {
     throw new NaverSaValidationError("downloadStatReport: downloadUrl is required")
   }
-  const res = await fetchWithRetry(downloadUrl, 3)
-  return res.text()
+
+  let parsed: URL
+  try {
+    parsed = new URL(downloadUrl)
+  } catch {
+    throw new NaverSaValidationError("downloadStatReport: invalid downloadUrl")
+  }
+
+  const expectedOrigin = new URL(
+    process.env.NAVER_SA_BASE_URL || "https://api.searchad.naver.com",
+  ).origin
+  if (parsed.origin !== expectedOrigin) {
+    // SA spec 변경 (S3 pre-signed 등 외부 origin 회귀)을 즉시 감지
+    throw new NaverSaUnknownError(
+      `downloadStatReport: unexpected origin ${parsed.origin} (expected ${expectedOrigin})`,
+      { method: "GET" },
+    )
+  }
+
+  const pathWithQuery = `${parsed.pathname}${parsed.search}`
+  const res = await naverSaClient.request<unknown>({
+    customerId,
+    method: "GET",
+    path: pathWithQuery,
+  })
+
+  // client.request 는 JSON 파싱 실패 시 text 로 fallback (TSV 본문은 string).
+  if (typeof res !== "string") {
+    throw new NaverSaUnknownError("downloadStatReport: expected text body", {
+      method: "GET",
+      path: pathWithQuery,
+      customerId,
+    })
+  }
+  return res
 }
+
+/**
+ * AD_DETAIL TSV 컬럼 spec — 헤더 없는 fixed-position 16 컬럼 (실측 기반, 2026-05-06).
+ *
+ * idx | 의미              | 비고
+ * ----+-------------------+---------------------------------------------------
+ *  0  | date (YYYYMMDD)   | 8자리 → YYYY-MM-DD 변환 후 zod
+ *  1  | customerId
+ *  2  | campaignId
+ *  3  | adgroupId
+ *  4  | keywordId         | "-" → null (passthrough — pickLevel 에서 fallback)
+ *  5  | adId
+ *  6  | businessChannelId | P1 미사용 — passthrough(null) 하여 zod 통과
+ *  7  | media             | passthrough
+ *  8  | period?           | passthrough (시간/권역 등)
+ *  9  | mediaCode         | passthrough
+ * 10  | device (P/M)      | normalizeDevice
+ * 11  | impressions
+ * 12  | clicks
+ * 13  | cost
+ * 14  | avgRnk            | 노출 0 행은 SA 가 0~null 반환 — null 처리
+ * 15  | conversions       | P2 — passthrough
+ */
+const POSITIONAL_COLUMNS: Array<keyof AdDetailRow | null> = [
+  "date",
+  "customerId",
+  "campaignId",
+  "adgroupId",
+  "keywordId",
+  "adId",
+  null,
+  null,
+  null,
+  null,
+  "device",
+  "impressions",
+  "clicks",
+  "cost",
+  "avgRnk",
+  null,
+]
 
 /**
  * AD_DETAIL TSV → AdDetailRow[] 파싱.
  *
+ * SA spec: 헤더 없는 fixed-position 16 컬럼 (POSITIONAL_COLUMNS).
+ *
  * 정책:
- *   - 첫 줄(헤더)로 컬럼 인덱스 동적 매핑 (HEADER_ALIASES). 알 수 없는 헤더는
- *     row[원본_헤더명] = 원본_값 형태로 passthrough 보존.
+ *   - 첫 줄 첫 셀이 8자리 숫자(YYYYMMDD)면 헤더 없는 raw TSV 로 판정 → fixed-position 매핑.
+ *   - 그렇지 않으면 헤더 동적 매핑 (HEADER_ALIASES) — SA spec 변경 회귀 안전망.
  *   - 빈 입력 → []
- *   - 행별 검증 실패 (필수 필드 누락 / 타입 변환 실패) → console.error + 해당 행 skip
- *     (전체 fail X — operational resilience).
+ *   - 행별 검증 실패 (필수 필드 누락 / 타입 변환 실패) → console.error + 해당 행 skip.
  *   - 빈 셀 ("", "-", "null") → undefined.
+ *   - YYYYMMDD → YYYY-MM-DD 변환 (positional 분기 한정).
  *
  * 견고성:
- *   - 컬럼 추가/이름 변경 → HEADER_ALIASES 갱신만으로 흡수
- *   - 컬럼 순서 변경 → 헤더 인덱스 재매핑으로 자동 흡수
+ *   - 컬럼 추가/이름 변경 → HEADER_ALIASES 갱신만으로 흡수 (헤더 모드)
+ *   - 컬럼 순서 변경 → POSITIONAL_COLUMNS 갱신 (positional 모드)
  *   - device 미정 값 → normalizeDevice 가 null → 행 skip
  */
 export async function parseAdDetailTsv(tsv: string): Promise<AdDetailRow[]> {
@@ -476,15 +529,23 @@ export async function parseAdDetailTsv(tsv: string): Promise<AdDetailRow[]> {
   const lines = tsv.split(/\r?\n/).filter((l) => l.length > 0)
   if (lines.length === 0) return []
 
-  // 헤더 추출
-  const headerCells = lines[0].split("\t")
-  const headerKeys: Array<{ raw: string; key: keyof AdDetailRow | null }> = headerCells.map(
-    (h) => ({ raw: h, key: normalizeHeader(h) }),
-  )
+  // 헤더 자동 감지 — 첫 셀이 8자리 숫자(YYYYMMDD)면 헤더 없는 fixed-position TSV
+  const firstCell = (lines[0].split("\t")[0] ?? "").trim()
+  const headerless = /^\d{8}$/.test(firstCell)
+
+  let headerKeys: Array<{ raw: string; key: keyof AdDetailRow | null }>
+  let dataStartIdx: number
+  if (headerless) {
+    headerKeys = POSITIONAL_COLUMNS.map((key, i) => ({ raw: `col_${i}`, key }))
+    dataStartIdx = 0
+  } else {
+    headerKeys = lines[0].split("\t").map((h) => ({ raw: h, key: normalizeHeader(h) }))
+    dataStartIdx = 1
+  }
 
   const rows: AdDetailRow[] = []
 
-  for (let lineIdx = 1; lineIdx < lines.length; lineIdx++) {
+  for (let lineIdx = dataStartIdx; lineIdx < lines.length; lineIdx++) {
     const cells = lines[lineIdx].split("\t")
     const obj: Record<string, unknown> = {}
 
@@ -552,6 +613,11 @@ export async function parseAdDetailTsv(tsv: string): Promise<AdDetailRow[]> {
         `parseAdDetailTsv: line ${lineIdx + 1} skipped — ${String(obj.__skip)}`,
       )
       continue
+    }
+
+    // YYYYMMDD → YYYY-MM-DD (positional spec — SA raw TSV는 dash 없는 8자리)
+    if (typeof obj.date === "string" && /^\d{8}$/.test(obj.date)) {
+      obj.date = `${obj.date.slice(0, 4)}-${obj.date.slice(4, 6)}-${obj.date.slice(6, 8)}`
     }
 
     const parsed = AdDetailRowSchema.safeParse(obj)

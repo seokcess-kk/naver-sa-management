@@ -23,6 +23,7 @@ const mockWaitStatReportReady = vi.fn()
 const mockDownloadStatReport = vi.fn()
 const mockParseAdDetailTsv = vi.fn()
 const mockDeleteStatReport = vi.fn()
+const mockGetStatsChunked = vi.fn()
 
 vi.mock("@/lib/naver-sa/reports", () => ({
   createStatReport: (...args: unknown[]) => mockCreateStatReport(...args),
@@ -32,11 +33,27 @@ vi.mock("@/lib/naver-sa/reports", () => ({
   deleteStatReport: (...args: unknown[]) => mockDeleteStatReport(...args),
 }))
 
+vi.mock("@/lib/naver-sa/stats", () => ({
+  getStatsChunked: (...args: unknown[]) => mockGetStatsChunked(...args),
+}))
+
 const mockUpsert = vi.fn()
 const mockTransaction = vi.fn()
+const mockCampaignFindMany = vi.fn()
+const mockAdGroupFindMany = vi.fn()
+const mockKeywordFindMany = vi.fn()
 
 vi.mock("@/lib/db/prisma", () => ({
   prisma: {
+    campaign: {
+      findMany: (...args: unknown[]) => mockCampaignFindMany(...args),
+    },
+    adGroup: {
+      findMany: (...args: unknown[]) => mockAdGroupFindMany(...args),
+    },
+    keyword: {
+      findMany: (...args: unknown[]) => mockKeywordFindMany(...args),
+    },
     statDaily: {
       upsert: (...args: unknown[]) => mockUpsert(...args),
     },
@@ -237,8 +254,12 @@ describe("ingestAdvertiserStatDaily", () => {
     mockDownloadStatReport.mockReset()
     mockParseAdDetailTsv.mockReset()
     mockDeleteStatReport.mockReset()
+    mockGetStatsChunked.mockReset()
     mockUpsert.mockReset()
     mockTransaction.mockReset()
+    mockCampaignFindMany.mockReset()
+    mockAdGroupFindMany.mockReset()
+    mockKeywordFindMany.mockReset()
 
     // prisma.$transaction(promises[]) → Promise.all 흉내
     mockTransaction.mockImplementation(async (ops: unknown) => {
@@ -249,6 +270,10 @@ describe("ingestAdvertiserStatDaily", () => {
       return ops
     })
     mockUpsert.mockImplementation(async () => ({}))
+    mockCampaignFindMany.mockResolvedValue([])
+    mockAdGroupFindMany.mockResolvedValue([])
+    mockKeywordFindMany.mockResolvedValue([])
+    mockGetStatsChunked.mockResolvedValue([])
   })
 
   it("happy — 보고서 생성→폴링→다운로드→파싱→upsert→정리 시퀀스 호출", async () => {
@@ -285,6 +310,7 @@ describe("ingestAdvertiserStatDaily", () => {
     })
     expect(mockWaitStatReportReady).toHaveBeenCalledWith("cust-1", "job-1")
     expect(mockDownloadStatReport).toHaveBeenCalledWith(
+      "cust-1",
       "https://s3.example/report.tsv",
     )
     expect(mockParseAdDetailTsv).toHaveBeenCalledWith("tsv-body")

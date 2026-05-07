@@ -28,6 +28,11 @@ import {
   waitStatReportReady,
   type AdDetailRow,
 } from "@/lib/naver-sa/reports"
+import {
+  getStatsChunked,
+  type StatsField,
+  type StatsRow,
+} from "@/lib/naver-sa/stats"
 import { prisma } from "@/lib/db/prisma"
 import type { Prisma, StatLevel, StatDevice } from "@/lib/generated/prisma/client"
 
@@ -47,10 +52,9 @@ const KST_OFFSET_MS = 9 * 60 * 60 * 1000 // KST = UTC+9
  *   → 2026-04-28 00:00 KST = 2026-04-27 15:00 UTC
  *   → toISOString() = "2026-04-27T15:00:00.000Z"
  *
- * reports.createStatReport 가 내부에서 toStatDtString(d) → UTC 자정으로 변환하므로,
- * 본 함수가 반환한 Date 의 UTC 자정 (= 어제 UTC 0시 = 어제 KST 9시) 이
- * 네이버 statDt 로 전송된다. 본 PR 디폴트는 KST 기준 어제 — 운영 환경에서
- * STAT_DAILY_TZ env 추가로 후속 조정 가능.
+ * reports.createStatReport 가 내부에서 toStatDtString(d) 로 KST 일자(+9h)를 추출해
+ * "YYYY-MM-DDT00:00:00.000Z" 형식으로 SA 에 전송한다. 따라서 본 함수의 반환 Date 가
+ * KST 자정 epoch 인 한 SA 에는 "KST 어제 일자"가 정확히 전달된다.
  *
  * @param now 테스트용 현재 시각 주입 (운영 호출부는 omit → new Date())
  */
@@ -65,6 +69,15 @@ export function previousDayKstAsUtc(now: Date = new Date()): Date {
   const yesterdayKst0 = new Date(Date.UTC(kstY, kstM, kstD - 1))
   // 4) 다시 UTC 로 환원: KST 자정 = UTC 전일 15:00 → -9시간
   return new Date(yesterdayKst0.getTime() - KST_OFFSET_MS)
+}
+
+/** Date 객체가 가리키는 KST 일자를 YYYY-MM-DD 로 변환. */
+function dateToKstDateString(date: Date): string {
+  const kst = new Date(date.getTime() + KST_OFFSET_MS)
+  const y = kst.getUTCFullYear()
+  const m = String(kst.getUTCMonth() + 1).padStart(2, "0")
+  const d = String(kst.getUTCDate()).padStart(2, "0")
+  return `${y}-${m}-${d}`
 }
 
 // =============================================================================
@@ -153,6 +166,74 @@ export function toUpsertInput(
   }
 }
 
+const STATS_FIELDS: StatsField[] = [
+  "impCnt",
+  "clkCnt",
+  "salesAmt",
+  "recentAvgRnk",
+]
+
+const UPSERT_CHUNK = 100
+const UPSERT_TRANSACTION_TIMEOUT_MS = 30_000
+
+function numOr0(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0
+}
+
+function statsRowToUpsertInput(args: {
+  advertiserId: string
+  date: Date
+  level: StatLevel
+  row: StatsRow
+}): {
+  where: Prisma.StatDailyWhereUniqueInput
+  create: Prisma.StatDailyUncheckedCreateInput
+  update: Prisma.StatDailyUncheckedUpdateInput
+} | null {
+  const refId = typeof args.row.id === "string" ? args.row.id : ""
+  if (refId.length === 0) return null
+
+  const device: StatDevice = "ALL"
+  const impressions = numOr0(args.row.impCnt)
+  const clicks = numOr0(args.row.clkCnt)
+  const cost = numOr0(args.row.salesAmt)
+  const conversions = numOr0(args.row.crtoCnt)
+  const avgRnk =
+    typeof args.row.recentAvgRnk === "number" && args.row.recentAvgRnk > 0
+      ? args.row.recentAvgRnk
+      : null
+
+  return {
+    where: {
+      date_level_refId_device: {
+        date: args.date,
+        level: args.level,
+        refId,
+        device,
+      },
+    },
+    create: {
+      advertiserId: args.advertiserId,
+      date: args.date,
+      level: args.level,
+      refId,
+      device,
+      impressions,
+      clicks,
+      cost,
+      avgRnk,
+      conversions,
+    },
+    update: {
+      impressions,
+      clicks,
+      cost,
+      avgRnk,
+      conversions,
+    },
+  }
+}
+
 // =============================================================================
 // 광고주 1명 적재 (보고서 생성→폴링→다운로드→파싱→upsert→정리)
 // =============================================================================
@@ -209,26 +290,115 @@ export async function ingestAdvertiserStatDaily(
     // 2. BUILT/DONE 까지 폴링
     const ready = await waitStatReportReady(customerId, reportJobId)
 
-    // 3. TSV 다운로드 (외부 S3, HMAC 미적용)
-    const tsv = await downloadStatReport(ready.downloadUrl)
+    // 3. TSV 다운로드 (SA 자기 도메인 /report-download — HMAC + X-Customer 필수)
+    const tsv = await downloadStatReport(customerId, ready.downloadUrl)
 
     // 4. 행 단위 파싱 (행 단위 검증 실패는 reports.ts 내부에서 자동 skip)
     const rows = await parseAdDetailTsv(tsv)
 
-    // 5. upsert — chunk 100 단위 $transaction 으로 묶음
-    const inputs: Array<NonNullable<ReturnType<typeof toUpsertInput>>> = []
+    // 5. (date, level, refId, device) 단위 합산 collapse — TSV 가 시간/권역으로 분해된
+    //    raw row 다중 출현 (실측: 같은 adgroup·device 가 시간별로 6~24행). chunk transaction
+    //    내 같은 unique 키 두 번 upsert 시 P2002 충돌 → 적재 전 합산 필수.
+    //
+    //    합산 정책:
+    //      - impressions / clicks / cost: SUM
+    //      - avgRnk: 노출 가중 평균 (sum(avgRnk*imp) / sum(imp)). imp=0 또는 null 행은 제외.
+    //                노출 0 광고그룹은 avgRnk=null 적재.
+    type Agg = {
+      date: Date
+      level: StatLevel
+      refId: string
+      device: StatDevice
+      impressions: number
+      clicks: number
+      cost: number
+      avgRnkWeightedSum: number
+      avgRnkWeight: number
+    }
+    const aggMap = new Map<string, Agg>()
+
     for (const row of rows) {
       const inp = toUpsertInput(advertiserId, row)
       if (inp === null) {
         rowsSkipped++
         continue
       }
-      inputs.push(inp)
+      const w = inp.where.date_level_refId_device
+      if (!w) {
+        rowsSkipped++
+        continue
+      }
+      const wDate = w.date instanceof Date ? w.date : new Date(w.date)
+      const k = `${wDate.toISOString()}|${w.level}|${w.refId}|${w.device}`
+      const c = inp.create
+      const imp = (c.impressions as number) ?? 0
+      const clk = (c.clicks as number) ?? 0
+      const cst =
+        typeof c.cost === "number" ? c.cost : Number(c.cost ?? 0)
+      const rnk =
+        c.avgRnk == null
+          ? null
+          : typeof c.avgRnk === "number"
+            ? c.avgRnk
+            : Number(c.avgRnk)
+
+      const prev = aggMap.get(k)
+      if (prev) {
+        prev.impressions += imp
+        prev.clicks += clk
+        prev.cost += cst
+        if (rnk != null && imp > 0) {
+          prev.avgRnkWeightedSum += rnk * imp
+          prev.avgRnkWeight += imp
+        }
+      } else {
+        aggMap.set(k, {
+          date: wDate,
+          level: w.level as StatLevel,
+          refId: w.refId as string,
+          device: w.device as StatDevice,
+          impressions: imp,
+          clicks: clk,
+          cost: cst,
+          avgRnkWeightedSum: rnk != null && imp > 0 ? rnk * imp : 0,
+          avgRnkWeight: rnk != null && imp > 0 ? imp : 0,
+        })
+      }
     }
 
-    const CHUNK = 100
-    for (let i = 0; i < inputs.length; i += CHUNK) {
-      const slice = inputs.slice(i, i + CHUNK)
+    const inputs = Array.from(aggMap.values()).map((a) => {
+      const avgRnk = a.avgRnkWeight > 0 ? a.avgRnkWeightedSum / a.avgRnkWeight : null
+      return {
+        where: {
+          date_level_refId_device: {
+            date: a.date,
+            level: a.level,
+            refId: a.refId,
+            device: a.device,
+          },
+        },
+        create: {
+          advertiserId,
+          date: a.date,
+          level: a.level,
+          refId: a.refId,
+          device: a.device,
+          impressions: a.impressions,
+          clicks: a.clicks,
+          cost: a.cost,
+          avgRnk,
+        } satisfies Prisma.StatDailyUncheckedCreateInput,
+        update: {
+          impressions: a.impressions,
+          clicks: a.clicks,
+          cost: a.cost,
+          avgRnk,
+        } satisfies Prisma.StatDailyUncheckedUpdateInput,
+      }
+    })
+
+    for (let i = 0; i < inputs.length; i += UPSERT_CHUNK) {
+      const slice = inputs.slice(i, i + UPSERT_CHUNK)
       await prisma.$transaction(
         slice.map((inp) =>
           prisma.statDaily.upsert({
@@ -237,13 +407,76 @@ export async function ingestAdvertiserStatDaily(
             update: inp.update,
           }),
         ),
+        { timeout: UPSERT_TRANSACTION_TIMEOUT_MS },
       )
       rowsInserted += slice.length
     }
 
+    // 6. AD_DETAIL StatReport 는 keywordId 가 비어 소재/adgroup 단위로 내려오는
+    //    케이스가 있다. 입찰 inbox 는 keyword-level 7일 성과가 필요하므로 Stats API
+    //    ids 호출로 campaign/adgroup/keyword 일별 행을 보강 적재한다.
+    const campaigns = await prisma.campaign.findMany({
+      where: { advertiserId, status: "on" },
+      select: { nccCampaignId: true },
+    })
+    const adgroups = await prisma.adGroup.findMany({
+      where: { campaign: { advertiserId }, status: "on" },
+      select: { nccAdgroupId: true },
+    })
+    const keywords = await prisma.keyword.findMany({
+      where: { adgroup: { campaign: { advertiserId } }, status: "on" },
+      select: { nccKeywordId: true },
+    })
+
+    const statDtStr = dateToKstDateString(statDt)
+    const statDate = new Date(`${statDtStr}T00:00:00.000Z`)
+    const fetchPlan: { level: StatLevel; ids: string[] }[] = [
+      { level: "campaign", ids: campaigns.map((c) => c.nccCampaignId) },
+      { level: "adgroup", ids: adgroups.map((a) => a.nccAdgroupId) },
+      { level: "keyword", ids: keywords.map((k) => k.nccKeywordId) },
+    ]
+
+    for (const { level, ids } of fetchPlan) {
+      if (ids.length === 0) continue
+      const statsRows = await getStatsChunked(customerId, {
+        ids,
+        fields: STATS_FIELDS,
+        timeRange: { since: statDtStr, until: statDtStr },
+      })
+      const statsInputs: Array<NonNullable<ReturnType<typeof statsRowToUpsertInput>>> = []
+      for (const row of statsRows) {
+        const inp = statsRowToUpsertInput({
+          advertiserId,
+          date: statDate,
+          level,
+          row,
+        })
+        if (inp === null) {
+          rowsSkipped++
+        } else {
+          statsInputs.push(inp)
+        }
+      }
+
+      for (let i = 0; i < statsInputs.length; i += UPSERT_CHUNK) {
+        const slice = statsInputs.slice(i, i + UPSERT_CHUNK)
+        await prisma.$transaction(
+          slice.map((inp) =>
+            prisma.statDaily.upsert({
+              where: inp.where,
+              create: inp.create,
+              update: inp.update,
+            }),
+          ),
+          { timeout: UPSERT_TRANSACTION_TIMEOUT_MS },
+        )
+        rowsInserted += slice.length
+      }
+    }
+
     return { rowsInserted, rowsSkipped }
   } finally {
-    // 6. best-effort 정리 (실패해도 throw 안 함 — reports.deleteStatReport 가 흡수)
+    // 7. best-effort 정리 (실패해도 throw 안 함 — reports.deleteStatReport 가 흡수)
     if (reportJobId) {
       try {
         await deleteStatReport(customerId, reportJobId)

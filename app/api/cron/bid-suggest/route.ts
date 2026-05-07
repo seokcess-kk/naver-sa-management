@@ -47,6 +47,7 @@ import { prisma } from "@/lib/db/prisma"
 import { scrubString } from "@/lib/crypto/scrub-string"
 import {
   bundleSuggestions,
+  DEFAULT_MARGINAL_CONFIG,
   decideMarginalSuggestion,
   type AdvertiserBaselineInput,
   type AutomationTargets,
@@ -533,6 +534,26 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
     avgCvr: kpp.avgCvr,
     avgCpc: kpp.avgCpc,
   }
+  const confidenceDays = Math.max(1, Math.min(kpp.dataDays, STATS_WINDOW_DAYS))
+  const confidenceProgress =
+    STATS_WINDOW_DAYS <= 1
+      ? 1
+      : (confidenceDays - 1) / (STATS_WINDOW_DAYS - 1)
+  const confidenceConfig =
+    confidenceDays < STATS_WINDOW_DAYS
+      ? {
+          minClicksForConfidence: Math.ceil(
+            5 +
+              (DEFAULT_MARGINAL_CONFIG.minClicksForConfidence - 5) *
+                confidenceProgress,
+          ),
+          minImpressionsForConfidence: Math.ceil(
+            100 +
+              (DEFAULT_MARGINAL_CONFIG.minImpressionsForConfidence - 100) *
+                confidenceProgress,
+          ),
+        }
+      : undefined
 
   // -- d. BiddingPolicy 등록 키워드 (자동 실행 대상 — 본 cron 제외) -----------
   const policyKeywords = await prisma.biddingPolicy.findMany({
@@ -613,6 +634,7 @@ async function processAdvertiser(advertiserId: string): Promise<AdvertiserStats>
       keyword: keywordPerf,
       baseline,
       targets,
+      config: confidenceConfig,
     })
 
     if (decision.decision === "hold") {
