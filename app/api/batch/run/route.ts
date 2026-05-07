@@ -44,10 +44,11 @@ import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 // Prisma 사용 → Edge 가 아닌 Node 런타임 강제.
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
-// Vercel 함수 기본값(Pro 15s)에 끊기면 TIME_BUDGET_MS=50_000 가정과 미스매치되어
-// chunk 중간에 종료 → ChangeItem.status='done' 까지는 저장되나 batch.processed 증분
-// 누락 + lease 5분 미해제로 다음 cron 픽업 차단. 60s 까지 확장(Pro 한계 안전선).
-export const maxDuration = 60
+// Vercel 함수 기본값(Pro 15s)에 끊기면 TIME_BUDGET_MS 가정과 미스매치되어 chunk
+// 중간에 종료 → lease 5분 미해제로 다음 cron 픽업 차단. 300s 로 확장 (Pro 최대치).
+// 보강: vercel.json `functions` 블록에도 동일 값 명시 — Next.js export 만으로
+// 적용되지 않는 환경(빌드 캐시 등) 방어.
+export const maxDuration = 300
 
 // =============================================================================
 // 응답 타입
@@ -88,10 +89,12 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
   //     · 'approval_queue.apply' — F-12 D.4 ApprovalQueue 승인 (Keyword CREATE — search_term_promote)
   //     · 'sync_keywords'       — F-3.1 키워드 동기화 (광고그룹별 listKeywords + Keyword upsert)
   //   다른 액션은 동기 처리(Server Action 안에서 SA 호출) 그대로 두어 보호.
+  // lease 90s — 함수 timeout 시 다음 cron(매 분) 이 빠르게 회수. 기존 5분은 maxDuration
+  // 미적용 환경에서 73분 동안 14 attempt 누적 사례 발생 → 90s 로 단축.
   const acquired = await prisma.$queryRaw<{ id: string }[]>`
     UPDATE "ChangeBatch"
        SET "leaseOwner" = ${workerId},
-           "leaseExpiresAt" = now() + interval '5 minutes',
+           "leaseExpiresAt" = now() + interval '90 seconds',
            "status" = 'running',
            "attempt" = "attempt" + 1
      WHERE "id" = (
@@ -112,9 +115,10 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
   const batchId = acquired[0].id
 
   // -- 3. chunk 처리 ---------------------------------------------------------
-  // Vercel 함수 한계 60s 가정 → 50s 안전 마진. 도달 시 즉시 종료 + lease 해제.
+  // Vercel 함수 한계 300s 가정 (maxDuration export). 250s 안전 마진. 도달 시 즉시 종료
+  // + lease 해제. maxDuration 미적용 환경(빌드 캐시 등) 에서도 lease 90s 가 회복 보장.
   const startedAt = Date.now()
-  const TIME_BUDGET_MS = 50_000
+  const TIME_BUDGET_MS = 250_000
   const CHUNK_SIZE = 100
 
   let processedThisRun = 0
