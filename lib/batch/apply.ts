@@ -36,6 +36,7 @@ import type {
   KeywordStatus,
 } from "@/lib/generated/prisma/client"
 import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
+import { mapWithConcurrency, UPSERT_CONCURRENCY } from "@/lib/sync/concurrency"
 
 // =============================================================================
 // 결과 타입
@@ -475,101 +476,109 @@ async function applySyncKeywordsAdgroup(
   const remote: SaKeyword[] = await listKeywords(customerId, { nccAdgroupId })
 
   // -- 응답 키워드 upsert (nccKeywordId unique 자연 멱등) --------------------
+  // -- upsert 병렬 (UPSERT_CONCURRENCY=10) -----------------------------------
+  // 광고그룹당 키워드 600개 환경에서 직렬 upsert 는 ~30초 — Vercel 함수 60s 한계 안에서
+  // 다른 광고그룹 처리 여지 X. mapWithConcurrency 로 ~10배 단축 (Supabase pool 안전선 내).
+  const upsertResults = await mapWithConcurrency(
+    remote,
+    UPSERT_CONCURRENCY,
+    async (k): Promise<"ok" | "skip"> => {
+      // 응답의 nccAdgroupId 가 우리가 요청한 광고그룹과 다르면 skip (정상 케이스 X — 안전 가드).
+      if (k.nccAdgroupId !== nccAdgroupId) return "skip"
+
+      const mappedStatus = mapKeywordStatusFromSa(k)
+      const mappedInspect = mapInspectStatusFromSa(k)
+      const bidAmtVal = typeof k.bidAmt === "number" ? k.bidAmt : null
+      const useGroupBidAmtVal =
+        typeof k.useGroupBidAmt === "boolean" ? k.useGroupBidAmt : true
+      const userLockVal =
+        typeof k.userLock === "boolean" ? k.userLock : false
+
+      // matchType / recentAvgRnk 는 응답에 있을 때만 update 에 포함 (없으면 기존값 유지).
+      // KeywordSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
+      const anyK = k as unknown as {
+        matchType?: string
+        recentAvgRnk?: number | string | null
+      }
+      const matchTypeVal =
+        typeof anyK.matchType === "string" && anyK.matchType.length > 0
+          ? anyK.matchType.toUpperCase()
+          : null
+      const recentAvgRnkVal = parseRecentAvgRnk(anyK.recentAvgRnk)
+
+      const rawJson = k as unknown as Prisma.InputJsonValue
+
+      const baseCreateData: {
+        adgroupId: string
+        nccKeywordId: string
+        keyword: string
+        matchType: string | null
+        bidAmt: number | null
+        useGroupBidAmt: boolean
+        userLock: boolean
+        status: KeywordStatus
+        inspectStatus: InspectStatus
+        raw: Prisma.InputJsonValue
+        recentAvgRnk?: number
+      } = {
+        adgroupId: dbAdgroupId,
+        nccKeywordId: k.nccKeywordId,
+        keyword: k.keyword,
+        matchType: matchTypeVal,
+        bidAmt: bidAmtVal,
+        useGroupBidAmt: useGroupBidAmtVal,
+        userLock: userLockVal,
+        status: mappedStatus,
+        inspectStatus: mappedInspect,
+        raw: rawJson,
+      }
+      if (recentAvgRnkVal !== null) {
+        baseCreateData.recentAvgRnk = recentAvgRnkVal
+      }
+
+      // update 페이로드: 응답에 없는 필드(matchType / recentAvgRnk)는 빼서 기존값 유지.
+      const baseUpdateData: {
+        adgroupId: string
+        keyword: string
+        bidAmt: number | null
+        useGroupBidAmt: boolean
+        userLock: boolean
+        status: KeywordStatus
+        inspectStatus: InspectStatus
+        raw: Prisma.InputJsonValue
+        matchType?: string
+        recentAvgRnk?: number
+      } = {
+        adgroupId: dbAdgroupId,
+        keyword: k.keyword,
+        bidAmt: bidAmtVal,
+        useGroupBidAmt: useGroupBidAmtVal,
+        userLock: userLockVal,
+        status: mappedStatus,
+        inspectStatus: mappedInspect,
+        raw: rawJson,
+      }
+      if (matchTypeVal !== null) {
+        baseUpdateData.matchType = matchTypeVal
+      }
+      if (recentAvgRnkVal !== null) {
+        baseUpdateData.recentAvgRnk = recentAvgRnkVal
+      }
+
+      await prisma.keyword.upsert({
+        where: { nccKeywordId: k.nccKeywordId },
+        create: baseCreateData,
+        update: baseUpdateData,
+      })
+      return "ok"
+    },
+  )
+
   let syncedKeywords = 0
   let skipped = 0
-
-  for (const k of remote) {
-    // 응답의 nccAdgroupId 가 우리가 요청한 광고그룹과 다르면 skip (정상 케이스 X — 안전 가드).
-    if (k.nccAdgroupId !== nccAdgroupId) {
-      skipped++
-      continue
-    }
-
-    const mappedStatus = mapKeywordStatusFromSa(k)
-    const mappedInspect = mapInspectStatusFromSa(k)
-    const bidAmtVal = typeof k.bidAmt === "number" ? k.bidAmt : null
-    const useGroupBidAmtVal =
-      typeof k.useGroupBidAmt === "boolean" ? k.useGroupBidAmt : true
-    const userLockVal =
-      typeof k.userLock === "boolean" ? k.userLock : false
-
-    // matchType / recentAvgRnk 는 응답에 있을 때만 update 에 포함 (없으면 기존값 유지).
-    // KeywordSchema 는 passthrough 라 정의 외 필드는 그대로 통과 (any cast 안전).
-    const anyK = k as unknown as {
-      matchType?: string
-      recentAvgRnk?: number | string | null
-    }
-    const matchTypeVal =
-      typeof anyK.matchType === "string" && anyK.matchType.length > 0
-        ? anyK.matchType.toUpperCase()
-        : null
-    const recentAvgRnkVal = parseRecentAvgRnk(anyK.recentAvgRnk)
-
-    const rawJson = k as unknown as Prisma.InputJsonValue
-
-    const baseCreateData: {
-      adgroupId: string
-      nccKeywordId: string
-      keyword: string
-      matchType: string | null
-      bidAmt: number | null
-      useGroupBidAmt: boolean
-      userLock: boolean
-      status: KeywordStatus
-      inspectStatus: InspectStatus
-      raw: Prisma.InputJsonValue
-      recentAvgRnk?: number
-    } = {
-      adgroupId: dbAdgroupId,
-      nccKeywordId: k.nccKeywordId,
-      keyword: k.keyword,
-      matchType: matchTypeVal,
-      bidAmt: bidAmtVal,
-      useGroupBidAmt: useGroupBidAmtVal,
-      userLock: userLockVal,
-      status: mappedStatus,
-      inspectStatus: mappedInspect,
-      raw: rawJson,
-    }
-    if (recentAvgRnkVal !== null) {
-      baseCreateData.recentAvgRnk = recentAvgRnkVal
-    }
-
-    // update 페이로드: 응답에 없는 필드(matchType / recentAvgRnk)는 빼서 기존값 유지.
-    const baseUpdateData: {
-      adgroupId: string
-      keyword: string
-      bidAmt: number | null
-      useGroupBidAmt: boolean
-      userLock: boolean
-      status: KeywordStatus
-      inspectStatus: InspectStatus
-      raw: Prisma.InputJsonValue
-      matchType?: string
-      recentAvgRnk?: number
-    } = {
-      adgroupId: dbAdgroupId,
-      keyword: k.keyword,
-      bidAmt: bidAmtVal,
-      useGroupBidAmt: useGroupBidAmtVal,
-      userLock: userLockVal,
-      status: mappedStatus,
-      inspectStatus: mappedInspect,
-      raw: rawJson,
-    }
-    if (matchTypeVal !== null) {
-      baseUpdateData.matchType = matchTypeVal
-    }
-    if (recentAvgRnkVal !== null) {
-      baseUpdateData.recentAvgRnk = recentAvgRnkVal
-    }
-
-    await prisma.keyword.upsert({
-      where: { nccKeywordId: k.nccKeywordId },
-      create: baseCreateData,
-      update: baseUpdateData,
-    })
-    syncedKeywords++
+  for (const r of upsertResults) {
+    if (r === "ok") syncedKeywords++
+    else skipped++
   }
 
   return {

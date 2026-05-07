@@ -44,6 +44,10 @@ import type * as Prisma from "@/lib/generated/prisma/internal/prismaNamespace"
 // Prisma 사용 → Edge 가 아닌 Node 런타임 강제.
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
+// Vercel 함수 기본값(Pro 15s)에 끊기면 TIME_BUDGET_MS=50_000 가정과 미스매치되어
+// chunk 중간에 종료 → ChangeItem.status='done' 까지는 저장되나 batch.processed 증분
+// 누락 + lease 5분 미해제로 다음 cron 픽업 차단. 60s 까지 확장(Pro 한계 안전선).
+export const maxDuration = 60
 
 // =============================================================================
 // 응답 타입
@@ -159,13 +163,14 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
         })
       }
       processedThisRun++
+      // 항목 단위로 progress 증분 — 함수 timeout 으로 chunk 중간 종료 시에도 UI 진행률
+      // 정확히 보존. chunk 단위 일괄 증분은 race condition 위험 (lease 5분 hold 시 다음
+      // cron 이 같은 batch 보고 중복 카운트할 수 있음).
+      await prisma.changeBatch.update({
+        where: { id: batchId },
+        data: { processed: { increment: 1 } },
+      })
     }
-
-    // ChangeBatch.processed 진행률 갱신 (정상 + 실패 모두 계산)
-    await prisma.changeBatch.update({
-      where: { id: batchId },
-      data: { processed: { increment: items.length } },
-    })
   }
 
   // -- 4. 종료 처리 ----------------------------------------------------------
