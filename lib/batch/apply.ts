@@ -9,7 +9,9 @@
  * 화이트리스트 (targetType / action):
  *   - targetType="Keyword"  → CSV 일괄 가져오기 (operation: CREATE / UPDATE / OFF)
  *                            + bid_inbox.apply / approval_queue.apply
- *   - targetType="AdGroup"  → sync_keywords (광고그룹별 listKeywords 청크 동기화)
+ *   - targetType="AdGroup"  → 두 케이스 분기:
+ *       - operation="UPDATE" + fields="bidAmt" → applyAdgroupBidUpdate (Phase 2B 광고그룹 입찰가 적용)
+ *       - 그 외 (operation 부재) → applySyncKeywordsAdgroup (sync_keywords 청크)
  *   - 그 외 targetType 은 throw ("unsupported targetType for chunk executor")
  *
  * 호출 진입점:
@@ -21,6 +23,7 @@
 import { prisma } from "@/lib/db/prisma"
 // 자격증명 resolver side-effect 등록 (Cron 단독 진입에서도 SA 호출 가능하게).
 import "@/lib/naver-sa/credentials"
+import { updateAdgroup } from "@/lib/naver-sa/adgroups"
 import {
   createKeywords,
   listKeywords,
@@ -74,9 +77,18 @@ export type ApplyChangeResult = {
  * 동기 처리. 외부 변경 + DB 반영 모두 본 함수 안에서.
  */
 export async function applyChange(item: ChangeItem): Promise<ApplyChangeResult> {
-  // sync_keywords 분기 — targetType='AdGroup' (광고그룹별 listKeywords + Keyword upsert).
-  // 본 분기는 operation 미사용 (after = { customerId, dbAdgroupId, advertiserId } 만).
+  // AdGroup 분기 — 두 케이스:
+  //   1) Phase 2B 광고그룹 입찰가 권고 적용: after.operation='UPDATE' + after.fields='bidAmt'
+  //   2) sync_keywords (광고그룹별 listKeywords + Keyword upsert) — operation 부재
   if (item.targetType === "AdGroup") {
+    const after = item.after as Record<string, unknown> | null
+    if (
+      after != null &&
+      after.operation === "UPDATE" &&
+      after.fields === "bidAmt"
+    ) {
+      return applyAdgroupBidUpdate(item)
+    }
     return applySyncKeywordsAdgroup(item)
   }
 
@@ -584,5 +596,60 @@ async function applySyncKeywordsAdgroup(
   return {
     syncSummary: { syncedKeywords, skipped },
   }
+}
+
+// =============================================================================
+// applyAdgroupBidUpdate — Phase 2B 광고그룹 입찰가 권고 적용
+// =============================================================================
+//
+// 흐름:
+//   1. after 검증 — customerId / nccAdgroupId / bidAmt(>0) 필수
+//   2. SA PUT /ncc/adgroups/{nccAdgroupId}?fields=bidAmt 호출 (토큰 버킷 큐잉)
+//   3. DB AdGroup.bidAmt 갱신 — item.targetId(DB id) 기준
+//
+// 멱등성:
+//   - 재시도 시 동일 bidAmt 로 PUT — SA 응답 일관, DB update 도 동일 값으로 멱등.
+//   - actions.ts(enqueue) 시점에 광고주 횡단 검증 완료 — 본 함수는 단순 PUT + DB 갱신.
+//
+// 광고주 횡단 차단:
+//   - actions.ts(enqueue) 가 advertiserId 한정 fetch 후 ChangeItem 생성.
+//   - 본 함수는 customerId/nccAdgroupId 만 받으므로 추가 검증 X (성능 vs 안전 트레이드오프).
+//   - SA 응답이 다른 광고주 값이면 DB update 가 잘못된 행을 갱신할 위험 → item.targetId(DB id) 사용으로 차단.
+
+async function applyAdgroupBidUpdate(
+  item: ChangeItem,
+): Promise<ApplyChangeResult> {
+  const after = (item.after ?? {}) as Record<string, unknown>
+  const customerId =
+    typeof after.customerId === "string" ? after.customerId : null
+  const nccAdgroupId =
+    typeof after.nccAdgroupId === "string" ? after.nccAdgroupId : null
+  const rawBid = after.bidAmt
+  const bidAmt =
+    typeof rawBid === "number" ? rawBid : Number(rawBid)
+
+  if (!customerId) {
+    throw new Error("invalid_after_payload: missing customerId")
+  }
+  if (!nccAdgroupId) {
+    throw new Error("invalid_after_payload: missing nccAdgroupId")
+  }
+  if (!Number.isFinite(bidAmt) || bidAmt <= 0) {
+    throw new Error(`invalid_after_payload: bidAmt=${rawBid}`)
+  }
+
+  // SA PUT /ncc/adgroups/{nccAdgroupId}?fields=bidAmt
+  await updateAdgroup(customerId, nccAdgroupId, { bidAmt }, "bidAmt")
+
+  // DB 갱신 — item.targetId 는 actions.ts 에서 adgroup.id (DB id) 적재.
+  if (!item.targetId) {
+    throw new Error("invalid_after_payload: missing targetId (db id)")
+  }
+  await prisma.adGroup.update({
+    where: { id: item.targetId },
+    data: { bidAmt },
+  })
+
+  return {}
 }
 

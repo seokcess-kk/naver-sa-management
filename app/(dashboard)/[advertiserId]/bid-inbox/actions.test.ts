@@ -37,6 +37,7 @@ const mockTargetingRuleFindUnique = vi.fn()
 const mockTargetingRuleUpsert = vi.fn()
 const mockCampaignFindMany = vi.fn()
 const mockCampaignUpdate = vi.fn()
+const mockAdGroupFindMany = vi.fn()
 
 const mockChangeBatchCreate = vi.fn()
 const mockChangeBatchUpdate = vi.fn()
@@ -61,6 +62,9 @@ vi.mock("@/lib/db/prisma", () => ({
     campaign: {
       findMany: (...args: unknown[]) => mockCampaignFindMany(...args),
       update: (...args: unknown[]) => mockCampaignUpdate(...args),
+    },
+    adGroup: {
+      findMany: (...args: unknown[]) => mockAdGroupFindMany(...args),
     },
     changeBatch: {
       create: (...args: unknown[]) => mockChangeBatchCreate(...args),
@@ -134,6 +138,7 @@ beforeEach(() => {
   mockCampaignFindMany.mockResolvedValue([])
   mockCampaignUpdate.mockResolvedValue({})
   mockUpdateCampaignsBulk.mockResolvedValue([])
+  mockAdGroupFindMany.mockResolvedValue([])
 })
 
 afterEach(() => {
@@ -618,6 +623,330 @@ describe("approveBidSuggestions", () => {
     if (r.ok) return
     expect(r.error).toMatch(/API 키/)
     expect(mockChangeBatchCreate).not.toHaveBeenCalled()
+  })
+})
+
+// =============================================================================
+// B-2. approveBidSuggestions — 광고그룹 입찰가 권고 (Phase 2B)
+// =============================================================================
+
+describe("approveBidSuggestions adgroup (Phase 2B)", () => {
+  it("정상 — adgroup_default_bid_update 권고 → ChangeItem AdGroup pending 적재", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        id: "s_ag",
+        keywordId: null,
+        adgroupId: "ag_db_1",
+        engineSource: "bid",
+        action: {
+          kind: "adgroup_default_bid_update",
+          reasonCode: "adgroup_below_target_rank",
+          adgroupId: "ag_db_1",
+          nccAdgroupId: "ncc_ag_1",
+          currentBid: 500,
+          suggestedBid: 750,
+          deltaPct: 50,
+          direction: "up",
+          targetAvgRank: 5,
+          currentAvgRank: 7.2,
+          cappedByMaxCpc: false,
+        },
+        reason: "광고그룹 평균 노출 7.2 → 목표 5",
+        severity: "warn",
+      },
+    ])
+    mockKeywordFindMany.mockResolvedValue([])
+    mockAdGroupFindMany.mockResolvedValue([
+      {
+        id: "ag_db_1",
+        nccAdgroupId: "ncc_ag_1",
+        name: "ag1",
+        bidAmt: 500,
+        status: "on",
+        campaign: { advertiserId: ADV_ID },
+      },
+    ])
+    mockChangeBatchCreate.mockResolvedValue({ id: "batch_ag" })
+    mockBidSuggestionUpdateMany.mockResolvedValue({ count: 1 })
+
+    const r = await approveBidSuggestions(ADV_ID, ["s_ag"])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.preFailed).toBe(0)
+    expect(r.data.enqueued).toBe(1)
+    expect(r.data.batchId).toBe("batch_ag")
+
+    // adGroup.findMany 호출 — id 한정
+    expect(mockAdGroupFindMany).toHaveBeenCalled()
+    const agArgs = mockAdGroupFindMany.mock.calls[0]?.[0]
+    expect(agArgs.where.id.in).toEqual(["ag_db_1"])
+
+    // ChangeItem shape
+    const itemArgs = mockChangeItemCreateMany.mock.calls[0]?.[0]
+    expect(itemArgs.data).toHaveLength(1)
+    const seed = itemArgs.data[0]
+    expect(seed.targetType).toBe("AdGroup")
+    expect(seed.targetId).toBe("ag_db_1")
+    expect(seed.status).toBe("pending")
+    expect(seed.before.bidAmt).toBe(500)
+    expect(seed.before.nccAdgroupId).toBe("ncc_ag_1")
+    expect(seed.after.operation).toBe("UPDATE")
+    expect(seed.after.fields).toBe("bidAmt")
+    expect(seed.after.customerId).toBe(CUSTOMER_ID)
+    expect(seed.after.nccAdgroupId).toBe("ncc_ag_1")
+    expect(seed.after.bidAmt).toBe(750)
+    expect(seed.after.suggestionId).toBe("s_ag")
+    expect(seed.idempotencyKey).toBe("batch_ag:s_ag")
+  })
+
+  it("adgroup_not_found — fetch 결과에 없음 → preFailed=1", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        id: "s_ag_missing",
+        keywordId: null,
+        adgroupId: "ag_missing",
+        engineSource: "bid",
+        action: {
+          kind: "adgroup_default_bid_update",
+          adgroupId: "ag_missing",
+          nccAdgroupId: "ncc_missing",
+          suggestedBid: 600,
+          direction: "up",
+        },
+        reason: "x",
+        severity: "info",
+      },
+    ])
+    mockKeywordFindMany.mockResolvedValue([])
+    // adgroup 미존재
+    mockAdGroupFindMany.mockResolvedValue([])
+    mockChangeBatchCreate.mockResolvedValue({ id: "batch_ag_missing" })
+    mockBidSuggestionUpdateMany.mockResolvedValue({ count: 1 })
+
+    const r = await approveBidSuggestions(ADV_ID, ["s_ag_missing"])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.preFailed).toBe(1)
+    expect(r.data.enqueued).toBe(0)
+
+    const itemArgs = mockChangeItemCreateMany.mock.calls[0]?.[0]
+    expect(itemArgs.data).toHaveLength(1)
+    const seed = itemArgs.data[0]
+    expect(seed.targetType).toBe("AdGroup")
+    expect(seed.status).toBe("failed")
+    expect(seed.error).toBe("adgroup_not_found")
+  })
+
+  it("광고주 횡단 — adgroup.campaign.advertiserId 불일치 → adgroup_not_found 처리", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        id: "s_ag_xadv",
+        keywordId: null,
+        adgroupId: "ag_xadv",
+        engineSource: "bid",
+        action: {
+          kind: "adgroup_default_bid_update",
+          adgroupId: "ag_xadv",
+          nccAdgroupId: "ncc_xadv",
+          suggestedBid: 600,
+          direction: "up",
+        },
+        reason: "x",
+        severity: "info",
+      },
+    ])
+    mockKeywordFindMany.mockResolvedValue([])
+    mockAdGroupFindMany.mockResolvedValue([
+      {
+        id: "ag_xadv",
+        nccAdgroupId: "ncc_xadv",
+        name: "ag-xadv",
+        bidAmt: 400,
+        status: "on",
+        // 다른 광고주 소속
+        campaign: { advertiserId: "OTHER_ADV" },
+      },
+    ])
+    mockChangeBatchCreate.mockResolvedValue({ id: "batch_ag_xadv" })
+    mockBidSuggestionUpdateMany.mockResolvedValue({ count: 1 })
+
+    const r = await approveBidSuggestions(ADV_ID, ["s_ag_xadv"])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.preFailed).toBe(1)
+
+    const itemArgs = mockChangeItemCreateMany.mock.calls[0]?.[0]
+    const seed = itemArgs.data[0]
+    expect(seed.status).toBe("failed")
+    expect(seed.error).toBe("adgroup_not_found")
+  })
+
+  it("invalid_adgroup_state — status='deleted' 또는 bidAmt=null → preFailed=1", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        id: "s_ag_del",
+        keywordId: null,
+        adgroupId: "ag_del",
+        engineSource: "bid",
+        action: {
+          kind: "adgroup_default_bid_update",
+          adgroupId: "ag_del",
+          nccAdgroupId: "ncc_del",
+          suggestedBid: 600,
+          direction: "up",
+        },
+        reason: "x",
+        severity: "info",
+      },
+      {
+        id: "s_ag_nullbid",
+        keywordId: null,
+        adgroupId: "ag_nullbid",
+        engineSource: "bid",
+        action: {
+          kind: "adgroup_default_bid_update",
+          adgroupId: "ag_nullbid",
+          nccAdgroupId: "ncc_nullbid",
+          suggestedBid: 700,
+          direction: "up",
+        },
+        reason: "x",
+        severity: "info",
+      },
+    ])
+    mockKeywordFindMany.mockResolvedValue([])
+    mockAdGroupFindMany.mockResolvedValue([
+      {
+        id: "ag_del",
+        nccAdgroupId: "ncc_del",
+        name: "ag-del",
+        bidAmt: 400,
+        status: "deleted",
+        campaign: { advertiserId: ADV_ID },
+      },
+      {
+        id: "ag_nullbid",
+        nccAdgroupId: "ncc_nullbid",
+        name: "ag-nullbid",
+        bidAmt: null,
+        status: "on",
+        campaign: { advertiserId: ADV_ID },
+      },
+    ])
+    mockChangeBatchCreate.mockResolvedValue({ id: "batch_ag_inv" })
+    mockBidSuggestionUpdateMany.mockResolvedValue({ count: 2 })
+
+    const r = await approveBidSuggestions(ADV_ID, ["s_ag_del", "s_ag_nullbid"])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.preFailed).toBe(2)
+    expect(r.data.enqueued).toBe(0)
+
+    const itemArgs = mockChangeItemCreateMany.mock.calls[0]?.[0]
+    expect(itemArgs.data).toHaveLength(2)
+    for (const seed of itemArgs.data) {
+      expect(seed.targetType).toBe("AdGroup")
+      expect(seed.status).toBe("failed")
+      expect(seed.error).toBe("invalid_adgroup_state")
+    }
+  })
+
+  it("invalid_suggested_bid — suggestedBid 미정수/음수 → preFailed=1", async () => {
+    mockBidSuggestionFindMany.mockResolvedValue([
+      {
+        id: "s_ag_neg",
+        keywordId: null,
+        adgroupId: "ag_neg",
+        engineSource: "bid",
+        action: {
+          kind: "adgroup_default_bid_update",
+          adgroupId: "ag_neg",
+          nccAdgroupId: "ncc_neg",
+          suggestedBid: -100, // 음수
+          direction: "up",
+        },
+        reason: "x",
+        severity: "info",
+      },
+      {
+        id: "s_ag_zero",
+        keywordId: null,
+        adgroupId: "ag_zero",
+        engineSource: "bid",
+        action: {
+          kind: "adgroup_default_bid_update",
+          adgroupId: "ag_zero",
+          nccAdgroupId: "ncc_zero",
+          suggestedBid: 0, // 0 도 거부
+          direction: "up",
+        },
+        reason: "x",
+        severity: "info",
+      },
+      {
+        id: "s_ag_str",
+        keywordId: null,
+        adgroupId: "ag_str",
+        engineSource: "bid",
+        action: {
+          kind: "adgroup_default_bid_update",
+          adgroupId: "ag_str",
+          nccAdgroupId: "ncc_str",
+          // 숫자 아님
+          suggestedBid: "not_a_number" as unknown as number,
+          direction: "up",
+        },
+        reason: "x",
+        severity: "info",
+      },
+    ])
+    mockKeywordFindMany.mockResolvedValue([])
+    mockAdGroupFindMany.mockResolvedValue([
+      {
+        id: "ag_neg",
+        nccAdgroupId: "ncc_neg",
+        name: "neg",
+        bidAmt: 500,
+        status: "on",
+        campaign: { advertiserId: ADV_ID },
+      },
+      {
+        id: "ag_zero",
+        nccAdgroupId: "ncc_zero",
+        name: "zero",
+        bidAmt: 500,
+        status: "on",
+        campaign: { advertiserId: ADV_ID },
+      },
+      {
+        id: "ag_str",
+        nccAdgroupId: "ncc_str",
+        name: "str",
+        bidAmt: 500,
+        status: "on",
+        campaign: { advertiserId: ADV_ID },
+      },
+    ])
+    mockChangeBatchCreate.mockResolvedValue({ id: "batch_ag_invbid" })
+    mockBidSuggestionUpdateMany.mockResolvedValue({ count: 3 })
+
+    const r = await approveBidSuggestions(ADV_ID, [
+      "s_ag_neg",
+      "s_ag_zero",
+      "s_ag_str",
+    ])
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.preFailed).toBe(3)
+    expect(r.data.enqueued).toBe(0)
+
+    const itemArgs = mockChangeItemCreateMany.mock.calls[0]?.[0]
+    expect(itemArgs.data).toHaveLength(3)
+    for (const seed of itemArgs.data) {
+      expect(seed.targetType).toBe("AdGroup")
+      expect(seed.status).toBe("failed")
+      expect(seed.error).toBe("invalid_suggested_bid")
+    }
   })
 })
 

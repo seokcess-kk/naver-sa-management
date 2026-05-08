@@ -27,16 +27,23 @@ vi.mock("@/lib/naver-sa/keywords", () => ({
   updateKeywordsBulk: vi.fn(),
 }))
 
+const mockUpdateAdgroup = vi.fn()
+vi.mock("@/lib/naver-sa/adgroups", () => ({
+  updateAdgroup: (...args: unknown[]) => mockUpdateAdgroup(...args),
+}))
+
 // 자격증명 resolver side-effect 등록은 import 자체에 있음 — credentials.ts 를 빈 모듈로 stub.
 vi.mock("@/lib/naver-sa/credentials", () => ({}))
 
 const mockAdGroupFindUnique = vi.fn()
+const mockAdGroupUpdate = vi.fn()
 const mockKeywordUpsert = vi.fn()
 
 vi.mock("@/lib/db/prisma", () => ({
   prisma: {
     adGroup: {
       findUnique: (...args: unknown[]) => mockAdGroupFindUnique(...args),
+      update: (...args: unknown[]) => mockAdGroupUpdate(...args),
     },
     keyword: {
       upsert: (...args: unknown[]) => mockKeywordUpsert(...args),
@@ -103,6 +110,15 @@ beforeEach(() => {
     id: "kw_db_1",
     nccKeywordId: create.nccKeywordId,
   }))
+  mockAdGroupUpdate.mockResolvedValue({
+    id: DB_ADGROUP,
+    nccAdgroupId: NCC_ADGROUP,
+    bidAmt: 750,
+  })
+  mockUpdateAdgroup.mockResolvedValue({
+    nccAdgroupId: NCC_ADGROUP,
+    bidAmt: 750,
+  })
 })
 
 // =============================================================================
@@ -242,5 +258,168 @@ describe("applyChange (targetType='AdGroup') — sync_keywords 라우팅", () =>
     const result = await applyChange(buildItem())
     expect(mockKeywordUpsert).not.toHaveBeenCalled()
     expect(result.syncSummary).toEqual({ syncedKeywords: 0, skipped: 0 })
+  })
+})
+
+// =============================================================================
+// applyAdgroupBidUpdate (Phase 2B 광고그룹 입찰가 적용) 테스트
+// =============================================================================
+//
+// 검증 범위:
+//   1. 정상 — updateAdgroup PUT + adGroup.update 호출 인자 검증
+//   2. invalid bidAmt (음수/0/NaN/문자열) → throw
+//   3. missing customerId → throw
+//   4. missing nccAdgroupId → throw
+//   5. 회귀 — operation 미지정 케이스는 여전히 sync_keywords 흐름 진입
+
+describe("applyChange (targetType='AdGroup' + operation='UPDATE' + fields='bidAmt')", () => {
+  const NEW_BID = 750
+  const DB_AG_ID = "ag_db_2"
+
+  function buildBidUpdateItem(overrides: Partial<Record<string, unknown>> = {}): Item {
+    return {
+      id: "item_bid",
+      batchId: "batch_bid",
+      targetType: "AdGroup",
+      targetId: DB_AG_ID, // DB id (actions.ts 가 적재)
+      before: {
+        bidAmt: 500,
+        nccAdgroupId: NCC_ADGROUP,
+      },
+      after: {
+        operation: "UPDATE",
+        fields: "bidAmt",
+        customerId: CUSTOMER_ID,
+        nccAdgroupId: NCC_ADGROUP,
+        bidAmt: NEW_BID,
+        suggestionId: "s_ag",
+        suggestionReason: "광고그룹 평균 노출 7.2 → 목표 5",
+      },
+      status: "pending",
+      error: null,
+      idempotencyKey: "batch_bid:s_ag",
+      attempt: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...overrides,
+    } as Item
+  }
+
+  it("정상 — updateAdgroup PUT + adGroup.update DB 갱신", async () => {
+    const item = buildBidUpdateItem()
+    const result = await applyChange(item)
+
+    // SA PUT
+    expect(mockUpdateAdgroup).toHaveBeenCalledTimes(1)
+    expect(mockUpdateAdgroup).toHaveBeenCalledWith(
+      CUSTOMER_ID,
+      NCC_ADGROUP,
+      { bidAmt: NEW_BID },
+      "bidAmt",
+    )
+
+    // DB update — id 기반 (DB id), data.bidAmt
+    expect(mockAdGroupUpdate).toHaveBeenCalledTimes(1)
+    expect(mockAdGroupUpdate).toHaveBeenCalledWith({
+      where: { id: DB_AG_ID },
+      data: { bidAmt: NEW_BID },
+    })
+
+    // sync_keywords 분기와 무관 — listKeywords / keyword upsert 미호출
+    expect(mockListKeywords).not.toHaveBeenCalled()
+    expect(mockKeywordUpsert).not.toHaveBeenCalled()
+
+    // 빈 결과 (syncSummary / nccKeywordId 없음)
+    expect(result).toEqual({})
+  })
+
+  it("invalid bidAmt — 음수 → throw", async () => {
+    const item = buildBidUpdateItem({
+      after: {
+        operation: "UPDATE",
+        fields: "bidAmt",
+        customerId: CUSTOMER_ID,
+        nccAdgroupId: NCC_ADGROUP,
+        bidAmt: -100,
+      },
+    })
+    await expect(applyChange(item)).rejects.toThrow(/invalid_after_payload: bidAmt/)
+    expect(mockUpdateAdgroup).not.toHaveBeenCalled()
+    expect(mockAdGroupUpdate).not.toHaveBeenCalled()
+  })
+
+  it("invalid bidAmt — 0 → throw", async () => {
+    const item = buildBidUpdateItem({
+      after: {
+        operation: "UPDATE",
+        fields: "bidAmt",
+        customerId: CUSTOMER_ID,
+        nccAdgroupId: NCC_ADGROUP,
+        bidAmt: 0,
+      },
+    })
+    await expect(applyChange(item)).rejects.toThrow(/invalid_after_payload: bidAmt/)
+    expect(mockUpdateAdgroup).not.toHaveBeenCalled()
+  })
+
+  it("invalid bidAmt — NaN/문자열 → throw", async () => {
+    const item = buildBidUpdateItem({
+      after: {
+        operation: "UPDATE",
+        fields: "bidAmt",
+        customerId: CUSTOMER_ID,
+        nccAdgroupId: NCC_ADGROUP,
+        bidAmt: "not_a_number",
+      },
+    })
+    await expect(applyChange(item)).rejects.toThrow(/invalid_after_payload: bidAmt/)
+    expect(mockUpdateAdgroup).not.toHaveBeenCalled()
+  })
+
+  it("missing customerId → throw", async () => {
+    const item = buildBidUpdateItem({
+      after: {
+        operation: "UPDATE",
+        fields: "bidAmt",
+        // customerId 누락
+        nccAdgroupId: NCC_ADGROUP,
+        bidAmt: NEW_BID,
+      },
+    })
+    await expect(applyChange(item)).rejects.toThrow(
+      /invalid_after_payload: missing customerId/,
+    )
+    expect(mockUpdateAdgroup).not.toHaveBeenCalled()
+    expect(mockAdGroupUpdate).not.toHaveBeenCalled()
+  })
+
+  it("missing nccAdgroupId → throw", async () => {
+    const item = buildBidUpdateItem({
+      after: {
+        operation: "UPDATE",
+        fields: "bidAmt",
+        customerId: CUSTOMER_ID,
+        // nccAdgroupId 누락
+        bidAmt: NEW_BID,
+      },
+    })
+    await expect(applyChange(item)).rejects.toThrow(
+      /invalid_after_payload: missing nccAdgroupId/,
+    )
+    expect(mockUpdateAdgroup).not.toHaveBeenCalled()
+    expect(mockAdGroupUpdate).not.toHaveBeenCalled()
+  })
+
+  it("회귀 — AdGroup 분기에 operation 부재 시 여전히 sync_keywords 진입", async () => {
+    // operation 미지정 케이스 — sync_keywords 분기로 라우팅 확인
+    mockListKeywords.mockResolvedValue([])
+    const item = buildItem() // 기존 헬퍼 (after.operation 없음)
+    await applyChange(item)
+
+    // sync_keywords 가 호출됨 — listKeywords 호출
+    expect(mockListKeywords).toHaveBeenCalledTimes(1)
+    // bid update 함수는 호출되지 않음
+    expect(mockUpdateAdgroup).not.toHaveBeenCalled()
+    expect(mockAdGroupUpdate).not.toHaveBeenCalled()
   })
 })

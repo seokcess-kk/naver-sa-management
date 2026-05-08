@@ -35,6 +35,8 @@ import {
   InfoIcon,
   SlidersHorizontalIcon,
   PackageIcon,
+  TargetIcon,
+  AlertTriangleIcon,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -527,17 +529,33 @@ export function BidSuggestionTable({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((s) =>
-                s.scope === "adgroup" ? (
-                  <BundleSuggestionRow
-                    key={s.id}
-                    row={s}
-                    selected={selectedIds.has(s.id)}
-                    onToggle={() => toggleOne(s.id)}
-                    onOpenBundle={() => setBundleSuggestionId(s.id)}
-                    canMutate={canMutate}
-                  />
-                ) : (
+              {filtered.map((s) => {
+                if (s.scope === "adgroup") {
+                  // Phase 2A — 광고그룹 입찰가 자체 변경 권고는 정보 카드만 (자동 적용 X)
+                  if (s.action.kind === "adgroup_default_bid_update") {
+                    return (
+                      <AdgroupBidRow
+                        key={s.id}
+                        row={s}
+                        selected={selectedIds.has(s.id)}
+                        onToggle={() => toggleOne(s.id)}
+                        canMutate={canMutate}
+                      />
+                    )
+                  }
+                  // 기존 키워드 묶음 권고 (kind='keyword_bid_bundle' 또는 미존재 legacy)
+                  return (
+                    <BundleSuggestionRow
+                      key={s.id}
+                      row={s}
+                      selected={selectedIds.has(s.id)}
+                      onToggle={() => toggleOne(s.id)}
+                      onOpenBundle={() => setBundleSuggestionId(s.id)}
+                      canMutate={canMutate}
+                    />
+                  )
+                }
+                return (
                   <SuggestionRow
                     key={s.id}
                     row={s}
@@ -546,8 +564,8 @@ export function BidSuggestionTable({
                     onOpenDetail={() => setDetailRow(s)}
                     canMutate={canMutate}
                   />
-                ),
-              )}
+                )
+              })}
             </TableBody>
           </Table>
         </div>
@@ -920,6 +938,48 @@ export function BidSuggestionTable({
 // 행 컴포넌트
 // =============================================================================
 
+/**
+ * 5순위 미달 권고 메타 추출 — engineSource='bid' + scope='keyword' + reasonCode='below_target_rank'.
+ * marginal 흐름 권고는 reasonCode 미존재 또는 다른 값 → null.
+ */
+function getRankAction(row: BidSuggestionRow): {
+  targetAvgRank: number
+  currentAvgRank?: number
+  cappedByMaxCpc: boolean
+  /** 6 = 6시간 가중평균 / null = fallback (last non-null) / undefined = 미존재. */
+  rankWindowHours?: number | null
+  /** 가중평균 시 Σimpressions / fallback 시 null / 미존재 시 undefined. */
+  rankSampleImpressions?: number | null
+} | null {
+  if (row.engineSource !== "bid" || row.scope !== "keyword") return null
+  const a = row.action
+  if (a.reasonCode !== "below_target_rank") return null
+  const target = typeof a.targetAvgRank === "number" ? a.targetAvgRank : 5
+  const current =
+    typeof a.currentAvgRank === "number" ? a.currentAvgRank : undefined
+  // rankWindowHours 는 6 또는 null(=fallback) 두 케이스만 의미 있음.
+  // 둘 다 누락(undefined) 이면 출처 표기 생략.
+  const rankWindowHours =
+    typeof a.rankWindowHours === "number"
+      ? a.rankWindowHours
+      : a.rankWindowHours === null
+        ? null
+        : undefined
+  const rankSampleImpressions =
+    typeof a.rankSampleImpressions === "number"
+      ? a.rankSampleImpressions
+      : a.rankSampleImpressions === null
+        ? null
+        : undefined
+  return {
+    targetAvgRank: target,
+    currentAvgRank: current,
+    cappedByMaxCpc: a.cappedByMaxCpc === true,
+    rankWindowHours,
+    rankSampleImpressions,
+  }
+}
+
 function getBidAction(row: BidSuggestionRow): BidAction | null {
   const a = row.action
   if (
@@ -982,8 +1042,19 @@ function getBudgetActionItems(row: BidSuggestionRow): BudgetActionItem[] | null 
 }
 
 function isApplicableSuggestion(row: BidSuggestionRow): boolean {
-  // 묶음 권고(scope='adgroup')는 본 일괄 적용 흐름 비대상 — 모달에서 부분 선택 적용 (4단계 후속 PR).
-  if (row.scope === "adgroup") return false
+  // scope='adgroup' 은 kind 별로 분기:
+  //   - kind='keyword_bid_bundle'         → false (BundleSuggestionDialog 로 분리 처리)
+  //   - kind='adgroup_default_bid_update' → true (Phase 2B — 일반 적용 흐름)
+  //   - 그 외 / kind 미지정                 → false (보수적)
+  if (row.scope === "adgroup") {
+    if (
+      row.engineSource === "bid" &&
+      row.action.kind === "adgroup_default_bid_update"
+    ) {
+      return true
+    }
+    return false
+  }
   return (
     getBidAction(row) !== null ||
     isQualityOffSuggestion(row) ||
@@ -1032,6 +1103,7 @@ function SuggestionRow({
 }) {
   const k = row.keyword
   const bidAction = getBidAction(row)
+  const rankAction = getRankAction(row)
   const budgetItems = getBudgetActionItems(row)
   // 적용 불가 케이스 시각 구분
   const invalid =
@@ -1128,11 +1200,60 @@ function SuggestionRow({
         <SeverityBadge severity={row.severity} />
       </TableCell>
       <TableCell>
-        <div
-          className="max-w-md truncate text-xs text-muted-foreground"
-          title={row.reason}
-        >
-          {row.reason}
+        <div className="flex max-w-md flex-col gap-1">
+          {rankAction ? (
+            <div className="flex flex-wrap items-center gap-1">
+              <RankReasonBadge targetAvgRank={rankAction.targetAvgRank} />
+              {rankAction.cappedByMaxCpc && <MaxCpcCappedBadge />}
+              {row.engineSource === "bid" &&
+              row.action.selectedDevice ? (
+                <SelectedDeviceLabel
+                  selectedDevice={row.action.selectedDevice}
+                  estimatedBidPc={row.action.estimatedBidPc}
+                  estimatedBidMobile={row.action.estimatedBidMobile}
+                  appliedBid={
+                    typeof row.action.suggestedBid === "number"
+                      ? row.action.suggestedBid
+                      : null
+                  }
+                />
+              ) : null}
+            </div>
+          ) : row.engineSource === "bid" && row.action.selectedDevice ? (
+            <div className="flex flex-wrap items-center gap-1">
+              <SelectedDeviceLabel
+                selectedDevice={row.action.selectedDevice}
+                estimatedBidPc={row.action.estimatedBidPc}
+                estimatedBidMobile={row.action.estimatedBidMobile}
+                appliedBid={
+                  typeof row.action.suggestedBid === "number"
+                    ? row.action.suggestedBid
+                    : null
+                }
+              />
+            </div>
+          ) : null}
+          <div
+            className="truncate text-xs text-muted-foreground"
+            title={row.reason}
+          >
+            {row.reason}
+          </div>
+          {rankAction && rankAction.currentAvgRank !== undefined ? (
+            <div className="font-mono text-[10px] text-muted-foreground">
+              현재 {rankAction.currentAvgRank.toFixed(1)}위 → 목표{" "}
+              {rankAction.targetAvgRank}위
+              {(() => {
+                const label = formatRankWindowLabel(
+                  rankAction.rankWindowHours,
+                  rankAction.rankSampleImpressions,
+                )
+                return label ? (
+                  <span className="ml-1 text-muted-foreground">{label}</span>
+                ) : null
+              })()}
+            </div>
+          ) : null}
         </div>
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
@@ -1269,6 +1390,200 @@ function BundleSuggestionRow({
         >
           묶음 보기
         </Button>
+      </TableCell>
+    </TableRow>
+  )
+}
+
+// =============================================================================
+// 광고그룹 입찰가 권고 행 (Phase 2B — scope='adgroup' + kind='adgroup_default_bid_update')
+// =============================================================================
+
+/**
+ * 광고그룹 입찰가 자체 변경 권고 — 일반 적용 흐름 사용 (Phase 2B 활성화).
+ *
+ * 시각 구분:
+ *   - 좌측 보더: amber (광고그룹 단위)
+ *   - 헤더: 광고그룹명 + "광고그룹 입찰가 권고" 배지
+ *   - 체크박스 선택 → 헤더 "선택 적용" 모달 흐름 (미리보기 → 확정 → 진행률 → 결과)
+ *   - 확정 시 ChangeItem(targetType='AdGroup') 적재 → cron 처리 → AdGroup.bidAmt 갱신
+ */
+function AdgroupBidRow({
+  row,
+  selected,
+  onToggle,
+  canMutate,
+}: {
+  row: BidSuggestionRow
+  selected: boolean
+  onToggle: () => void
+  canMutate: boolean
+}) {
+  const a = row.action
+  const currentBid =
+    typeof a.currentBid === "number" && Number.isFinite(a.currentBid)
+      ? a.currentBid
+      : null
+  const suggestedBid =
+    typeof a.suggestedBid === "number" && Number.isFinite(a.suggestedBid)
+      ? a.suggestedBid
+      : null
+  const deltaPct =
+    typeof a.deltaPct === "number" && Number.isFinite(a.deltaPct)
+      ? a.deltaPct
+      : null
+  const direction = a.direction === "down" ? "down" : "up"
+  const isUp = direction === "up"
+
+  const targetAvgRank =
+    typeof a.targetAvgRank === "number" ? a.targetAvgRank : 5
+  const currentAvgRank =
+    typeof a.currentAvgRank === "number" ? a.currentAvgRank : null
+
+  const cappedByMaxCpc = a.cappedByMaxCpc === true
+  const rankWindowHours =
+    typeof a.rankWindowHours === "number"
+      ? a.rankWindowHours
+      : a.rankWindowHours === null
+        ? null
+        : undefined
+  const rankSampleImpressions =
+    typeof a.rankSampleImpressions === "number"
+      ? a.rankSampleImpressions
+      : a.rankSampleImpressions === null
+        ? null
+        : undefined
+
+  return (
+    <TableRow
+      className={cn(
+        "border-l-4 border-amber-500 bg-amber-50/30 hover:bg-amber-50/60",
+        "dark:border-amber-700 dark:bg-amber-950/20 dark:hover:bg-amber-950/30",
+      )}
+    >
+      <TableCell onClick={(e) => e.stopPropagation()}>
+        <Checkbox
+          checked={selected}
+          onCheckedChange={onToggle}
+          disabled={!canMutate}
+          aria-label="선택"
+        />
+      </TableCell>
+      <TableCell>
+        <div className="flex items-center gap-1.5">
+          <TargetIcon
+            aria-hidden="true"
+            className="size-4 text-amber-600 dark:text-amber-400"
+          />
+          <span className="font-semibold">
+            광고그룹: {row.targetName ?? "—"}
+          </span>
+          <span
+            className={cn(
+              "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium",
+              "border border-amber-300 bg-amber-100 text-amber-800",
+              "dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300",
+            )}
+            title="광고그룹 입찰가 자체를 변경하는 권고 (Phase 2A — 정보 표시만)"
+          >
+            광고그룹 입찰가 권고
+          </span>
+        </div>
+        <span className="text-[10px] text-muted-foreground">
+          그룹입찰가 사용 키워드 {row.affectedCount}개에 영향
+        </span>
+      </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        — (광고그룹 단위)
+      </TableCell>
+      <TableCell>
+        <EngineBadge engine={row.engineSource} />
+      </TableCell>
+      <TableCell className="text-right font-mono text-sm">
+        {currentBid != null ? formatBid(currentBid) : "—"}
+      </TableCell>
+      <TableCell className="text-right font-mono text-sm">
+        {suggestedBid != null ? formatBid(suggestedBid) : "—"}
+      </TableCell>
+      <TableCell className="text-right">
+        {deltaPct != null ? (
+          <span
+            className={cn(
+              "inline-flex items-center justify-end gap-0.5 font-mono text-xs font-semibold",
+              isUp
+                ? "text-emerald-600 dark:text-emerald-400"
+                : "text-amber-700 dark:text-amber-400",
+            )}
+          >
+            {isUp ? (
+              <ArrowUpIcon aria-hidden="true" className="size-3" />
+            ) : (
+              <ArrowDownIcon aria-hidden="true" className="size-3" />
+            )}
+            {deltaPct}%
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        )}
+      </TableCell>
+      <TableCell>
+        <SeverityBadge severity={row.severity} />
+      </TableCell>
+      <TableCell>
+        <div className="flex max-w-md flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-1">
+            <RankReasonBadge targetAvgRank={targetAvgRank} />
+            {cappedByMaxCpc && <MaxCpcCappedBadge />}
+            {a.selectedDevice ? (
+              <SelectedDeviceLabel
+                selectedDevice={a.selectedDevice}
+                estimatedBidPc={a.estimatedBidPc}
+                estimatedBidMobile={a.estimatedBidMobile}
+                appliedBid={suggestedBid}
+              />
+            ) : null}
+          </div>
+          <div
+            className="text-xs text-muted-foreground"
+            title={row.reason}
+          >
+            {row.reason}
+          </div>
+          {currentAvgRank !== null ? (
+            <div className="font-mono text-[10px] text-muted-foreground">
+              현재 {currentAvgRank.toFixed(1)}위 → 목표 {targetAvgRank}위
+              {(() => {
+                const label = formatRankWindowLabel(
+                  rankWindowHours,
+                  rankSampleImpressions,
+                )
+                return label ? (
+                  <span className="ml-1 text-muted-foreground">{label}</span>
+                ) : null
+              })()}
+            </div>
+          ) : null}
+        </div>
+      </TableCell>
+      <TableCell
+        className="text-xs text-muted-foreground"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex flex-col items-end gap-1">
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7"
+            onClick={onToggle}
+            disabled={!canMutate}
+            title="체크박스 선택 후 헤더 '선택 적용' 으로 변경 작업 적재"
+          >
+            {selected ? "선택 해제" : "선택"}
+          </Button>
+          <span className="text-[10px] text-muted-foreground">
+            {formatDate(row.createdAt)}
+          </span>
+        </div>
       </TableCell>
     </TableRow>
   )
@@ -1490,6 +1805,102 @@ function SeverityBadge({
   )
 }
 
+/**
+ * 5순위 미달 권고 배지 — engineSource='bid' + reasonCode='below_target_rank' 식별.
+ * marginal 권고와 시각 구분 (sky 톤 + Target 아이콘).
+ */
+function RankReasonBadge({ targetAvgRank }: { targetAvgRank: number }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-700",
+        "dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-300",
+      )}
+      title={`평균 노출 순위 ${targetAvgRank}위 미달 키워드 인상 권고`}
+    >
+      <TargetIcon aria-hidden="true" className="size-3" />
+      {targetAvgRank}순위 권고
+    </span>
+  )
+}
+
+/**
+ * maxCpc 절단 경고 배지 — Estimate 산출가가 광고그룹 maxCpc 초과로 잘린 경우.
+ * 실제 적용 시 maxCpc 까지만 인상되므로 사용자가 인지해야 함.
+ */
+function MaxCpcCappedBadge() {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700",
+        "dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-300",
+      )}
+      title="Estimate 산출가가 광고그룹 maxCpc 한도 초과 — maxCpc 까지만 인상 적용"
+    >
+      <AlertTriangleIcon aria-hidden="true" className="size-3" />
+      maxCpc 절단
+    </span>
+  )
+}
+
+/**
+ * MOBILE Estimate 확장 — 어느 디바이스 기준으로 권고했는지 라벨.
+ *   - 'PC'     : (PC 기준)
+ *   - 'MOBILE' : (MOBILE 기준)
+ *   - 'BOTH'   : (PC · MOBILE 동일)
+ * selectedDevice 누락(구버전 행)은 호출 측에서 분기 — 이 컴포넌트는 항상 렌더.
+ *
+ * estimatedBidPc / estimatedBidMobile 둘 다 있으면 hover title 에 상세 표시.
+ */
+function SelectedDeviceLabel({
+  selectedDevice,
+  estimatedBidPc,
+  estimatedBidMobile,
+  appliedBid,
+}: {
+  selectedDevice: "PC" | "MOBILE" | "BOTH"
+  estimatedBidPc?: number | null
+  estimatedBidMobile?: number | null
+  appliedBid?: number | null
+}) {
+  const label =
+    selectedDevice === "PC"
+      ? "(PC 기준)"
+      : selectedDevice === "MOBILE"
+        ? "(MOBILE 기준)"
+        : "(PC · MOBILE 동일)"
+
+  const hasPc =
+    typeof estimatedBidPc === "number" && Number.isFinite(estimatedBidPc)
+  const hasMobile =
+    typeof estimatedBidMobile === "number" && Number.isFinite(estimatedBidMobile)
+  const hasApplied =
+    typeof appliedBid === "number" && Number.isFinite(appliedBid)
+
+  // 둘 다 채워진 경우: "PC 1,500원 / MOBILE 1,800원 → 1,800원 적용"
+  // 한쪽만 채워진 경우: 그쪽만 표시.
+  let title: string | undefined
+  if (hasPc || hasMobile) {
+    const parts: string[] = []
+    if (hasPc) parts.push(`PC ${formatBid(estimatedBidPc as number)}원`)
+    if (hasMobile)
+      parts.push(`MOBILE ${formatBid(estimatedBidMobile as number)}원`)
+    title = parts.join(" / ")
+    if (hasApplied) {
+      title += ` → ${formatBid(appliedBid as number)}원 적용`
+    }
+  }
+
+  return (
+    <span
+      className="text-[10px] font-medium text-muted-foreground"
+      title={title}
+    >
+      {label}
+    </span>
+  )
+}
+
 function DeltaInline({
   action,
 }: {
@@ -1520,6 +1931,31 @@ function ActionSummary({ row }: { row: BidSuggestionRow }) {
 function formatBid(v: number | null | undefined): string {
   if (v == null) return "—"
   return NUMBER_FORMATTER.format(v)
+}
+
+/**
+ * rank 권고 측정 윈도우 출처 라벨.
+ *   - rankWindowHours === 6 → "(최근 6시간 평균 · 노출 N회)"
+ *   - rankWindowHours === null → "(최근 1시간 측정)" (fallback: StatHourly 데이터 없음, last non-null 사용)
+ *   - rankWindowHours === undefined → "" (출처 표기 생략, 기존 동작 유지)
+ */
+function formatRankWindowLabel(
+  rankWindowHours: number | null | undefined,
+  rankSampleImpressions: number | null | undefined,
+): string {
+  if (rankWindowHours === undefined) return ""
+  if (rankWindowHours === null) return "(최근 1시간 측정)"
+  if (rankWindowHours === 6) {
+    if (
+      typeof rankSampleImpressions === "number" &&
+      Number.isFinite(rankSampleImpressions)
+    ) {
+      return `(최근 6시간 평균 · 노출 ${NUMBER_FORMATTER.format(rankSampleImpressions)}회)`
+    }
+    return "(최근 6시간 평균)"
+  }
+  // 그 외 값(기대 외 윈도우): 일반화된 표기.
+  return `(최근 ${rankWindowHours}시간 평균)`
 }
 
 function formatDate(iso: string): string {

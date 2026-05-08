@@ -113,6 +113,62 @@ export type BidSuggestionAction = {
   direction?: "up" | "down"
   /** F.4 enrich 결과 — 1회만 저장. 존재 시 클라이언트는 LLM 호출 X. */
   llmEnrichedReason?: string
+  /**
+   * 권고 식별자 — bid/keyword 흐름에서 marginal vs below_target_rank 구분.
+   * "below_target_rank" 외 값(또는 미존재) 은 marginal 흐름.
+   */
+  reasonCode?: string
+  /** 5순위 권고 시 목표 평균 노출 순위 (기본 5). */
+  targetAvgRank?: number
+  /** 5순위 권고 시 키워드의 recentAvgRnk. */
+  currentAvgRank?: number
+  /** Estimate 산출가가 maxCpc 초과로 절단된 경우 true. */
+  cappedByMaxCpc?: boolean
+  /**
+   * rank 권고 측정 윈도우 — 6 = StatHourly 최근 6시간 노출 가중평균.
+   * null = fallback (StatHourly 데이터 없음, last non-null 사용).
+   */
+  rankWindowHours?: number | null
+  /**
+   * rank 권고 가중평균 시 Σimpressions (운영자 신뢰도 표시).
+   * fallback 시 null.
+   */
+  rankSampleImpressions?: number | null
+  /**
+   * 권고 종류 식별자 (Phase 2A 기준).
+   *   - "keyword_bid_bundle"          : scope='adgroup' 묶음 키워드 입찰 변경
+   *   - "adgroup_default_bid_update"  : scope='adgroup' 광고그룹 입찰가 자체 변경 (Phase 2A)
+   *   - "off"                         : quality 엔진 OFF
+   *   - "hour_weights_recommendation" : targeting
+   *   - "campaign_budget_update"      : budget
+   *   - 미존재(undefined)             : 키워드 단건 marginal/below_target_rank (legacy)
+   */
+  kind?: string
+  /**
+   * scope='adgroup' + kind='adgroup_default_bid_update' 한정 — 광고그룹 식별자.
+   */
+  adgroupId?: string
+  /** scope='adgroup' + kind='adgroup_default_bid_update' 한정 — 네이버 SA 광고그룹 ID. */
+  nccAdgroupId?: string
+  /**
+   * MOBILE Estimate 확장 — engineSource='bid' 한정.
+   * PC Estimate 5위 도달가 (원). 미존재 시 PC 비활성/실패.
+   */
+  estimatedBidPc?: number | null
+  /**
+   * MOBILE Estimate 확장 — engineSource='bid' 한정.
+   * MOBILE Estimate 5위 도달가 (원). 미존재 시 MOBILE 비활성/실패.
+   */
+  estimatedBidMobile?: number | null
+  /**
+   * MOBILE Estimate 확장 — engineSource='bid' 한정.
+   * 어느 디바이스 기준으로 권고했는지 (max 결정).
+   *   - 'PC'     : PC 도달가가 더 큼 (또는 MOBILE 미존재)
+   *   - 'MOBILE' : MOBILE 도달가가 더 큼 (또는 PC 미존재)
+   *   - 'BOTH'   : PC == MOBILE (동일 도달가)
+   * 미존재(구버전 행) 시 라벨 생략.
+   */
+  selectedDevice?: "PC" | "MOBILE" | "BOTH"
   [key: string]: unknown
 }
 
@@ -662,6 +718,7 @@ export async function approveBidSuggestions(
     select: {
       id: true,
       keywordId: true,
+      adgroupId: true,
       engineSource: true,
       action: true,
       reason: true,
@@ -695,6 +752,35 @@ export async function approveBidSuggestions(
     },
   })
   const keywordById = new Map(keywords.map((k) => [k.id, k]))
+
+  // -- 광고그룹 메타 join (Phase 2B — adgroup_default_bid_update 권고용) ------
+  // 광고주 격리 검증 + bidAmt/status 사전 체크용.
+  const adgroupIds = suggestions
+    .filter((s) => {
+      const a = s.action as unknown as BidSuggestionAction
+      return (
+        s.engineSource === "bid" &&
+        a.kind === "adgroup_default_bid_update" &&
+        s.adgroupId != null
+      )
+    })
+    .map((s) => s.adgroupId as string)
+
+  const adgroups =
+    adgroupIds.length > 0
+      ? await prisma.adGroup.findMany({
+          where: { id: { in: adgroupIds } },
+          select: {
+            id: true,
+            nccAdgroupId: true,
+            name: true,
+            bidAmt: true,
+            status: true,
+            campaign: { select: { advertiserId: true } },
+          },
+        })
+      : []
+  const adgroupById = new Map(adgroups.map((a) => [a.id, a]))
 
   // -- ChangeBatch 생성 -------------------------------------------------------
   const batch = await prisma.changeBatch.create({
@@ -809,6 +895,94 @@ export async function approveBidSuggestions(
           status: "done",
         })
       }
+      continue
+    }
+
+    // -- Phase 2B 광고그룹 입찰가 권고 (kind='adgroup_default_bid_update') -----
+    // 키워드 단건 마이그레이션 흐름과 분리 — Cron Chunk Executor 가 처리.
+    if (
+      s.engineSource === "bid" &&
+      action.kind === "adgroup_default_bid_update"
+    ) {
+      const adgroup = s.adgroupId ? adgroupById.get(s.adgroupId) : null
+
+      // 광고그룹 미존재 / 광고주 횡단 → 사전 실패
+      if (!adgroup || adgroup.campaign.advertiserId !== advertiserId) {
+        preFailed++
+        seeds.push({
+          batchId: batch.id,
+          targetType: "AdGroup",
+          targetId: s.adgroupId ?? `unknown:${s.id}`,
+          before: { suggestionId: s.id },
+          after: { suggestionId: s.id, engineSource: s.engineSource },
+          idempotencyKey: `${batch.id}:${s.id}`,
+          status: "failed",
+          error: "adgroup_not_found",
+        })
+        continue
+      }
+
+      // status='deleted' / bidAmt null → 사전 실패
+      if (adgroup.status === "deleted" || adgroup.bidAmt == null) {
+        preFailed++
+        seeds.push({
+          batchId: batch.id,
+          targetType: "AdGroup",
+          targetId: adgroup.nccAdgroupId,
+          before: {
+            bidAmt: adgroup.bidAmt,
+            status: adgroup.status,
+          },
+          after: {
+            suggestedBid: action.suggestedBid,
+            suggestionId: s.id,
+            suggestionReason: s.reason,
+          },
+          idempotencyKey: `${batch.id}:${s.id}`,
+          status: "failed",
+          error: "invalid_adgroup_state",
+        })
+        continue
+      }
+
+      // suggestedBid 검증
+      const suggestedBid = action.suggestedBid
+      if (typeof suggestedBid !== "number" || suggestedBid <= 0) {
+        preFailed++
+        seeds.push({
+          batchId: batch.id,
+          targetType: "AdGroup",
+          targetId: adgroup.nccAdgroupId,
+          before: { bidAmt: adgroup.bidAmt },
+          after: { suggestionId: s.id, reason: "invalid_suggested_bid" },
+          idempotencyKey: `${batch.id}:${s.id}`,
+          status: "failed",
+          error: "invalid_suggested_bid",
+        })
+        continue
+      }
+
+      // 정상 — pending ChangeItem (Cron Chunk Executor 가 applyAdgroupBidUpdate 호출)
+      seeds.push({
+        batchId: batch.id,
+        targetType: "AdGroup",
+        targetId: adgroup.id, // DB id (apply.ts 가 prisma.adGroup.update where 에 사용)
+        before: {
+          bidAmt: adgroup.bidAmt,
+          nccAdgroupId: adgroup.nccAdgroupId,
+        },
+        after: {
+          operation: "UPDATE",
+          fields: "bidAmt",
+          customerId: advertiser.customerId,
+          nccAdgroupId: adgroup.nccAdgroupId,
+          bidAmt: suggestedBid,
+          suggestionId: s.id,
+          suggestionReason: s.reason,
+        },
+        idempotencyKey: `${batch.id}:${s.id}`,
+        status: "pending",
+      })
       continue
     }
 

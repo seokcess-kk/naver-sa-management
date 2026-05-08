@@ -131,8 +131,10 @@ export default async function BidInboxPage({
           <>
             <p className="font-medium text-foreground">사용 방법</p>
             <p className="mt-1.5 leading-relaxed">
-              자동 분석이 적재한 입찰가 권고를 검토하고 일괄 적용합니다.
-              현재는 입찰가 권고만 적용 가능 — 품질 · 타게팅 · 예산 권고는 후속 업데이트 예정.
+              자동 분석이 적재한 권고를 검토하고 일괄 적용합니다. 입찰가
+              (키워드 한계효용 / 키워드 5순위 미달 / 광고그룹 5순위 미달) ·
+              품질 (성과 미달 OFF) · 타게팅 (시간대 가중치) · 예산 (캠페인
+              일예산 조정) 4종 권고를 한 곳에서 처리합니다.
             </p>
           </>
         }
