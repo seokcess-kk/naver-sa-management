@@ -24,11 +24,28 @@ const STATUS_REASON_LABELS: Record<string, string> = {
   KEYWORD_PAUSED: "키워드 OFF",
   AD_PAUSED: "소재 OFF",
 
-  // 예산 도달
+  // 예산 도달 — 실제 SA 응답 코드는 *_LIMITED_BY_BUDGET 계열.
+  // (*_BUDGET_REACHED 는 다른 광고주 응답에서 등장할 가능성 대비 유지.)
+  CAMPAIGN_LIMITED_BY_BUDGET: "캠페인 예산 도달",
+  ADGROUP_LIMITED_BY_BUDGET: "그룹 예산 도달",
+  GROUP_LIMITED_BY_BUDGET: "그룹 예산 도달",
+  AD_LIMITED_BY_BUDGET: "소재 예산 도달",
   CAMPAIGN_BUDGET_REACHED: "캠페인 예산 도달",
   ADGROUP_BUDGET_REACHED: "그룹 예산 도달",
   GROUP_BUDGET_REACHED: "그룹 예산 도달",
   OUT_OF_BUDGET: "예산 도달",
+
+  // 검수 거절 — 실제 SA 응답 코드는 *_DISAPPROVED 계열.
+  // (*_NOT_ELIGIBLE 와는 다른 의미 — DISAPPROVED 는 명시적 검수 거절)
+  CAMPAIGN_DISAPPROVED: "캠페인 비승인",
+  ADGROUP_DISAPPROVED: "그룹 비승인",
+  GROUP_DISAPPROVED: "그룹 비승인",
+  KEYWORD_DISAPPROVED: "키워드 비승인",
+  AD_DISAPPROVED: "소재 비승인",
+
+  // 정상 노출 — status='on' 일 때만 등장. 배지 컴포넌트가 ON 행은 사유 숨김이라 표시되지 않으나,
+  // fallback 정책상 영문 노출 회피 위해 라벨 매핑.
+  ELIGIBLE: "정상 노출",
 
   // 시간 / 비즈머니
   CAMPAIGN_OUT_OF_TIME: "캠페인 시간 외",

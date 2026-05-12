@@ -100,6 +100,34 @@ async function main() {
   console.log(`AdGroup  : ${gCount} / ${gOff} / ${gWithReason}`)
   console.log(`Keyword  : ${kCount} / ${kOff} / ${kWithReason}`)
 
+  // 매핑 누락 진단 — DB 에 등장하는 모든 statusReason DISTINCT 값을 카운트별로 출력.
+  // 한글 라벨 매핑(lib/dashboard/status-reason-labels.ts) 보완 시 본 출력을 그대로 활용.
+  const cGroups = await prisma.campaign.groupBy({
+    by: ["statusReason"],
+    _count: { _all: true },
+  })
+  const gGroups = await prisma.adGroup.groupBy({
+    by: ["statusReason"],
+    _count: { _all: true },
+  })
+  const kGroups = await prisma.keyword.groupBy({
+    by: ["statusReason"],
+    _count: { _all: true },
+  })
+
+  console.log(`\n=== Distinct statusReason (Campaign) ===`)
+  for (const r of cGroups.sort((a, b) => b._count._all - a._count._all)) {
+    console.log(`  ${(r.statusReason ?? "(null)").padEnd(40)} ${r._count._all}`)
+  }
+  console.log(`\n=== Distinct statusReason (AdGroup) ===`)
+  for (const r of gGroups.sort((a, b) => b._count._all - a._count._all)) {
+    console.log(`  ${(r.statusReason ?? "(null)").padEnd(40)} ${r._count._all}`)
+  }
+  console.log(`\n=== Distinct statusReason (Keyword) ===`)
+  for (const r of kGroups.sort((a, b) => b._count._all - a._count._all)) {
+    console.log(`  ${(r.statusReason ?? "(null)").padEnd(40)} ${r._count._all}`)
+  }
+
   await prisma.$disconnect()
 }
 
