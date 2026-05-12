@@ -183,6 +183,7 @@ export default async function KeywordsPage({
         userLock: true,
         externalId: true, // F-3.5 CSV 내보내기 — UPDATE 행에 함께 출력 (재업로드 멱등키 보존)
         status: true,
+        statusReason: true,
         inspectStatus: true,
         recentAvgRnk: true,
         updatedAt: true,
@@ -273,6 +274,7 @@ export default async function KeywordsPage({
     userLock: k.userLock,
     externalId: k.externalId,
     status: k.status,
+    statusReason: k.statusReason,
     inspectStatus: k.inspectStatus,
     recentAvgRnk:
       k.recentAvgRnk !== null ? Number(k.recentAvgRnk.toString()) : null,

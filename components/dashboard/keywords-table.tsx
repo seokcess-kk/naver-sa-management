@@ -188,6 +188,8 @@ export type KeywordRow = {
   /** F-3.5 CSV 내보내기 — UPDATE 행 재업로드 시 멱등키 보존. CREATE 외엔 optional. */
   externalId: string | null
   status: KeywordStatus
+  /** OFF 상태 사유 — 네이버 SA API 응답 statusReason ("그룹 OFF", "캠페인 예산 도달" 등). ON 행은 null. */
+  statusReason: string | null
   inspectStatus: InspectStatus
   /** Decimal(5,2) → number 직렬화. 없으면 null. */
   recentAvgRnk: number | null
@@ -489,7 +491,12 @@ function makeColumns(ctx: StagingCtx): ColumnDef<KeywordRow>[] {
     {
       accessorKey: "status",
       header: "상태",
-      cell: ({ row }) => <KeywordStatusBadge status={row.original.status} />,
+      cell: ({ row }) => (
+        <KeywordStatusBadge
+          status={row.original.status}
+          statusReason={row.original.statusReason}
+        />
+      ),
       enableSorting: false,
     },
     {

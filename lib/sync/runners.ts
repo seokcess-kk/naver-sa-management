@@ -218,6 +218,11 @@ async function runCampaignsSync(
     const mappedStatus = mapCampaignStatus(c)
     const dailyBudgetVal =
       typeof c.dailyBudget === "number" ? c.dailyBudget : null
+    // statusReason 빈 문자열은 null 로 정규화 — UI 표시에서 "사유 없음" 과 동등 처리.
+    const statusReasonVal =
+      typeof c.statusReason === "string" && c.statusReason.length > 0
+        ? c.statusReason
+        : null
     const rawJson = c as unknown as Prisma.InputJsonValue
 
     await prisma.campaign.upsert({
@@ -229,6 +234,7 @@ async function runCampaignsSync(
         campaignType: c.campaignTp ?? null,
         dailyBudget: dailyBudgetVal,
         status: mappedStatus,
+        statusReason: statusReasonVal,
         raw: rawJson,
       },
       update: {
@@ -236,6 +242,7 @@ async function runCampaignsSync(
         campaignType: c.campaignTp ?? null,
         dailyBudget: dailyBudgetVal,
         status: mappedStatus,
+        statusReason: statusReasonVal,
         raw: rawJson,
       },
     })
@@ -307,6 +314,11 @@ async function runAdgroupsSync(
           ? anyG.mobileChannelKey.length > 0
           : true
 
+    const statusReasonVal =
+      typeof g.statusReason === "string" && g.statusReason.length > 0
+        ? g.statusReason
+        : null
+
     const rawJson = g as unknown as Prisma.InputJsonValue
 
     await prisma.adGroup.upsert({
@@ -320,6 +332,7 @@ async function runAdgroupsSync(
         pcChannelOn,
         mblChannelOn,
         status: mappedStatus,
+        statusReason: statusReasonVal,
         raw: rawJson,
       },
       update: {
@@ -330,6 +343,7 @@ async function runAdgroupsSync(
         pcChannelOn,
         mblChannelOn,
         status: mappedStatus,
+        statusReason: statusReasonVal,
         raw: rawJson,
       },
     })
@@ -449,6 +463,11 @@ async function runKeywordsSync(
         // 응답에 추출 가능한 값이 없으면 null → 기존 값 보존(update 시 컬럼 미포함).
         const qualityScoreVal = extractQualityScore(anyK.nccQi)
 
+        const statusReasonVal =
+          typeof k.statusReason === "string" && k.statusReason.length > 0
+            ? k.statusReason
+            : null
+
         const rawJson = k as unknown as Prisma.InputJsonValue
 
         const baseCreateData = {
@@ -460,6 +479,7 @@ async function runKeywordsSync(
           useGroupBidAmt: useGroupBidAmtVal,
           userLock: userLockVal,
           status: mappedStatus,
+          statusReason: statusReasonVal,
           inspectStatus: mappedInspect,
           raw: rawJson,
           qualityScore: qualityScoreVal,
@@ -473,6 +493,7 @@ async function runKeywordsSync(
           useGroupBidAmt: boolean
           userLock: boolean
           status: KeywordStatus
+          statusReason: string | null
           inspectStatus: InspectStatus
           raw: Prisma.InputJsonValue
           matchType?: string
@@ -485,6 +506,7 @@ async function runKeywordsSync(
           useGroupBidAmt: useGroupBidAmtVal,
           userLock: userLockVal,
           status: mappedStatus,
+          statusReason: statusReasonVal,
           inspectStatus: mappedInspect,
           raw: rawJson,
         }

@@ -338,6 +338,9 @@ model Campaign {
   campaignType  String?
   dailyBudget   Decimal?       @db.Decimal(14, 2)
   status        CampaignStatus @default(on)
+  // 네이버 SA API 응답 statusReason — OFF 상태 사유 표시용 (예: "그룹 OFF", "캠페인 예산 도달").
+  // ON 행은 null 이 일반적. raw.statusReason 과 동일 출처이나 분리 컬럼은 select 시 raw 미동반.
+  statusReason  String?
   raw           Json?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
@@ -358,6 +361,8 @@ model AdGroup {
   pcChannelOn  Boolean       @default(true)
   mblChannelOn Boolean       @default(true)
   status       AdGroupStatus @default(on)
+  // 네이버 SA API 응답 statusReason — OFF 상태 사유 표시용. Campaign 동일 패턴.
+  statusReason String?
   raw          Json?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
@@ -383,6 +388,8 @@ model Keyword {
   userLock              Boolean       @default(false)
   externalId            String? // 사용자 멱등키 (CSV CREATE)
   status                KeywordStatus @default(on)
+  // 네이버 SA API 응답 statusReason — OFF 상태 사유 표시용. Campaign 동일 패턴.
+  statusReason          String?
   inspectStatus         InspectStatus @default(pending)
   recentAvgRnk          Decimal?      @db.Decimal(5, 2)
   // F-11 비딩 자동화 — 네이버 SA 응답에 qualityScore (1..7) 포함 시에만 채움.

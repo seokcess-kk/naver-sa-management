@@ -82,6 +82,7 @@ export default async function CampaignsPage({
       campaignType: true,
       dailyBudget: true,
       status: true,
+      statusReason: true,
       updatedAt: true,
     },
     orderBy: { updatedAt: "desc" },
@@ -99,6 +100,7 @@ export default async function CampaignsPage({
     useDailyBudget: c.dailyBudget !== null,
     userLock: false,
     status: c.status,
+    statusReason: c.statusReason,
     updatedAt: c.updatedAt.toISOString(),
   }))
   let initialSelectedCampaignIds = campaignScopeIds

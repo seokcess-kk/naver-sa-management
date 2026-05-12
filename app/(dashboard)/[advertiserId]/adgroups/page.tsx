@@ -89,6 +89,7 @@ export default async function AdgroupsPage({
       pcChannelOn: true,
       mblChannelOn: true,
       status: true,
+      statusReason: true,
       updatedAt: true,
       campaign: {
         select: {
@@ -125,6 +126,7 @@ export default async function AdgroupsPage({
     pcChannelOn: g.pcChannelOn,
     mblChannelOn: g.mblChannelOn,
     status: g.status,
+    statusReason: g.statusReason,
     updatedAt: g.updatedAt.toISOString(),
     campaign: {
       id: g.campaign.id,

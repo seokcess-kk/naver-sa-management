@@ -106,6 +106,8 @@ export type AdgroupRow = {
   pcChannelOn: boolean
   mblChannelOn: boolean
   status: AdGroupStatus
+  /** OFF 상태 사유 — 네이버 SA API 응답 statusReason ("캠페인 OFF", "캠페인 예산 도달" 등). ON 행은 null. */
+  statusReason: string | null
   /** ISO 문자열 (RSC 직렬화) */
   updatedAt: string
   /** 부모 캠페인 표시용 */
@@ -635,7 +637,10 @@ export function AdgroupsTable({
                       <ChannelDot on={g.mblChannelOn} />
                     </TableCell>
                     <TableCell>
-                      <AdgroupStatusBadge status={g.status} />
+                      <AdgroupStatusBadge
+                        status={g.status}
+                        statusReason={g.statusReason}
+                      />
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {new Date(g.updatedAt).toLocaleString("ko-KR")}

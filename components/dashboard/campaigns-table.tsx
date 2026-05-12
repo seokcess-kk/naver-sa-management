@@ -90,6 +90,8 @@ export type CampaignRow = {
   /** 사용자가 명시적으로 OFF 잠금 */
   userLock: boolean
   status: CampaignStatus
+  /** OFF 상태 사유 — 네이버 SA API 응답 statusReason ("그룹 OFF", "캠페인 예산 도달" 등). ON 행은 null. */
+  statusReason: string | null
   /** ISO 문자열 (RSC 직렬화) */
   updatedAt: string
 }
@@ -512,6 +514,7 @@ export function CampaignsTable({
                       <CampaignStatusBadge
                         status={c.status}
                         userLock={c.userLock}
+                        statusReason={c.statusReason}
                       />
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
