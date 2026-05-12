@@ -19,6 +19,7 @@
  */
 
 import type { AdGroupStatus } from "@/lib/generated/prisma/client"
+import { formatStatusReason } from "@/lib/dashboard/status-reason-labels"
 
 export function AdgroupStatusBadge({
   status,
@@ -48,7 +49,9 @@ export function AdgroupStatusBadge({
     )
   }
 
-  const showReason = !!statusReason && status !== "on"
+  // OFF 계열 + 사유 존재 시 한글 라벨로 인라인 표시 (영문 코드 → 한글 매핑).
+  const reasonLabel = formatStatusReason(statusReason)
+  const showReason = !!reasonLabel && status !== "on"
   if (!showReason) return badge
 
   return (
@@ -58,7 +61,7 @@ export function AdgroupStatusBadge({
         className="truncate text-[11px] text-muted-foreground"
         title={statusReason ?? undefined}
       >
-        {statusReason}
+        {reasonLabel}
       </span>
     </span>
   )

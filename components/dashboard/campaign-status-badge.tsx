@@ -17,6 +17,7 @@
  */
 
 import type { CampaignStatus } from "@/lib/generated/prisma/client"
+import { formatStatusReason } from "@/lib/dashboard/status-reason-labels"
 
 export function CampaignStatusBadge({
   status,
@@ -54,9 +55,11 @@ export function CampaignStatusBadge({
     )
   }
 
-  // OFF 계열 + 사유 존재 시 배지 옆 muted 텍스트. ON / 사유 없음 → 배지만 단독 표시.
+  // OFF 계열 + 사유 존재 시 배지 옆 muted 텍스트 (영문 코드 → 한글 라벨 변환).
+  // ON / 사유 없음 → 배지만 단독 표시.
+  const reasonLabel = formatStatusReason(statusReason)
   const showReason =
-    !!statusReason && (status === "off" || userLock || status === "deleted")
+    !!reasonLabel && (status === "off" || userLock || status === "deleted")
 
   if (!showReason) return badge
 
@@ -67,7 +70,7 @@ export function CampaignStatusBadge({
         className="truncate text-[11px] text-muted-foreground"
         title={statusReason ?? undefined}
       >
-        {statusReason}
+        {reasonLabel}
       </span>
     </span>
   )
