@@ -1759,22 +1759,39 @@ export function KeywordsTable({
         ) : (
           <table className="w-full caption-bottom text-sm" style={{ tableLayout: "fixed" }}>
             <colgroup>
+              {/* 체크박스 */}
               <col style={{ width: 44 }} />
-              <col style={{ width: 36 }} />
+              {/* 재계산 아이콘 (입찰 추정) */}
+              <col style={{ width: 44 }} />
+              {/* 키워드 */}
               <col style={{ width: 280 }} />
-              <col style={{ width: 192 }} />
-              <col style={{ width: 84 }} />
+              {/* 광고그룹 (+캠페인 부모) */}
+              <col style={{ width: 200 }} />
+              {/* 매치 타입 배지 */}
+              <col style={{ width: 88 }} />
+              {/* 입찰가 (오른쪽 정렬 숫자) */}
               <col style={{ width: 110 }} />
-              <col style={{ width: 80 }} />
-              <col style={{ width: 88 }} />
-              <col style={{ width: 88 }} />
+              {/* ON/OFF 토글 */}
+              <col style={{ width: 72 }} />
+              {/* 상태 + statusReason 인라인 */}
+              <col style={{ width: 200 }} />
+              {/* 검수 배지 */}
               <col style={{ width: 96 }} />
+              {/* 평균 노출 순위 */}
               <col style={{ width: 96 }} />
+              {/* 노출수 */}
+              <col style={{ width: 96 }} />
+              {/* 클릭수 */}
               <col style={{ width: 88 }} />
-              <col style={{ width: 80 }} />
+              {/* CTR */}
+              <col style={{ width: 88 }} />
+              {/* CPC */}
+              <col style={{ width: 96 }} />
+              {/* 총비용 */}
               <col style={{ width: 120 }} />
-              <col style={{ width: 144 }} />
+              {/* 최근 수정 */}
               <col style={{ width: 168 }} />
+              {/* 액션 (케밥) */}
               <col style={{ width: 56 }} />
             </colgroup>
             <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_0_var(--border)]">

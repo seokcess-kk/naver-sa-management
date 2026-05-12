@@ -1429,18 +1429,31 @@ export function AdsTable({
               auto(2) 가 남은 너비 차지 → 본문 풍부화 셀이 헤드라인/설명/URL 펼쳐 표시.
             */}
             <colgroup>
+              {/* 체크박스 */}
               <col style={{ width: 44 }} />
-              <col style={{ width: 380 }} />
-              <col style={{ width: 192 }} />
+              {/* 소재 본문 (미리보기) */}
+              <col style={{ width: 360 }} />
+              {/* 광고그룹 (+캠페인 부모) */}
+              <col style={{ width: 200 }} />
+              {/* 타입 배지 */}
               <col style={{ width: 96 }} />
+              {/* 상태 */}
               <col style={{ width: 96 }} />
+              {/* 검수 */}
               <col style={{ width: 96 }} />
+              {/* 노출수 */}
               <col style={{ width: 96 }} />
+              {/* 클릭수 */}
               <col style={{ width: 88 }} />
-              <col style={{ width: 80 }} />
+              {/* CTR */}
+              <col style={{ width: 88 }} />
+              {/* CPC */}
+              <col style={{ width: 96 }} />
+              {/* 총비용 */}
               <col style={{ width: 120 }} />
-              <col style={{ width: 144 }} />
+              {/* 최근 수정 */}
               <col style={{ width: 168 }} />
+              {/* 액션 */}
               <col style={{ width: 56 }} />
             </colgroup>
             <thead className="sticky top-0 z-10 bg-background shadow-[inset_0_-1px_0_0_var(--border)]">

@@ -556,13 +556,21 @@ export function AdgroupsTable({
               select / 광고그룹명(auto) / 캠페인 / 입찰가 / PC / Mobile / 상태 / 최근 수정
           */}
           <colgroup>
+            {/* 체크박스 */}
             <col style={{ width: 44 }} />
+            {/* 광고그룹명 */}
             <col style={{ width: 280 }} />
-            <col style={{ width: 192 }} />
+            {/* 캠페인 */}
+            <col style={{ width: 200 }} />
+            {/* 입찰가 (오른쪽 정렬 숫자) */}
             <col style={{ width: 110 }} />
-            <col style={{ width: 56 }} />
+            {/* PC 채널 */}
             <col style={{ width: 64 }} />
-            <col style={{ width: 96 }} />
+            {/* Mobile 채널 */}
+            <col style={{ width: 72 }} />
+            {/* 상태 + statusReason 인라인 */}
+            <col style={{ width: 200 }} />
+            {/* 최근 수정 */}
             <col style={{ width: 168 }} />
           </colgroup>
           <TableHeader>

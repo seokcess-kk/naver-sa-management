@@ -438,11 +438,17 @@ export function CampaignsTable({
             컬럼 너비 표준화 — 6개 컬럼 (select / 이름(auto) / 타입 / 일 예산 / 상태 / 마지막 동기화).
           */}
           <colgroup>
+            {/* 체크박스 */}
             <col style={{ width: 44 }} />
+            {/* 이름 */}
             <col style={{ width: 320 }} />
-            <col style={{ width: 100 }} />
-            <col style={{ width: 132 }} />
-            <col style={{ width: 96 }} />
+            {/* 타입 */}
+            <col style={{ width: 120 }} />
+            {/* 일 예산 (오른쪽 정렬 숫자) */}
+            <col style={{ width: 140 }} />
+            {/* 상태 + statusReason 인라인 */}
+            <col style={{ width: 200 }} />
+            {/* 마지막 동기화 */}
             <col style={{ width: 168 }} />
           </colgroup>
           <TableHeader>
