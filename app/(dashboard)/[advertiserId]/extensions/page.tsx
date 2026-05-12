@@ -99,59 +99,74 @@ export default async function ExtensionsPage({
     throw e
   }
 
-  // 3개 prisma 쿼리 병렬 실행 (서로 독립).
-  //   - rows:             메인 확장소재 데이터 (ownerType=adgroup, P1 3종)
-  //   - adgroupRows:      F-5.4 추가 모달 광고그룹 옵션
-  //   - syncCampaignRows: F-5.1/F-5.2 동기화 캠페인 필터
+  // 4개 prisma 쿼리 병렬 실행 (서로 독립).
+  //   - rows:                메인 확장소재 데이터 (ownerType=adgroup, P1 3종)
+  //   - adgroupRows:         F-5.4 추가 모달 광고그룹 옵션 (scope 한정)
+  //   - syncCampaignRows:    F-5.1/F-5.2 동기화 / toolbar 캠페인 필터 옵션 (광고주 전체)
+  //   - filterAdgroupRows:   toolbar 광고그룹 필터 옵션 (광고주 전체 — scope 무관)
   // raw 컬럼 select 안 함. 광고주 횡단 차단: adgroup.campaign.advertiserId join.
-  const [rows, adgroupRows, syncCampaignRows] = await Promise.all([
-    prisma.adExtension.findMany({
-      where: {
-        ownerType: "adgroup",
-        adgroup: adgroupWhere,
-        type: { in: ["headline", "description", "image"] },
-      },
-      select: {
-        id: true,
-        nccExtId: true,
-        ownerId: true,
-        type: true,
-        payload: true,
-        inspectStatus: true,
-        inspectMemo: true,
-        status: true,
-        updatedAt: true,
-        adgroup: {
-          select: {
-            id: true,
-            name: true,
-            nccAdgroupId: true,
-            campaign: { select: { id: true, name: true } },
+  const [rows, adgroupRows, syncCampaignRows, filterAdgroupRows] =
+    await Promise.all([
+      prisma.adExtension.findMany({
+        where: {
+          ownerType: "adgroup",
+          adgroup: adgroupWhere,
+          type: { in: ["headline", "description", "image"] },
+        },
+        select: {
+          id: true,
+          nccExtId: true,
+          ownerId: true,
+          type: true,
+          payload: true,
+          inspectStatus: true,
+          inspectMemo: true,
+          status: true,
+          updatedAt: true,
+          adgroup: {
+            select: {
+              id: true,
+              name: true,
+              nccAdgroupId: true,
+              campaign: { select: { id: true, name: true } },
+            },
           },
         },
-      },
-      orderBy: { updatedAt: "desc" },
-      take: 5000, // F-5.x 가상 스크롤 5천 행 안전 상한
-    }),
-    prisma.adGroup.findMany({
-      where: {
-        ...adgroupWhere,
-        status: { not: "deleted" },
-      },
-      select: {
-        id: true,
-        nccAdgroupId: true,
-        name: true,
-        campaign: { select: { id: true, name: true } },
-      },
-      orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
-    }),
-    prisma.campaign.findMany({
-      where: { advertiserId, status: { not: "deleted" } },
-      select: { id: true, name: true, nccCampaignId: true, status: true },
-      orderBy: { name: "asc" },
-    }),
-  ])
+        orderBy: { updatedAt: "desc" },
+        take: 5000, // F-5.x 가상 스크롤 5천 행 안전 상한
+      }),
+      prisma.adGroup.findMany({
+        where: {
+          ...adgroupWhere,
+          status: { not: "deleted" },
+        },
+        select: {
+          id: true,
+          nccAdgroupId: true,
+          name: true,
+          campaign: { select: { id: true, name: true } },
+        },
+        orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+      }),
+      prisma.campaign.findMany({
+        where: { advertiserId, status: { not: "deleted" } },
+        select: { id: true, name: true, nccCampaignId: true, status: true },
+        orderBy: { name: "asc" },
+      }),
+      prisma.adGroup.findMany({
+        where: {
+          campaign: { advertiserId },
+          status: { not: "deleted" },
+        },
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          campaign: { select: { id: true, name: true } },
+        },
+        orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+      }),
+    ])
 
   const adgroups: ExtensionAdgroupOption[] = adgroupRows.map((a) => ({
     id: a.id,
@@ -165,6 +180,15 @@ export default async function ExtensionsPage({
     name: c.name,
     nccCampaignId: c.nccCampaignId,
     status: c.status as "on" | "off" | "deleted",
+  }))
+
+  // toolbar 광고그룹 필터 옵션 — 광고주 전체 (scope 무관).
+  const filterAdgroups = filterAdgroupRows.map((g) => ({
+    id: g.id,
+    name: g.name,
+    status: g.status as "on" | "off" | "deleted",
+    campaignId: g.campaign.id,
+    campaignName: g.campaign.name,
   }))
 
   // stats 호출은 RSC 에서 제외 — 클라이언트(ExtensionsTable) 가 useEffect 로 fetchExtensionsStats 호출 (streaming).
@@ -238,6 +262,10 @@ export default async function ExtensionsPage({
         hasKeys={advertiser.hasKeys}
         extensions={extensions}
         adgroups={adgroups}
+        filterCampaigns={syncCampaigns}
+        filterAdgroups={filterAdgroups}
+        selectedCampaignFilterIds={campaignScopeIds}
+        selectedAdgroupFilterIds={adgroupScopeIds}
         userRole={userRole}
         period={period}
       />

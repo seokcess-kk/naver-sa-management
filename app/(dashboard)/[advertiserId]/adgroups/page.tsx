@@ -176,6 +176,8 @@ export default async function AdgroupsPage({
         hasKeys={advertiser.hasKeys}
         adgroups={adgroups}
         initialSelectedAdgroupIds={adgroupScopeIds}
+        filterCampaigns={syncCampaigns}
+        selectedCampaignFilterIds={campaignScopeIds}
       />
     </div>
   )

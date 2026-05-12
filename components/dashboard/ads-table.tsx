@@ -98,6 +98,12 @@ import { AdStatusBadge } from "@/components/dashboard/ad-status-badge"
 import { EmptyState } from "@/components/dashboard/empty-state"
 import { InspectStatusBadge } from "@/components/dashboard/inspect-status-badge"
 import {
+  CampaignFilterPopover,
+  AdgroupFilterPopover,
+  type CampaignFilterOption,
+  type AdgroupFilterOption,
+} from "@/components/dashboard/keywords-scope-filter"
+import {
   AdsAddModal,
   type AdAdgroupOption,
 } from "@/components/dashboard/ads-add-modal"
@@ -800,6 +806,10 @@ export function AdsTable({
   hasKeys,
   ads,
   adgroups,
+  filterCampaigns = [],
+  filterAdgroups = [],
+  selectedCampaignFilterIds = [],
+  selectedAdgroupFilterIds = [],
   userRole,
   period,
 }: {
@@ -808,6 +818,14 @@ export function AdsTable({
   ads: AdRow[]
   /** F-4.6 소재 추가 모달용 — page.tsx 가 광고주 한정으로 별도 조회. */
   adgroups: AdAdgroupOption[]
+  /** toolbar 캠페인 필터 옵션 (광고주 전체) */
+  filterCampaigns?: CampaignFilterOption[]
+  /** toolbar 광고그룹 필터 옵션 (광고주 전체 — 캠페인 필터 종속) */
+  filterAdgroups?: AdgroupFilterOption[]
+  /** URL `campaignIds` — RSC 에서 파싱한 값 */
+  selectedCampaignFilterIds?: string[]
+  /** URL `adgroupIds` — RSC 에서 파싱한 값 */
+  selectedAdgroupFilterIds?: string[]
   /** F-4.7 — admin 한정 단건 삭제 권한 (RSC 에서 ctx.user.role 전달). */
   userRole: "admin" | "operator" | "viewer"
   /** RSC 가 searchParams.period 파싱 후 전달. */
@@ -945,9 +963,6 @@ export function AdsTable({
   const [inspectFilter, setInspectFilter] = React.useState<string>(
     () => searchParams.get("inspect") ?? "ALL",
   )
-  const [adgroupFilter, setAdgroupFilter] = React.useState<string>(
-    () => searchParams.get("adgroup") ?? "ALL",
-  )
   const [sorting, setSorting] = React.useState<SortingState>([
     { id: "updatedAt", desc: true },
   ])
@@ -971,17 +986,6 @@ export function AdsTable({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput])
 
-  // 광고그룹 셀렉트 옵션 — 현재 데이터에 등장하는 광고그룹만 (필터링 한정)
-  const adgroupOptions = React.useMemo(() => {
-    const map = new Map<string, string>()
-    for (const a of ads) {
-      if (!map.has(a.adgroup.id)) map.set(a.adgroup.id, a.adgroup.name)
-    }
-    return Array.from(map.entries())
-      .map(([id, name]) => ({ id, name }))
-      .sort((a, b) => a.name.localeCompare(b.name, "ko"))
-  }, [ads])
-
   // adType 셀렉트 옵션 — 현재 데이터에 등장하는 타입만
   const adTypeOptions = React.useMemo(() => {
     const set = new Set<string>()
@@ -991,7 +995,8 @@ export function AdsTable({
     return Array.from(set).sort()
   }, [ads])
 
-  // 컬럼 필터 state 구성 (TanStack getFilteredRowModel 가 적용)
+  // 컬럼 필터 state 구성 (TanStack getFilteredRowModel 가 적용).
+  // 캠페인 / 광고그룹 필터는 RSC 단계(prisma where)에서 처리되므로 클라이언트 columnFilter 제외.
   const columnFilters = React.useMemo<ColumnFiltersState>(() => {
     const f: ColumnFiltersState = []
     if (debouncedSearch.trim() !== "") {
@@ -1006,17 +1011,8 @@ export function AdsTable({
     if (inspectFilter !== "ALL") {
       f.push({ id: "inspectStatus", value: inspectFilter })
     }
-    if (adgroupFilter !== "ALL") {
-      f.push({ id: "adgroupId", value: adgroupFilter })
-    }
     return f
-  }, [
-    debouncedSearch,
-    adTypeFilter,
-    statusFilter,
-    inspectFilter,
-    adgroupFilter,
-  ])
+  }, [debouncedSearch, adTypeFilter, statusFilter, inspectFilter])
 
   // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table returns imperative helpers; keep this component out of React Compiler memoization.
   const table = useReactTable<AdRow>({
@@ -1059,13 +1055,13 @@ export function AdsTable({
     setAdTypeFilter("ALL")
     setStatusFilter("ALL")
     setInspectFilter("ALL")
-    setAdgroupFilter("ALL")
     updateQuery({
       q: "",
       type: "ALL",
       status: "ALL",
       inspect: "ALL",
-      adgroup: "ALL",
+      campaignIds: "",
+      adgroupIds: "",
     })
   }
 
@@ -1160,7 +1156,7 @@ export function AdsTable({
         </Card>
       )}
 
-      {/* 1차 toolbar — 검색 / 광고그룹(scope) / 필터 펼침 / 초기화 / 우측 기간·지표·카운트 */}
+      {/* 1차 toolbar — 검색 / 캠페인 / 광고그룹 / 필터 펼침 / 초기화 / 우측 기간·지표·카운트 */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
         <Input
           placeholder="소재 본문 / nccAdId 검색..."
@@ -1168,32 +1164,36 @@ export function AdsTable({
           onChange={(e) => setSearchInput(e.target.value)}
           className="h-8 w-72"
         />
-        <Select
-          value={adgroupFilter}
-          onValueChange={(v) => {
-            const next = v ?? "ALL"
-            setAdgroupFilter(next)
-            updateQuery({ adgroup: next })
+        <CampaignFilterPopover
+          campaigns={filterCampaigns}
+          selectedIds={selectedCampaignFilterIds}
+          onChange={(ids) => {
+            // 캠페인 선택 축소 시 더 이상 속하지 않는 광고그룹 선택도 정리.
+            const allow = new Set(ids)
+            const nextAdgroupIds =
+              ids.length === 0
+                ? selectedAdgroupFilterIds
+                : selectedAdgroupFilterIds.filter((agId) => {
+                    const g = filterAdgroups.find((x) => x.id === agId)
+                    return g ? allow.has(g.campaignId) : false
+                  })
+            updateQuery({
+              campaignIds: ids.length > 0 ? ids.join(",") : "",
+              adgroupIds:
+                nextAdgroupIds.length > 0 ? nextAdgroupIds.join(",") : "",
+            })
           }}
-        >
-          <SelectTrigger className="w-56">
-            <SelectValue placeholder="광고그룹">
-              {(v: string | null) =>
-                !v || v === "ALL"
-                  ? "광고그룹 (전체)"
-                  : (adgroupOptions.find((g) => g.id === v)?.name ?? v)
-              }
-            </SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="ALL">광고그룹 (전체)</SelectItem>
-            {adgroupOptions.map((g) => (
-              <SelectItem key={g.id} value={g.id}>
-                {g.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        />
+        <AdgroupFilterPopover
+          adgroups={filterAdgroups}
+          campaignFilterIds={selectedCampaignFilterIds}
+          selectedIds={selectedAdgroupFilterIds}
+          onChange={(ids) => {
+            updateQuery({
+              adgroupIds: ids.length > 0 ? ids.join(",") : "",
+            })
+          }}
+        />
         <Button
           size="sm"
           variant={showAdvanced ? "secondary" : "outline"}
@@ -1219,7 +1219,8 @@ export function AdsTable({
             adTypeFilter === "ALL" &&
             statusFilter === "ALL" &&
             inspectFilter === "ALL" &&
-            adgroupFilter === "ALL"
+            selectedCampaignFilterIds.length === 0 &&
+            selectedAdgroupFilterIds.length === 0
           }
         >
           초기화

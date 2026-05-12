@@ -35,7 +35,7 @@
 
 import * as React from "react"
 import Link from "next/link"
-import { useRouter } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
@@ -64,6 +64,11 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { AdgroupStatusBadge } from "@/components/dashboard/adgroup-status-badge"
+import { EmptyState } from "@/components/dashboard/empty-state"
+import {
+  CampaignFilterPopover,
+  type CampaignFilterOption,
+} from "@/components/dashboard/keywords-scope-filter"
 import {
   BulkActionModal,
   type BulkActionResult,
@@ -135,13 +140,40 @@ export function AdgroupsTable({
   hasKeys,
   adgroups,
   initialSelectedAdgroupIds = [],
+  filterCampaigns = [],
+  selectedCampaignFilterIds = [],
 }: {
   advertiserId: string
   hasKeys: boolean
   adgroups: AdgroupRow[]
   initialSelectedAdgroupIds?: string[]
+  /** toolbar 캠페인 필터 옵션 (광고주 전체) */
+  filterCampaigns?: CampaignFilterOption[]
+  /** URL `campaignIds` — 현재 선택된 캠페인 필터 (RSC 에서 파싱한 값) */
+  selectedCampaignFilterIds?: string[]
 }) {
   const router = useRouter()
+  const pathname = usePathname()
+  const searchParams = useSearchParams()
+  // searchParams 가 매 렌더 새 reference 라 callback 의존성 안정화용.
+  const searchParamsString = searchParams.toString()
+
+  /**
+   * URL 갱신 헬퍼 — 캠페인 필터 변경 시 `campaignIds` 갱신, 빈 배열은 제거.
+   * RSC 재조회로 adgroups props 자동 갱신.
+   */
+  const updateQuery = React.useCallback(
+    (patch: Record<string, string | undefined>) => {
+      const next = new URLSearchParams(searchParamsString)
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === undefined || v === "") next.delete(k)
+        else next.set(k, v)
+      }
+      const qs = next.toString()
+      router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
+    },
+    [router, pathname, searchParamsString],
+  )
 
   const [selected, setSelected] = React.useState<Set<string>>(
     () => new Set(initialSelectedAdgroupIds),
@@ -197,7 +229,8 @@ export function AdgroupsTable({
     searchInput !== "" ||
     statusFilter !== "ALL" ||
     channelFilter !== "ALL" ||
-    noBidOnly
+    noBidOnly ||
+    selectedCampaignFilterIds.length > 0
 
   function resetFilters() {
     setSearchInput("")
@@ -205,6 +238,9 @@ export function AdgroupsTable({
     setStatusFilter("ALL")
     setChannelFilter("ALL")
     setNoBidOnly(false)
+    if (selectedCampaignFilterIds.length > 0) {
+      updateQuery({ campaignIds: undefined })
+    }
   }
 
   function toggleAll() {
@@ -378,6 +414,15 @@ export function AdgroupsTable({
           onChange={(e) => setSearchInput(e.target.value)}
           className="h-8 w-56"
         />
+        <CampaignFilterPopover
+          campaigns={filterCampaigns}
+          selectedIds={selectedCampaignFilterIds}
+          onChange={(ids) => {
+            updateQuery({
+              campaignIds: ids.length > 0 ? ids.join(",") : undefined,
+            })
+          }}
+        />
         <Select
           value={statusFilter}
           onValueChange={(v) => setStatusFilter(v ?? "ALL")}
@@ -540,25 +585,20 @@ export function AdgroupsTable({
           <TableBody>
             {visibleAdgroups.length === 0 ? (
               <TableRow>
-                <TableCell
-                  colSpan={8}
-                  className="py-8 text-center text-muted-foreground"
-                >
-                  {adgroups.length === 0 ? (
-                    <div className="flex flex-col items-center gap-1.5">
-                      <p className="font-medium text-foreground">
-                        표시할 광고그룹이 없습니다.
-                      </p>
-                      <p className="text-xs">
-                        우측 상단 동기화 버튼을 눌러 SA 에서 가져오세요.
-                        (캠페인을 먼저 동기화해야 합니다.)
-                      </p>
-                    </div>
-                  ) : (
-                    <p className="font-medium text-foreground">
-                      현재 필터에 일치하는 광고그룹이 없습니다.
-                    </p>
-                  )}
+                <TableCell colSpan={8} className="p-0">
+                  <EmptyState
+                    title={
+                      adgroups.length === 0
+                        ? "표시할 광고그룹이 없습니다."
+                        : "현재 필터에 일치하는 광고그룹이 없습니다."
+                    }
+                    description={
+                      adgroups.length === 0
+                        ? "우측 상단 동기화 버튼을 눌러 SA 에서 가져오세요. (캠페인을 먼저 동기화해야 합니다.)"
+                        : undefined
+                    }
+                    className="h-32"
+                  />
                 </TableCell>
               </TableRow>
             ) : (

@@ -93,54 +93,69 @@ export default async function AdsPage({
     throw e
   }
 
-  // 3개 prisma 쿼리 병렬 실행 (서로 독립).
-  //   - rows:             메인 소재 데이터 (5천행 상한)
-  //   - adgroupRows:      F-4.6 추가 모달 광고그룹 옵션
-  //   - syncCampaignRows: F-4.1 동기화 캠페인 필터
+  // 4개 prisma 쿼리 병렬 실행 (서로 독립).
+  //   - rows:                메인 소재 데이터 (5천행 상한)
+  //   - adgroupRows:         F-4.6 추가 모달 광고그룹 옵션 (scope 한정)
+  //   - syncCampaignRows:    F-4.1 동기화 / toolbar 캠페인 필터 옵션 (광고주 전체)
+  //   - filterAdgroupRows:   toolbar 광고그룹 필터 옵션 (광고주 전체 — scope 무관)
   // raw 컬럼 select 안 함. 광고주 횡단 차단: adgroup.campaign.advertiserId join.
-  const [rows, adgroupRows, syncCampaignRows] = await Promise.all([
-    prisma.ad.findMany({
-      where: { adgroup: adgroupWhere },
-      select: {
-        id: true,
-        nccAdId: true,
-        adType: true,
-        fields: true,
-        inspectStatus: true,
-        inspectMemo: true,
-        status: true,
-        updatedAt: true,
-        adgroup: {
-          select: {
-            id: true,
-            name: true,
-            nccAdgroupId: true,
-            campaign: { select: { id: true, name: true } },
+  const [rows, adgroupRows, syncCampaignRows, filterAdgroupRows] =
+    await Promise.all([
+      prisma.ad.findMany({
+        where: { adgroup: adgroupWhere },
+        select: {
+          id: true,
+          nccAdId: true,
+          adType: true,
+          fields: true,
+          inspectStatus: true,
+          inspectMemo: true,
+          status: true,
+          updatedAt: true,
+          adgroup: {
+            select: {
+              id: true,
+              name: true,
+              nccAdgroupId: true,
+              campaign: { select: { id: true, name: true } },
+            },
           },
         },
-      },
-      orderBy: { updatedAt: "desc" },
-      take: 5000, // F-4.1 가상 스크롤 5천 행 안전 상한
-    }),
-    prisma.adGroup.findMany({
-      where: {
-        ...adgroupWhere,
-        status: { not: "deleted" },
-      },
-      select: {
-        id: true,
-        nccAdgroupId: true,
-        name: true,
-        campaign: { select: { id: true, name: true } },
-      },
-      orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
-    }),
-    prisma.campaign.findMany({
-      where: { advertiserId, status: { not: "deleted" } },
-      select: { id: true, name: true, nccCampaignId: true, status: true },
-      orderBy: { name: "asc" },
-    }),
-  ])
+        orderBy: { updatedAt: "desc" },
+        take: 5000, // F-4.1 가상 스크롤 5천 행 안전 상한
+      }),
+      prisma.adGroup.findMany({
+        where: {
+          ...adgroupWhere,
+          status: { not: "deleted" },
+        },
+        select: {
+          id: true,
+          nccAdgroupId: true,
+          name: true,
+          campaign: { select: { id: true, name: true } },
+        },
+        orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+      }),
+      prisma.campaign.findMany({
+        where: { advertiserId, status: { not: "deleted" } },
+        select: { id: true, name: true, nccCampaignId: true, status: true },
+        orderBy: { name: "asc" },
+      }),
+      prisma.adGroup.findMany({
+        where: {
+          campaign: { advertiserId },
+          status: { not: "deleted" },
+        },
+        select: {
+          id: true,
+          name: true,
+          status: true,
+          campaign: { select: { id: true, name: true } },
+        },
+        orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+      }),
+    ])
 
   const adgroups: AdAdgroupOption[] = adgroupRows.map((a) => ({
     id: a.id,
@@ -153,6 +168,14 @@ export default async function AdsPage({
     name: c.name,
     nccCampaignId: c.nccCampaignId,
     status: c.status as "on" | "off" | "deleted",
+  }))
+  // toolbar 광고그룹 필터 옵션 — 광고주 전체 (scope 무관).
+  const filterAdgroups = filterAdgroupRows.map((g) => ({
+    id: g.id,
+    name: g.name,
+    status: g.status as "on" | "off" | "deleted",
+    campaignId: g.campaign.id,
+    campaignName: g.campaign.name,
   }))
 
   // stats 호출은 RSC 에서 제외 — 클라이언트(AdsTable) 가 useEffect 로 fetchAdsStats 호출 (streaming).
@@ -223,6 +246,10 @@ export default async function AdsPage({
         hasKeys={advertiser.hasKeys}
         ads={ads}
         adgroups={adgroups}
+        filterCampaigns={syncCampaigns}
+        filterAdgroups={filterAdgroups}
+        selectedCampaignFilterIds={campaignScopeIds}
+        selectedAdgroupFilterIds={adgroupScopeIds}
         userRole={userRole}
         period={period}
       />
