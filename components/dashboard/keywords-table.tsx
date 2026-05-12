@@ -106,6 +106,12 @@ import {
   type AdgroupOption,
 } from "@/components/dashboard/keywords-add-modal"
 import {
+  CampaignFilterPopover,
+  AdgroupFilterPopover,
+  type CampaignFilterOption,
+  type AdgroupFilterOption,
+} from "@/components/dashboard/keywords-scope-filter"
+import {
   KeywordsDeleteModal,
   type DeleteTargetRow,
 } from "@/components/dashboard/keywords-delete-modal"
@@ -907,6 +913,10 @@ export type KeywordsTableFilters = {
   q: string
   status: KeywordStatusFilter
   sort: KeywordSort
+  /** URL `campaignIds` — 0개면 전체 */
+  campaignIds: string[]
+  /** URL `adgroupIds` — 0개면 전체 */
+  adgroupIds: string[]
 }
 
 export function KeywordsTable({
@@ -917,6 +927,8 @@ export function KeywordsTable({
   pagination,
   filters,
   adgroups,
+  filterCampaigns,
+  filterAdgroups,
   userRole,
   period,
 }: {
@@ -929,6 +941,10 @@ export function KeywordsTable({
   pagination: KeywordsTablePagination
   filters: KeywordsTableFilters
   adgroups: AdgroupOption[]
+  /** 키워드 페이지 toolbar 캠페인 필터 옵션 (광고주 전체) */
+  filterCampaigns: CampaignFilterOption[]
+  /** 키워드 페이지 toolbar 광고그룹 필터 옵션 (광고주 전체 — 캠페인 필터 종속) */
+  filterAdgroups: AdgroupFilterOption[]
   userRole: "admin" | "operator" | "viewer"
   period: AdsPeriod
 }) {
@@ -1488,13 +1504,49 @@ export function KeywordsTable({
         </Card>
       )}
 
-      {/* toolbar — 검색 / 상태 / 기간 / 카운트 */}
+      {/* toolbar — 검색 / 캠페인 / 광고그룹 / 상태 / 기간 / 카운트 */}
       <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
         <Input
           placeholder="키워드 검색..."
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
           className="h-8 w-56"
+        />
+        <CampaignFilterPopover
+          campaigns={filterCampaigns}
+          selectedIds={filters.campaignIds}
+          onChange={(ids) => {
+            // 캠페인 선택이 줄어들면 더 이상 속하지 않는 광고그룹 선택도 함께 정리.
+            const allow = new Set(ids)
+            const nextAdgroupIds =
+              ids.length === 0
+                ? filters.adgroupIds
+                : filters.adgroupIds.filter((agId) => {
+                    const g = filterAdgroups.find((x) => x.id === agId)
+                    return g ? allow.has(g.campaignId) : false
+                  })
+            updateQuery(
+              {
+                campaignIds: ids.length > 0 ? ids.join(",") : undefined,
+                adgroupIds:
+                  nextAdgroupIds.length > 0
+                    ? nextAdgroupIds.join(",")
+                    : undefined,
+              },
+              { resetPage: true },
+            )
+          }}
+        />
+        <AdgroupFilterPopover
+          adgroups={filterAdgroups}
+          campaignFilterIds={filters.campaignIds}
+          selectedIds={filters.adgroupIds}
+          onChange={(ids) => {
+            updateQuery(
+              { adgroupIds: ids.length > 0 ? ids.join(",") : undefined },
+              { resetPage: true },
+            )
+          }}
         />
         <Select
           value={filters.status}
@@ -1527,11 +1579,21 @@ export function KeywordsTable({
           onClick={() => {
             setSearchInput("")
             updateQuery(
-              { q: undefined, keywordStatus: undefined },
+              {
+                q: undefined,
+                keywordStatus: undefined,
+                campaignIds: undefined,
+                adgroupIds: undefined,
+              },
               { resetPage: true },
             )
           }}
-          disabled={filters.q === "" && filters.status === "all"}
+          disabled={
+            filters.q === "" &&
+            filters.status === "all" &&
+            filters.campaignIds.length === 0 &&
+            filters.adgroupIds.length === 0
+          }
         >
           초기화
         </Button>
@@ -1674,7 +1736,12 @@ export function KeywordsTable({
               onClick={() => {
                 setSearchInput("")
                 updateQuery(
-                  { q: undefined, keywordStatus: undefined },
+                  {
+                    q: undefined,
+                    keywordStatus: undefined,
+                    campaignIds: undefined,
+                    adgroupIds: undefined,
+                  },
                   { resetPage: true },
                 )
               }}

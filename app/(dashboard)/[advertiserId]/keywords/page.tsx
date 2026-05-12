@@ -154,64 +154,84 @@ export default async function KeywordsPage({
     throw e
   }
 
-  // 5개 호출 병렬 실행 (서로 독립).
-  //   - lastSync:         마지막 동기화 시각 배지
-  //   - rows:             현재 페이지 키워드 (skip / take = pageSize)
-  //   - total:            서버 페이지네이션 — 전체 건수(필터 적용 후)
-  //   - adgroupRows:      F-3.6 추가 모달 광고그룹 옵션
-  //   - syncCampaignRows: F-3.1 동기화 캠페인 필터
+  // 6개 호출 병렬 실행 (서로 독립).
+  //   - lastSync:           마지막 동기화 시각 배지
+  //   - rows:               현재 페이지 키워드 (skip / take = pageSize)
+  //   - total:              서버 페이지네이션 — 전체 건수(필터 적용 후)
+  //   - adgroupRows:        F-3.6 추가 모달 광고그룹 옵션 (scope 한정)
+  //   - syncCampaignRows:   F-3.1 동기화 / 키워드 페이지 캠페인 필터 옵션 (광고주 전체)
+  //   - filterAdgroupRows:  키워드 페이지 광고그룹 필터 옵션 (광고주 전체 — scope 무관)
   // raw 컬럼 select 안 함. 광고주 횡단 차단: adgroup.campaign.advertiserId join.
-  const [lastSync, rows, total, adgroupRows, syncCampaignRows] =
-    await Promise.all([
-      getLastSyncAt(advertiserId),
-      prisma.keyword.findMany({
-        where: keywordWhere,
-        select: {
-          id: true,
-          nccKeywordId: true,
-          keyword: true,
-          matchType: true,
-          bidAmt: true,
-          useGroupBidAmt: true,
-          userLock: true,
-          externalId: true, // F-3.5 CSV 내보내기 — UPDATE 행에 함께 출력 (재업로드 멱등키 보존)
-          status: true,
-          inspectStatus: true,
-          recentAvgRnk: true,
-          updatedAt: true,
-          adgroup: {
-            select: {
-              id: true,
-              name: true,
-              nccAdgroupId: true,
-              campaign: { select: { id: true, name: true } },
-            },
+  const [
+    lastSync,
+    rows,
+    total,
+    adgroupRows,
+    syncCampaignRows,
+    filterAdgroupRows,
+  ] = await Promise.all([
+    getLastSyncAt(advertiserId),
+    prisma.keyword.findMany({
+      where: keywordWhere,
+      select: {
+        id: true,
+        nccKeywordId: true,
+        keyword: true,
+        matchType: true,
+        bidAmt: true,
+        useGroupBidAmt: true,
+        userLock: true,
+        externalId: true, // F-3.5 CSV 내보내기 — UPDATE 행에 함께 출력 (재업로드 멱등키 보존)
+        status: true,
+        inspectStatus: true,
+        recentAvgRnk: true,
+        updatedAt: true,
+        adgroup: {
+          select: {
+            id: true,
+            name: true,
+            nccAdgroupId: true,
+            campaign: { select: { id: true, name: true } },
           },
         },
-        orderBy,
-        skip,
-        take: pageParams.pageSize,
-      }),
-      prisma.keyword.count({ where: keywordWhere }),
-      prisma.adGroup.findMany({
-        where: {
-          ...adgroupWhere,
-          status: { not: "deleted" },
-        },
-        select: {
-          id: true,
-          nccAdgroupId: true,
-          name: true,
-          campaign: { select: { id: true, name: true } },
-        },
-        orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
-      }),
-      prisma.campaign.findMany({
-        where: { advertiserId, status: { not: "deleted" } },
-        select: { id: true, name: true, nccCampaignId: true, status: true },
-        orderBy: { name: "asc" },
-      }),
-    ])
+      },
+      orderBy,
+      skip,
+      take: pageParams.pageSize,
+    }),
+    prisma.keyword.count({ where: keywordWhere }),
+    prisma.adGroup.findMany({
+      where: {
+        ...adgroupWhere,
+        status: { not: "deleted" },
+      },
+      select: {
+        id: true,
+        nccAdgroupId: true,
+        name: true,
+        campaign: { select: { id: true, name: true } },
+      },
+      orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+    }),
+    prisma.campaign.findMany({
+      where: { advertiserId, status: { not: "deleted" } },
+      select: { id: true, name: true, nccCampaignId: true, status: true },
+      orderBy: { name: "asc" },
+    }),
+    prisma.adGroup.findMany({
+      where: {
+        campaign: { advertiserId },
+        status: { not: "deleted" },
+      },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        campaign: { select: { id: true, name: true } },
+      },
+      orderBy: [{ campaign: { name: "asc" } }, { name: "asc" }],
+    }),
+  ])
 
   const totalPages = Math.max(1, Math.ceil(total / pageParams.pageSize))
 
@@ -229,6 +249,16 @@ export default async function KeywordsPage({
     name: c.name,
     nccCampaignId: c.nccCampaignId,
     status: c.status as "on" | "off" | "deleted",
+  }))
+
+  // 키워드 페이지 광고그룹 필터 옵션 — 광고주 전체 (캠페인/광고그룹 scope 무관).
+  // 캠페인 필터 선택 변화에 따라 클라이언트에서 동적으로 추려짐.
+  const filterAdgroups = filterAdgroupRows.map((g) => ({
+    id: g.id,
+    name: g.name,
+    status: g.status as "on" | "off" | "deleted",
+    campaignId: g.campaign.id,
+    campaignName: g.campaign.name,
   }))
 
   // stats 호출은 RSC 에서 제외 — 클라이언트(KeywordsTable) 가 useEffect 로 fetchKeywordsStats 호출 (streaming).
@@ -314,8 +344,12 @@ export default async function KeywordsPage({
           q: pageParams.q,
           status: pageParams.status,
           sort: pageParams.sort,
+          campaignIds: campaignScopeIds,
+          adgroupIds: adgroupScopeIds,
         }}
         adgroups={adgroups}
+        filterCampaigns={syncCampaigns}
+        filterAdgroups={filterAdgroups}
         userRole={userRole}
         period={period}
       />
