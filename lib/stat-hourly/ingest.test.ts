@@ -5,7 +5,7 @@
  *   A. previousHourKstAsUtc — KST 직전 정시 정확성 (자정/월/연 경계)
  *   B. dateToStatDtString — KST 일자 문자열 변환
  *   C. pickLevel           — 호출 컨텍스트 level + row.id 정상 검증
- *   D. toUpsertInput       — device='ALL' / recentAvgRnk null·non-null / unique key
+ *   D. toUpsertInput       — device='ALL' / 메트릭 정규화 / unique key
  *   E. updateKeywordRecentAvgRnk — 일괄 update + 실패(P2025) 흡수
  *   F. ingestAdvertiserStatHourly — Stats API + Prisma mock 으로 흐름 가드
  *
@@ -195,7 +195,7 @@ describe("toUpsertInput", () => {
   const baseDate = new Date("2026-04-28T15:00:00.000Z") // KST 4-29 0시
   const baseHour = 13
 
-  it("keyword level / device='ALL' / 모든 메트릭 + recentAvgRnk", () => {
+  it("keyword level / device='ALL' / 모든 메트릭 (시간대별 순위 컬럼 제거됨)", () => {
     const inp = toUpsertInput({
       advertiserId: "adv-1",
       date: baseDate,
@@ -206,6 +206,7 @@ describe("toUpsertInput", () => {
         impCnt: 100,
         clkCnt: 10,
         salesAmt: 1234.56,
+        // recentAvgRnk 는 SA 미제공 → StatHourly 컬럼 제거. row 에 와도 payload 무시.
         recentAvgRnk: 2.5,
         hh24: "13",
       } as StatsRow,
@@ -231,43 +232,17 @@ describe("toUpsertInput", () => {
       impressions: 100,
       clicks: 10,
       cost: 1234.56,
-      recentAvgRnk: 2.5,
     })
+    // 시간대별 순위 컬럼 제거 — payload 에 recentAvgRnk 미포함.
+    expect(inp.create).not.toHaveProperty("recentAvgRnk")
     expect(inp.update).toMatchObject({
       impressions: 100,
       clicks: 10,
       cost: 1234.56,
-      recentAvgRnk: 2.5,
     })
+    expect(inp.update).not.toHaveProperty("recentAvgRnk")
     // update 에 advertiserId 미포함 (refId owner 불변 가정)
     expect(inp.update).not.toHaveProperty("advertiserId")
-  })
-
-  it("recentAvgRnk null → null 그대로 (Decimal? 컬럼)", () => {
-    const inp = toUpsertInput({
-      advertiserId: "adv-1",
-      date: baseDate,
-      hour: baseHour,
-      level: "keyword",
-      row: { id: "K-1", impCnt: 1, clkCnt: 0, salesAmt: 0, recentAvgRnk: null } as StatsRow,
-    })
-    expect(inp).not.toBeNull()
-    if (inp === null) return
-    expect((inp.create as { recentAvgRnk: unknown }).recentAvgRnk).toBeNull()
-    expect((inp.update as { recentAvgRnk: unknown }).recentAvgRnk).toBeNull()
-  })
-
-  it("recentAvgRnk undefined → null", () => {
-    const inp = toUpsertInput({
-      advertiserId: "adv-1",
-      date: baseDate,
-      hour: baseHour,
-      level: "keyword",
-      row: { id: "K-1", impCnt: 1 } as StatsRow,
-    })
-    expect(inp).not.toBeNull()
-    if (inp === null) return
-    expect((inp.create as { recentAvgRnk: unknown }).recentAvgRnk).toBeNull()
   })
 
   it("impCnt/clkCnt/salesAmt 결측 → 0 으로 정규화", () => {

@@ -99,26 +99,6 @@ const BID_RANK_ADGROUP_PER_ADV_CAP = (() => {
   return Math.min(5000, Math.max(1, Math.floor(raw)))
 })()
 /**
- * rank 권고 단계 — 측정 평균 순위 가중평균 윈도 (시간).
- *
- * `Keyword.recentAvgRnk` 는 stat-hourly cron 의 last non-null 단일 시간값 — 노이즈 큼.
- * 본 윈도 내 `StatHourly` 행을 노출수로 가중평균 → 보다 안정된 effectiveRank 산출.
- * 기본 6 — 매시간 cron 의 1시간 신선도 + 6시간 평활화 균형.
- * 가중평균 행이 없으면 (노출 0 / NULL only) `Keyword.recentAvgRnk` fallback.
- */
-/**
- * env 가드 — NaN / 음수 / 0 / 24h 초과 입력 방어 (W3).
- *   - 비정수 / 비유한수 → 기본 6
- *   - <= 0 → 기본 6 (가중평균 윈도가 0/음수면 의미 없음)
- *   - > 24 → 24로 클램프 (StatHourly 의미상 하루 이상은 무의미)
- *   - 소수 → floor (정수 시간만 의미 있음)
- */
-const BID_RANK_RECENT_HOURS = (() => {
-  const raw = Number(process.env.BID_RANK_RECENT_HOURS ?? "6")
-  if (!Number.isFinite(raw) || raw <= 0) return 6
-  return Math.min(24, Math.floor(raw))
-})()
-/**
  * rank 권고 단계 — Estimate 디바이스 범위.
  *
  * - "PC" — PC Estimate 만 호출 (기존 동작 호환).
@@ -188,16 +168,6 @@ type CronResponse = {
   /** rank 권고 단계 — Estimate 호출 throw 카운트 (cron 진행은 계속). */
   rankEstimateFailed: number
   /**
-   * rank 권고 단계 — `effectiveRank` 산출에 StatHourly 6h 가중평균을 사용한 권고 수.
-   * (suggest 결과만 카운트 — hold 는 비대상)
-   */
-  rankWeightedSourceCount: number
-  /**
-   * rank 권고 단계 — `effectiveRank` 산출에 `Keyword.recentAvgRnk` (last non-null) 만
-   * 사용한 권고 수. StatHourly 6h 윈도에 노출 0 / NULL only 인 키워드 fallback.
-   */
-  rankFallbackSourceCount: number
-  /**
    * rank 권고 단계 — stale 정리 (W4): 5위 도달 / 비활성화 / 그룹입찰 전환 / 정책 등록 등으로
    * 후보에서 빠진 키워드의 기존 `below_target_rank` pending 권고 dismiss 수.
    * marginal 권고 (다른 reasonCode) 는 영향 없음.
@@ -216,10 +186,6 @@ type CronResponse = {
   adgroupRankCappedAtMaxCpc: number
   /** 광고그룹 권고 Estimate 호출 throw (대표 키워드 단위 흡수). */
   adgroupRankEstimateFailed: number
-  /** 광고그룹 권고 — StatHourly 가중평균 사용 권고 수 (suggest 만). */
-  adgroupRankWeightedSourceCount: number
-  /** 광고그룹 권고 — Keyword.recentAvgRnk 단순 평균 fallback 사용 권고 수 (suggest 만). */
-  adgroupRankFallbackSourceCount: number
   /** 광고그룹 권고 stale 정리 (W4) — 후보에서 빠진 광고그룹의 기존 pending dismiss 수. */
   adgroupRankStaleDismissed: number
   ts: string
@@ -267,10 +233,6 @@ type AdvertiserStats = {
   rankCappedAtMaxCpc: number
   /** rank 권고 단계 — Estimate 호출 throw 카운트 (키워드 단위 흡수). */
   rankEstimateFailed: number
-  /** rank 권고 단계 — StatHourly 6h 가중평균 사용 권고 수 (suggest 만). */
-  rankWeightedSourceCount: number
-  /** rank 권고 단계 — Keyword.recentAvgRnk fallback 사용 권고 수 (suggest 만). */
-  rankFallbackSourceCount: number
   /** rank 권고 단계 — stale 정리 (W4): 후보에서 빠진 키워드의 기존 below_target_rank pending dismiss 수. */
   rankStaleDismissed: number
   // -- 광고그룹 단위 rank 권고 (Phase 2A) ------------------------------------
@@ -280,8 +242,6 @@ type AdvertiserStats = {
   adgroupRankHoldNotReached: number
   adgroupRankCappedAtMaxCpc: number
   adgroupRankEstimateFailed: number
-  adgroupRankWeightedSourceCount: number
-  adgroupRankFallbackSourceCount: number
   adgroupRankStaleDismissed: number
 }
 
@@ -625,10 +585,6 @@ type RankSuggestionStats = {
   holdNotReached: number
   cappedAtMaxCpc: number
   estimateFailed: number
-  /** StatHourly 6h 가중평균 사용 (suggest 만 카운트). */
-  weightedSourceCount: number
-  /** Keyword.recentAvgRnk fallback 사용 (suggest 만 카운트). */
-  fallbackSourceCount: number
   /**
    * stale 정리 — 이번 cron run 에서 effectiveRank > target 후보로 진입하지 않은
    * 키워드의 기존 `reasonCode='below_target_rank'` pending 권고를 dismiss 처리한 수.
@@ -638,125 +594,12 @@ type RankSuggestionStats = {
   staleDismissed: number
 }
 
-/**
- * KST 기준 최근 N시간 윈도의 (date, hour) 페어 N 개 생성.
- *
- * cron 시작 시각의 KST 시각을 hour 정밀도로 floor → 그 시각 포함 직전 N시간.
- * 예: now=2026-05-08 14:35 KST, hours=6 → KST { (5-8, 14), (5-8, 13), ..., (5-8, 9) } 6개.
- * 자정 cross 시 일자 자동 변경 (5-8 00:30 KST + hours=6 → 5-8 00, 5-7 23..19).
- *
- * date 는 "그 KST 일자 0시"의 절대 epoch (UTC 로는 -9h) — StatHourly.date 와 일치.
- * hour 는 0..23 (KST 시각) — StatHourly.hour 와 일치.
- *
- * 본 모듈 inline 헬퍼 (lib/stat-hourly/ingest.ts 의 previousHourKstAsUtc 와 같은 패턴).
- */
-function recentHourPairsKst(
-  now: Date,
-  hours: number,
-): { date: Date; hour: number }[] {
-  if (hours <= 0) return []
-  // now 의 KST 시각으로 환산.
-  const kstNow = new Date(now.getTime() + KST_OFFSET_MS)
-  // KST hour 단위 floor (정시).
-  const kstHourFloor = new Date(kstNow.getTime())
-  kstHourFloor.setUTCMinutes(0, 0, 0)
-
-  const pairs: { date: Date; hour: number }[] = []
-  for (let i = 0; i < hours; i++) {
-    const slot = new Date(kstHourFloor.getTime() - i * 60 * 60 * 1000)
-    const y = slot.getUTCFullYear()
-    const m = slot.getUTCMonth()
-    const d = slot.getUTCDate()
-    const hour = slot.getUTCHours()
-    const kstDay0 = new Date(Date.UTC(y, m, d))
-    const date = new Date(kstDay0.getTime() - KST_OFFSET_MS)
-    pairs.push({ date, hour })
-  }
-  return pairs
-}
-
-/**
- * 광고주의 StatHourly 최근 N시간 keyword level 행을 노출수 가중으로 집계.
- *
- * 가중평균 = Σ(impressions * recentAvgRnk) / Σ(impressions).
- * 노출 0 / recentAvgRnk NULL 행은 자연 제외 (분모/분자 0 가산 — Map 미등록).
- *
- * 결과: nccKeywordId → { weightedAvgRnk, impressions } Map.
- *
- * Prisma `(date, hour)` 페어 OR 조회 — 광고주당 ~5,000 키워드 × 6시간 ≈ 30k 행 fetch.
- * `[advertiserId, date, hour]` 인덱스 활용. 메모리 부담 수백 KB.
- *
- * raw SQL groupBy 가중평균 최적화는 후속 PR (1차는 메모리 집계 OK).
- */
-async function loadWeightedRankMap(args: {
-  advertiserId: string
-  cronStartedAt: Date
-  hours: number
-}): Promise<Map<string, { weightedAvgRnk: number; impressions: number }>> {
-  const { advertiserId, cronStartedAt, hours } = args
-  const result = new Map<string, { weightedAvgRnk: number; impressions: number }>()
-  const pairs = recentHourPairsKst(cronStartedAt, hours)
-  if (pairs.length === 0) return result
-
-  const rows = await prisma.statHourly.findMany({
-    where: {
-      advertiserId,
-      level: "keyword",
-      // device='ALL' 명시 — lib/stat-hourly/ingest.ts 의 단일 적재 정책 (schema StatDevice
-      // 주석 참조). 향후 PC/MOBILE 분리 적재가 도입되면 같은 (date, hour, level, refId)
-      // 조합에 ALL + PC + MOBILE 3행 공존 → device 필터 누락 시 impressions 가 ~3배로
-      // 부풀어 가중평균 왜곡. StatDaily 가 STAT_DAILY_DEVICE_FILTER (PC + MOBILE) 로 같은
-      // 가드를 적용하는 것과 같은 사유.
-      device: "ALL",
-      OR: pairs.map((p) => ({ date: p.date, hour: p.hour })),
-      // recentAvgRnk null 행은 Prisma 가 어차피 가중평균에서 제외하므로 SQL 가드 생략.
-      // impressions 도 0 행 다수 존재 — 메모리에서 0 가산은 noop.
-    },
-    select: {
-      refId: true,
-      impressions: true,
-      recentAvgRnk: true,
-    },
-  })
-
-  // refId → { sumWeighted, sumImp }
-  const accum = new Map<string, { sumWeighted: number; sumImp: number }>()
-  for (const r of rows) {
-    if (r.recentAvgRnk == null) continue
-    const imp = r.impressions
-    if (imp <= 0) continue
-    const rnk = Number(r.recentAvgRnk)
-    if (!Number.isFinite(rnk) || rnk <= 0) continue
-    const cur = accum.get(r.refId) ?? { sumWeighted: 0, sumImp: 0 }
-    cur.sumWeighted += imp * rnk
-    cur.sumImp += imp
-    accum.set(r.refId, cur)
-  }
-  for (const [refId, agg] of accum) {
-    if (agg.sumImp <= 0) continue
-    const weighted = agg.sumWeighted / agg.sumImp
-    if (!Number.isFinite(weighted) || weighted <= 0) continue
-    result.set(refId, {
-      weightedAvgRnk: weighted,
-      impressions: agg.sumImp,
-    })
-  }
-  return result
-}
-
 async function processRankSuggestions(args: {
   advertiserId: string
   customerId: string
   targetAvgRank: number | Prisma.Decimal | null
   maxCpc: number | null
   policyKeywordIds: Set<string>
-  cronStartedAt: Date
-  /**
-   * 호출자가 미리 빌드한 StatHourly 가중평균 Map (Phase 2A).
-   * 키워드 단위 / 광고그룹 단위 권고가 같은 광고주에서 동일 데이터에 두 번 fetch 하지 않도록
-   * processAdvertiser 가 한 번 빌드하고 두 함수에 전달. 미전달 시 fallback 으로 자체 빌드.
-   */
-  weightedMap?: Map<string, { weightedAvgRnk: number; impressions: number }>
 }): Promise<RankSuggestionStats> {
   const {
     advertiserId,
@@ -764,7 +607,6 @@ async function processRankSuggestions(args: {
     targetAvgRank,
     maxCpc,
     policyKeywordIds,
-    cronStartedAt,
   } = args
   const stats: RankSuggestionStats = {
     candidatesScanned: 0,
@@ -773,8 +615,6 @@ async function processRankSuggestions(args: {
     holdNotReached: 0,
     cappedAtMaxCpc: 0,
     estimateFailed: 0,
-    weightedSourceCount: 0,
-    fallbackSourceCount: 0,
     staleDismissed: 0,
   }
 
@@ -791,24 +631,8 @@ async function processRankSuggestions(args: {
         ? targetAvgRank
         : Number(targetAvgRank)
 
-  // -- StatHourly 6h 가중평균 — 후보 보정 / OR 후보 포함 --------------------
-  // last non-null `recentAvgRnk` 만 보면 단일 시간대 노이즈 / 입찰 직후 일시 부진이 권고에
-  // 그대로 반영됨. 6시간 노출 가중평균을 산출해 effectiveRank 결정에 우선 적용 — 더 안정.
-  // 가중평균 행이 없는 키워드 (StatHourly 노출 0 / NULL only) 는 Keyword.recentAvgRnk fallback.
-  const weightedMap =
-    args.weightedMap ??
-    (await loadWeightedRankMap({
-      advertiserId,
-      cronStartedAt,
-      hours: BID_RANK_RECENT_HOURS,
-    }))
-  // 가중평균이 target 미달인 nccKeywordId 셋 — SQL OR 후보로 추가 (last non-null 은 도달했지만
-  // 가중평균은 미달인 키워드도 Phase 2 메모리 컷으로 진입).
-  const weightedMissedNccIds: string[] = []
-  for (const [refId, w] of weightedMap) {
-    if (w.weightedAvgRnk > target) weightedMissedNccIds.push(refId)
-  }
-
+  // rank 후보는 Keyword.recentAvgRnk (일별 last non-null 측정값) 기준.
+  // (시간대별 순위는 SA 미제공 — 과거 StatHourly 6h 가중평균 경로는 영구 null 이라 제거됨.)
   const candidates = await prisma.keyword.findMany({
     where: {
       adgroup: {
@@ -821,14 +645,7 @@ async function processRankSuggestions(args: {
       useGroupBidAmt: false,
       userLock: false,
       bidAmt: { not: null, gt: 0 },
-      OR: [
-        // 기존: last non-null > target.
-        { recentAvgRnk: { not: null, gt: target } },
-        // 신규: 6h 가중평균 > target — last non-null 이 target 도달인 키워드도 포함.
-        ...(weightedMissedNccIds.length > 0
-          ? [{ nccKeywordId: { in: weightedMissedNccIds } }]
-          : []),
-      ],
+      recentAvgRnk: { not: null, gt: target },
     },
     select: {
       id: true,
@@ -844,11 +661,9 @@ async function processRankSuggestions(args: {
         },
       },
     },
-    // SQL 1차 정렬은 last non-null desc — 메모리에서 effectiveRank desc 로 재정렬.
+    // recentAvgRnk desc (가장 미달인 키워드 우선) + 광고주당 cap.
     orderBy: { recentAvgRnk: "desc" },
-    // SQL 정렬·cap 은 effectiveRank 와 어긋날 수 있어 take 를 ×2 로 늘려 메모리 컷 보호.
-    // 운영 부담 ↑ 우려 시 후속 PR 에서 raw SQL CTE 로 단일 정렬 + cap 으로 대체.
-    take: BID_RANK_PER_ADV_CAP * 2,
+    take: BID_RANK_PER_ADV_CAP,
   })
 
   // 광고주 횡단 차단 — Keyword 에는 advertiserId 없음. AdGroup -> Campaign.advertiserId 비교.
@@ -863,34 +678,18 @@ async function processRankSuggestions(args: {
   // 모든 운영 중 키워드가 5위 도달했거나 비활성화된 경우 — 기존 below_target_rank pending 정리.
 
   // -- effectiveRank 산출 + 메모리 정렬·cap ----------------------------------
-  // weightedMap 우선 — 없으면 last non-null fallback. effectiveRank <= target 인 키워드는
-  // (가중평균 보정으로 도달 가능) 권고 비대상 — 컷.
+  // effectiveRank = Keyword.recentAvgRnk (일별 측정값). effectiveRank <= target 은 컷
+  // (SQL 에서 > target 만 통과하지만 방어적으로 재확인).
   type EnrichedCandidate = {
     k: (typeof filtered)[number]
     effectiveRank: number
-    source: "weighted_6h" | "last_non_null"
-    sampleImpressions: number | null
   }
   const enriched: EnrichedCandidate[] = []
   for (const k of filtered) {
-    const w = weightedMap.get(k.nccKeywordId)
-    let effectiveRank: number
-    let source: "weighted_6h" | "last_non_null"
-    let sampleImpressions: number | null
-    if (w != null) {
-      effectiveRank = w.weightedAvgRnk
-      source = "weighted_6h"
-      sampleImpressions = w.impressions
-    } else if (k.recentAvgRnk != null) {
-      effectiveRank = Number(k.recentAvgRnk)
-      source = "last_non_null"
-      sampleImpressions = null
-    } else {
-      // 둘 다 없음 — 권고 비대상 (이론상 OR 조건상 도달 안 함).
-      continue
-    }
+    if (k.recentAvgRnk == null) continue
+    const effectiveRank = Number(k.recentAvgRnk)
     if (!Number.isFinite(effectiveRank) || effectiveRank <= target) continue
-    enriched.push({ k, effectiveRank, source, sampleImpressions })
+    enriched.push({ k, effectiveRank })
   }
   enriched.sort((a, b) => b.effectiveRank - a.effectiveRank)
   const limited = enriched.slice(0, BID_RANK_PER_ADV_CAP)
@@ -899,7 +698,7 @@ async function processRankSuggestions(args: {
   const expiresAt = addDays(new Date(), SUGGESTION_TTL_DAYS)
 
   for (const cand of limited) {
-    const { k, effectiveRank, source, sampleImpressions } = cand
+    const { k, effectiveRank } = cand
     stats.candidatesScanned++
     if (k.bidAmt == null || k.bidAmt <= 0) continue
 
@@ -943,9 +742,8 @@ async function processRankSuggestions(args: {
     }
 
     // -- 결정 ----------------------------------------------------------------
-    // effectiveRank 를 keyword.recentAvgRnk 로 전달 — decideRankSuggestion 시그니처 유지.
-    // rankWindowHours / rankSampleImpressions 은 action 으로 passthrough (UI 라벨).
-    const rankWindowHours = source === "weighted_6h" ? BID_RANK_RECENT_HOURS : null
+    // effectiveRank(= Keyword.recentAvgRnk) 를 decideRankSuggestion 에 전달.
+    // 시간대별 가중평균 경로 제거 — rankWindowHours / rankSampleImpressions 은 항상 null.
     const decision = decideRankSuggestion({
       keyword: {
         keywordId: k.id,
@@ -957,8 +755,8 @@ async function processRankSuggestions(args: {
       maxCpc,
       estimateRows: estimateRowsPc,
       estimateRowsMobile,
-      rankWindowHours,
-      rankSampleImpressions: sampleImpressions,
+      rankWindowHours: null,
+      rankSampleImpressions: null,
     })
 
     if (decision.decision === "hold") {
@@ -972,12 +770,7 @@ async function processRankSuggestions(args: {
     }
 
     // -- reason 본문 출처 suffix (텔레그램 / 감사 로그용) ---------------------
-    // action.rankWindowHours / rankSampleImpressions 은 UI 라벨용 — reason 본문은
-    // 운영자가 inbox 에서 한눈에 출처를 보도록 명시.
-    const reasonWithSource =
-      source === "weighted_6h"
-        ? `${decision.reason} (최근 ${BID_RANK_RECENT_HOURS}시간 가중평균, 노출 ${(sampleImpressions ?? 0).toLocaleString()}회 기반)`
-        : `${decision.reason} (최근 1시간 측정값)`
+    const reason = `${decision.reason} (최근 1시간 측정값)`
 
     // -- 적재 (upsert: 같은 키워드 pending 1개 보장) ------------------------
     // marginal 권고 (engineSource='bid', scope='keyword', status='pending') 가 있으면
@@ -998,7 +791,7 @@ async function processRankSuggestions(args: {
       adgroupId: k.adgroup.id,
       engineSource: "bid" as const,
       action: decision.action as unknown as Prisma.InputJsonValue,
-      reason: reasonWithSource,
+      reason,
       severity: decision.severity,
       status: "pending" as const,
       scope: "keyword" as const,
@@ -1022,8 +815,6 @@ async function processRankSuggestions(args: {
       await prisma.bidSuggestion.create({ data })
       stats.created++
     }
-    if (source === "weighted_6h") stats.weightedSourceCount++
-    else stats.fallbackSourceCount++
   }
 
   // -- stale 정리 (W4) ------------------------------------------------------
@@ -1070,15 +861,12 @@ async function processRankSuggestions(args: {
 //   - 그 키워드의 last non-null recentAvgRnk > target (1차 SQL 컷)
 //
 // effectiveRank 산출:
-//   - weightedMap (StatHourly 6h 가중평균) 우선 — 광고그룹 단위로 재집계
-//     (광고그룹 = Σ_keyword (weightedAvgRnk × impressions) / Σ_keyword impressions)
-//   - weightedMap 미존재 → 광고그룹의 last non-null recentAvgRnk 단순 평균 (impressions 가중 불가)
+//   - 광고그룹의 last non-null Keyword.recentAvgRnk 단순 평균 (일별 측정값 — 시간대별 순위 SA 미제공)
 //
 // effectiveRank > target 인 광고그룹만 enriched. desc 정렬 + cap.
 //
 // 대표 키워드 선정:
-//   - useGroupBidAmt=true 키워드 중 weightedMap 의 impressions TOP 1
-//   - weightedMap 에 없으면 fallback (광고그룹의 첫 키워드)
+//   - useGroupBidAmt=true 키워드 중 첫 키워드 (Estimate 호출 대상)
 //
 // 처리:
 //   - 대표 키워드로 PC Estimate (캐시 우선)
@@ -1096,36 +884,7 @@ type AdgroupRankStats = {
   holdNotReached: number
   cappedAtMaxCpc: number
   estimateFailed: number
-  weightedSourceCount: number
-  fallbackSourceCount: number
   staleDismissed: number
-}
-
-/**
- * 광고그룹 단위 가중평균 산출 — weightedMap (키워드별) 을 광고그룹 단위로 재집계.
- *
- * 광고그룹 가중평균 = Σ_keyword (weightedAvgRnk × impressions) / Σ_keyword impressions
- *   (per_keyword: weightedAvgRnk × impressions = Σ_h(imp_h × rnk_h) — 키워드의 sumWeighted)
- *
- * useGroupBidAmt=true 키워드만 누적 (광고그룹 default bid 영향 키워드 한정).
- * 노출 0 / weightedMap 미등록 키워드는 자연 제외.
- */
-function computeAdgroupWeighted(
-  weightedMap: Map<string, { weightedAvgRnk: number; impressions: number }>,
-  adgroupKeywords: { nccKeywordId: string }[],
-): { weightedAvgRnk: number; impressions: number } | null {
-  let sumWeighted = 0
-  let sumImp = 0
-  for (const k of adgroupKeywords) {
-    const w = weightedMap.get(k.nccKeywordId)
-    if (w == null) continue
-    sumWeighted += w.weightedAvgRnk * w.impressions
-    sumImp += w.impressions
-  }
-  if (sumImp <= 0) return null
-  const weighted = sumWeighted / sumImp
-  if (!Number.isFinite(weighted) || weighted <= 0) return null
-  return { weightedAvgRnk: weighted, impressions: sumImp }
 }
 
 async function processAdgroupRankSuggestions(args: {
@@ -1133,15 +892,12 @@ async function processAdgroupRankSuggestions(args: {
   customerId: string
   targetAvgRank: number | Prisma.Decimal | null
   maxCpc: number | null
-  weightedMap: Map<string, { weightedAvgRnk: number; impressions: number }>
-  cronStartedAt: Date
 }): Promise<AdgroupRankStats> {
   const {
     advertiserId,
     customerId,
     targetAvgRank,
     maxCpc,
-    weightedMap,
   } = args
   const stats: AdgroupRankStats = {
     candidatesScanned: 0,
@@ -1150,8 +906,6 @@ async function processAdgroupRankSuggestions(args: {
     holdNotReached: 0,
     cappedAtMaxCpc: 0,
     estimateFailed: 0,
-    weightedSourceCount: 0,
-    fallbackSourceCount: 0,
     staleDismissed: 0,
   }
 
@@ -1205,9 +959,7 @@ async function processAdgroupRankSuggestions(args: {
   type EnrichedAdgroup = {
     adgroup: (typeof adgroups)[number]
     effectiveRank: number
-    source: "weighted_6h" | "last_non_null"
-    sampleImpressions: number | null
-    /** 대표 키워드 (Estimate 호출 대상). useGroupBidAmt=true 키워드 중 노출 TOP 1. */
+    /** 대표 키워드 (Estimate 호출 대상). useGroupBidAmt=true 키워드 중 첫 키워드. */
     representativeKeyword: (typeof adgroups)[number]["keywords"][number]
     /** useGroupBidAmt=true 키워드 수 (affectedCount). */
     affectedCount: number
@@ -1217,43 +969,21 @@ async function processAdgroupRankSuggestions(args: {
     if (ag.keywords.length === 0) continue
     if (ag.bidAmt == null || ag.bidAmt <= 0) continue
 
-    // -- effectiveRank ------------------------------------------------------
-    const weighted = computeAdgroupWeighted(weightedMap, ag.keywords)
-    let effectiveRank: number
-    let source: "weighted_6h" | "last_non_null"
-    let sampleImpressions: number | null
-    if (weighted != null) {
-      effectiveRank = weighted.weightedAvgRnk
-      source = "weighted_6h"
-      sampleImpressions = weighted.impressions
-    } else {
-      // fallback: last non-null 단순 평균 (impressions 가중 불가 — DB 에 없음).
-      const ranks = ag.keywords
-        .map((k) => (k.recentAvgRnk == null ? null : Number(k.recentAvgRnk)))
-        .filter((r): r is number => r != null && Number.isFinite(r) && r > 0)
-      if (ranks.length === 0) continue
-      effectiveRank = ranks.reduce((s, r) => s + r, 0) / ranks.length
-      source = "last_non_null"
-      sampleImpressions = null
-    }
+    // -- effectiveRank — last non-null Keyword.recentAvgRnk 단순 평균 ---------
+    // (시간대별 순위는 SA 미제공 — 과거 StatHourly 가중평균 경로는 영구 null 이라 제거됨.)
+    const ranks = ag.keywords
+      .map((k) => (k.recentAvgRnk == null ? null : Number(k.recentAvgRnk)))
+      .filter((r): r is number => r != null && Number.isFinite(r) && r > 0)
+    if (ranks.length === 0) continue
+    const effectiveRank = ranks.reduce((s, r) => s + r, 0) / ranks.length
     if (!Number.isFinite(effectiveRank) || effectiveRank <= target) continue
 
-    // -- 대표 키워드 (노출 TOP 1) -------------------------------------------
-    let representative = ag.keywords[0]
-    let bestImp = -1
-    for (const k of ag.keywords) {
-      const w = weightedMap.get(k.nccKeywordId)
-      if (w != null && w.impressions > bestImp) {
-        bestImp = w.impressions
-        representative = k
-      }
-    }
+    // 대표 키워드 = useGroupBidAmt=true 키워드 중 첫 키워드 (Estimate 호출 대상).
+    const representative = ag.keywords[0]
 
     enriched.push({
       adgroup: ag,
       effectiveRank,
-      source,
-      sampleImpressions,
       representativeKeyword: representative,
       affectedCount: ag.keywords.length,
     })
@@ -1264,7 +994,7 @@ async function processAdgroupRankSuggestions(args: {
   const expiresAt = addDays(new Date(), SUGGESTION_TTL_DAYS)
 
   for (const cand of limited) {
-    const { adgroup, effectiveRank, source, sampleImpressions, representativeKeyword, affectedCount } = cand
+    const { adgroup, effectiveRank, representativeKeyword, affectedCount } = cand
     stats.candidatesScanned++
     if (adgroup.bidAmt == null || adgroup.bidAmt <= 0) continue
 
@@ -1307,7 +1037,7 @@ async function processAdgroupRankSuggestions(args: {
     }
 
     // -- 결정 -----------------------------------------------------------------
-    const rankWindowHours = source === "weighted_6h" ? BID_RANK_RECENT_HOURS : null
+    // 가중평균 경로 제거 — rankWindowHours / rankSampleImpressions 은 항상 null.
     const decision = decideAdgroupRankSuggestion({
       adgroup: {
         adgroupId: adgroup.id,
@@ -1319,8 +1049,8 @@ async function processAdgroupRankSuggestions(args: {
       maxCpc,
       estimateRows: estimateRowsPc,
       estimateRowsMobile,
-      rankWindowHours,
-      rankSampleImpressions: sampleImpressions,
+      rankWindowHours: null,
+      rankSampleImpressions: null,
     })
 
     if (decision.decision === "hold") {
@@ -1332,11 +1062,8 @@ async function processAdgroupRankSuggestions(args: {
       continue
     }
 
-    // -- reason suffix (출처 / affectedCount) -------------------------------
-    const reasonWithSource =
-      source === "weighted_6h"
-        ? `${decision.reason} (광고그룹 ${affectedCount}개 키워드 / 최근 ${BID_RANK_RECENT_HOURS}시간 가중평균, 노출 ${(sampleImpressions ?? 0).toLocaleString()}회 기반)`
-        : `${decision.reason} (광고그룹 ${affectedCount}개 키워드 / 최근 1시간 측정값 단순 평균)`
+    // -- reason suffix (affectedCount) --------------------------------------
+    const reason = `${decision.reason} (광고그룹 ${affectedCount}개 키워드 / 최근 1시간 측정값 단순 평균)`
 
     // -- upsert (같은 광고그룹의 같은 kind pending 행만 1개 보장) -------------
     // 묶음 권고 (kind='keyword_bid_bundle') 와 광고그룹 default bid 권고 (kind='adgroup_default_bid_update')
@@ -1361,7 +1088,7 @@ async function processAdgroupRankSuggestions(args: {
       adgroupId: adgroup.id,
       engineSource: "bid" as const,
       action: decision.action as unknown as Prisma.InputJsonValue,
-      reason: reasonWithSource,
+      reason,
       severity: decision.severity,
       status: "pending" as const,
       scope: "adgroup" as const,
@@ -1387,8 +1114,6 @@ async function processAdgroupRankSuggestions(args: {
       await prisma.bidSuggestion.create({ data })
       stats.created++
     }
-    if (source === "weighted_6h") stats.weightedSourceCount++
-    else stats.fallbackSourceCount++
   }
 
   // -- stale 정리 (W4) ------------------------------------------------------
@@ -1421,7 +1146,6 @@ async function processAdgroupRankSuggestions(args: {
 async function processAdvertiser(
   advertiserId: string,
   customerId: string,
-  cronStartedAt: Date,
 ): Promise<AdvertiserStats> {
   const stats: AdvertiserStats = {
     scanned: 0,
@@ -1441,8 +1165,6 @@ async function processAdvertiser(
     rankHoldNotReached: 0,
     rankCappedAtMaxCpc: 0,
     rankEstimateFailed: 0,
-    rankWeightedSourceCount: 0,
-    rankFallbackSourceCount: 0,
     rankStaleDismissed: 0,
     adgroupRankCandidatesScanned: 0,
     adgroupRankCreated: 0,
@@ -1450,8 +1172,6 @@ async function processAdvertiser(
     adgroupRankHoldNotReached: 0,
     adgroupRankCappedAtMaxCpc: 0,
     adgroupRankEstimateFailed: 0,
-    adgroupRankWeightedSourceCount: 0,
-    adgroupRankFallbackSourceCount: 0,
     adgroupRankStaleDismissed: 0,
   }
 
@@ -1583,22 +1303,12 @@ async function processAdvertiser(
   if (top.length === 0) {
     // marginal 흐름 데이터 없음 — bid 엔진은 skip 하지만 rank 단계는 실행.
     // (rank 권고는 StatDaily TOP 의존 X — Keyword.recentAvgRnk 측정값 기반)
-    //
-    // weightedMap 을 한 번 빌드 후 두 rank 함수에 전달 — 같은 광고주의 StatHourly
-    // 가중평균 fetch 가 한 cron 한 번만 발생.
-    const sharedWeightedMap = await loadWeightedRankMap({
-      advertiserId,
-      cronStartedAt,
-      hours: BID_RANK_RECENT_HOURS,
-    })
     const rankStatsOnly = await processRankSuggestions({
       advertiserId,
       customerId,
       targetAvgRank: cfg.targetAvgRank ?? null,
       maxCpc: cfg.maxCpc ?? null,
       policyKeywordIds,
-      cronStartedAt,
-      weightedMap: sharedWeightedMap,
     })
     stats.rankCandidatesScanned += rankStatsOnly.candidatesScanned
     stats.rankCreated += rankStatsOnly.created
@@ -1606,8 +1316,6 @@ async function processAdvertiser(
     stats.rankHoldNotReached += rankStatsOnly.holdNotReached
     stats.rankCappedAtMaxCpc += rankStatsOnly.cappedAtMaxCpc
     stats.rankEstimateFailed += rankStatsOnly.estimateFailed
-    stats.rankWeightedSourceCount += rankStatsOnly.weightedSourceCount
-    stats.rankFallbackSourceCount += rankStatsOnly.fallbackSourceCount
     stats.rankStaleDismissed += rankStatsOnly.staleDismissed
     stats.created += rankStatsOnly.created
     stats.updated += rankStatsOnly.updated
@@ -1618,8 +1326,6 @@ async function processAdvertiser(
       customerId,
       targetAvgRank: cfg.targetAvgRank ?? null,
       maxCpc: cfg.maxCpc ?? null,
-      weightedMap: sharedWeightedMap,
-      cronStartedAt,
     })
     stats.adgroupRankCandidatesScanned += adgroupRankStatsOnly.candidatesScanned
     stats.adgroupRankCreated += adgroupRankStatsOnly.created
@@ -1627,8 +1333,6 @@ async function processAdvertiser(
     stats.adgroupRankHoldNotReached += adgroupRankStatsOnly.holdNotReached
     stats.adgroupRankCappedAtMaxCpc += adgroupRankStatsOnly.cappedAtMaxCpc
     stats.adgroupRankEstimateFailed += adgroupRankStatsOnly.estimateFailed
-    stats.adgroupRankWeightedSourceCount += adgroupRankStatsOnly.weightedSourceCount
-    stats.adgroupRankFallbackSourceCount += adgroupRankStatsOnly.fallbackSourceCount
     stats.adgroupRankStaleDismissed += adgroupRankStatsOnly.staleDismissed
     stats.created += adgroupRankStatsOnly.created
     stats.updated += adgroupRankStatsOnly.updated
@@ -1829,22 +1533,12 @@ async function processAdvertiser(
   // -- m. rank 권고 단계 — 5순위 미달 키워드 인상 권고 -----------------------
   // marginal/budget 흐름 후 별도 스캔. 같은 키워드의 marginal 권고가 있으면
   // rank 결과로 update 덮어쓰기 (사용자 의도: rank 우선).
-  //
-  // weightedMap 을 한 번 빌드 후 두 rank 함수에 전달 — 같은 광고주의 StatHourly
-  // 가중평균 fetch 가 한 cron 한 번만 발생 (Phase 2A 광고그룹 권고 도입에 따른 최적화).
-  const sharedWeightedMap = await loadWeightedRankMap({
-    advertiserId,
-    cronStartedAt,
-    hours: BID_RANK_RECENT_HOURS,
-  })
   const rankStats = await processRankSuggestions({
     advertiserId,
     customerId,
     targetAvgRank: cfg.targetAvgRank ?? null,
     maxCpc: cfg.maxCpc ?? null,
     policyKeywordIds,
-    cronStartedAt,
-    weightedMap: sharedWeightedMap,
   })
   stats.rankCandidatesScanned += rankStats.candidatesScanned
   stats.rankCreated += rankStats.created
@@ -1852,8 +1546,6 @@ async function processAdvertiser(
   stats.rankHoldNotReached += rankStats.holdNotReached
   stats.rankCappedAtMaxCpc += rankStats.cappedAtMaxCpc
   stats.rankEstimateFailed += rankStats.estimateFailed
-  stats.rankWeightedSourceCount += rankStats.weightedSourceCount
-  stats.rankFallbackSourceCount += rankStats.fallbackSourceCount
   stats.rankStaleDismissed += rankStats.staleDismissed
   // 응답 호환 — 기존 created/updated 누적에도 합산.
   stats.created += rankStats.created
@@ -1867,8 +1559,6 @@ async function processAdvertiser(
     customerId,
     targetAvgRank: cfg.targetAvgRank ?? null,
     maxCpc: cfg.maxCpc ?? null,
-    weightedMap: sharedWeightedMap,
-    cronStartedAt,
   })
   stats.adgroupRankCandidatesScanned += adgroupRankStats.candidatesScanned
   stats.adgroupRankCreated += adgroupRankStats.created
@@ -1876,8 +1566,6 @@ async function processAdvertiser(
   stats.adgroupRankHoldNotReached += adgroupRankStats.holdNotReached
   stats.adgroupRankCappedAtMaxCpc += adgroupRankStats.cappedAtMaxCpc
   stats.adgroupRankEstimateFailed += adgroupRankStats.estimateFailed
-  stats.adgroupRankWeightedSourceCount += adgroupRankStats.weightedSourceCount
-  stats.adgroupRankFallbackSourceCount += adgroupRankStats.fallbackSourceCount
   stats.adgroupRankStaleDismissed += adgroupRankStats.staleDismissed
   stats.created += adgroupRankStats.created
   stats.updated += adgroupRankStats.updated
@@ -1919,8 +1607,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
         rankHoldNotReached: 0,
         rankCappedAtMaxCpc: 0,
         rankEstimateFailed: 0,
-        rankWeightedSourceCount: 0,
-        rankFallbackSourceCount: 0,
         rankStaleDismissed: 0,
         adgroupRankCandidatesScanned: 0,
         adgroupRankCreated: 0,
@@ -1928,8 +1614,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
         adgroupRankHoldNotReached: 0,
         adgroupRankCappedAtMaxCpc: 0,
         adgroupRankEstimateFailed: 0,
-        adgroupRankWeightedSourceCount: 0,
-        adgroupRankFallbackSourceCount: 0,
         adgroupRankStaleDismissed: 0,
         ts,
         errors: [],
@@ -1940,8 +1624,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   }
 
   // -- 2. 활성 광고주 (mode='off' 제외 — config 없으면 default inbox 처리) ---
+  // biddingKillSwitch=true 광고주는 SQL 단계에서 사전 제외 (긴급 정지 오버라이드).
+  // auto-bidding cron 과 동일 시맨틱 — 켜지면 rank/marginal/budget/targeting 모든 엔진의
+  // 권고 생성이 중단된다 (폭주 방지). mode 게이트와 독립: mode=평상시 on/off, killSwitch=긴급 정지.
   const advertisers = await prisma.advertiser.findMany({
-    where: { status: "active" },
+    where: { status: "active", biddingKillSwitch: false },
     select: {
       id: true,
       name: true,
@@ -1950,6 +1637,15 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     },
     orderBy: { id: "asc" },
   })
+  // kill switch 로 사전 제외된 활성 광고주 수 — 운영 가시성 로그 (권고 0 보장).
+  const killSwitchedCount = await prisma.advertiser.count({
+    where: { status: "active", biddingKillSwitch: true },
+  })
+  if (killSwitchedCount > 0) {
+    console.log(
+      `[cron/bid-suggest] biddingKillSwitch 로 ${killSwitchedCount}개 광고주 권고 생성 스킵`,
+    )
+  }
   // config 없거나 mode='off' 광고주 사전 제외 — processAdvertiser 가 한 번 더 가드.
   const eligible = advertisers.filter(
     (a) =>
@@ -1981,8 +1677,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   let rankHoldNotReached = 0
   let rankCappedAtMaxCpc = 0
   let rankEstimateFailed = 0
-  let rankWeightedSourceCount = 0
-  let rankFallbackSourceCount = 0
   let rankStaleDismissed = 0
   let adgroupRankCandidatesScanned = 0
   let adgroupRankCreated = 0
@@ -1990,14 +1684,12 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   let adgroupRankHoldNotReached = 0
   let adgroupRankCappedAtMaxCpc = 0
   let adgroupRankEstimateFailed = 0
-  let adgroupRankWeightedSourceCount = 0
-  let adgroupRankFallbackSourceCount = 0
   let adgroupRankStaleDismissed = 0
   const errors: CronError[] = []
 
   for (const adv of eligible) {
     try {
-      const r = await processAdvertiser(adv.id, adv.customerId, cronStartedAt)
+      const r = await processAdvertiser(adv.id, adv.customerId)
       keywordsScanned += r.scanned
       budgetCampaignsScanned += r.budgetScanned
       suggestionsCreated += r.created
@@ -2014,8 +1706,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       rankHoldNotReached += r.rankHoldNotReached
       rankCappedAtMaxCpc += r.rankCappedAtMaxCpc
       rankEstimateFailed += r.rankEstimateFailed
-      rankWeightedSourceCount += r.rankWeightedSourceCount
-      rankFallbackSourceCount += r.rankFallbackSourceCount
       rankStaleDismissed += r.rankStaleDismissed
       adgroupRankCandidatesScanned += r.adgroupRankCandidatesScanned
       adgroupRankCreated += r.adgroupRankCreated
@@ -2023,8 +1713,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
       adgroupRankHoldNotReached += r.adgroupRankHoldNotReached
       adgroupRankCappedAtMaxCpc += r.adgroupRankCappedAtMaxCpc
       adgroupRankEstimateFailed += r.adgroupRankEstimateFailed
-      adgroupRankWeightedSourceCount += r.adgroupRankWeightedSourceCount
-      adgroupRankFallbackSourceCount += r.adgroupRankFallbackSourceCount
       adgroupRankStaleDismissed += r.adgroupRankStaleDismissed
       if (r.stale) advertisersStale++
       else if (
@@ -2079,8 +1767,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     rankHoldNotReached,
     rankCappedAtMaxCpc,
     rankEstimateFailed,
-    rankWeightedSourceCount,
-    rankFallbackSourceCount,
     rankStaleDismissed,
     adgroupRankCandidatesScanned,
     adgroupRankCreated,
@@ -2088,8 +1774,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
     adgroupRankHoldNotReached,
     adgroupRankCappedAtMaxCpc,
     adgroupRankEstimateFailed,
-    adgroupRankWeightedSourceCount,
-    adgroupRankFallbackSourceCount,
     adgroupRankStaleDismissed,
     ts,
     errors,

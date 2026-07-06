@@ -136,7 +136,7 @@ export function pickLevel(
  * StatsRow + 컨텍스트 → StatHourly upsert payload.
  *
  * device='ALL' 단일 (본 PR). impressions/clicks/cost 는 number → Int/Decimal.
- * recentAvgRnk: number → Decimal, null → null (Decimal? 컬럼).
+ * (시간대별 recentAvgRnk 는 SA 미제공 — StatHourly 컬럼 제거됨.)
  *
  * 반환 null = level 결정 불가 / row.id 누락 → 호출부 skip.
  */
@@ -158,8 +158,6 @@ export function toUpsertInput(args: {
   const impressions = numOr0(args.row.impCnt)
   const clicks = numOr0(args.row.clkCnt)
   const cost = numOr0(args.row.salesAmt)
-  const recentAvgRnk =
-    args.row.recentAvgRnk == null ? null : Number(args.row.recentAvgRnk)
 
   return {
     where: {
@@ -182,7 +180,6 @@ export function toUpsertInput(args: {
       impressions,
       clicks,
       cost,
-      recentAvgRnk,
     },
     update: {
       // 매시간 재방문 시 최신 값으로 덮어쓰기 (idempotent)
@@ -190,7 +187,6 @@ export function toUpsertInput(args: {
       impressions,
       clicks,
       cost,
-      recentAvgRnk,
     },
   }
 }
@@ -371,7 +367,7 @@ export async function ingestAdvertiserStatHourly(
     // impCnt, salesAmt }, ...]` 배열로 시간별 분해를 제공. 각 breakdown 의 라벨 시간이
     // 직전 정시(hour) 와 일치하는 항목만 추출 → StatHourly upsert.
     //
-    // breakdown 항목에 recentAvgRnk 는 없음 — null 로 둔다 (시간대별 순위는 SA 미제공).
+    // breakdown 항목에 시간대별 순위는 없음 (SA 미제공) — StatHourly 는 노출/클릭/비용만 적재.
     // 다른 시간대 항목은 매시간 cron 다음 사이클이 자기 시간 슬롯을 채움.
     const inputs: Array<NonNullable<ReturnType<typeof toUpsertInput>>> = []
     for (const row of rows) {
@@ -393,7 +389,6 @@ export async function ingestAdvertiserStatHourly(
           impCnt: typeof b.impCnt === "number" ? b.impCnt : 0,
           clkCnt: typeof b.clkCnt === "number" ? b.clkCnt : 0,
           salesAmt: typeof b.salesAmt === "number" ? b.salesAmt : 0,
-          recentAvgRnk: null, // 시간대별 순위 SA 미제공
         }
         const inp = toUpsertInput({
           advertiserId,

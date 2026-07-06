@@ -607,8 +607,8 @@ model StatHourly {
   impressions  Int        @default(0)
   clicks       Int        @default(0)
   cost         Decimal    @default(0) @db.Decimal(14, 2)
-  // F-9.4 1시간 주기 갱신 입력 (Keyword.recentAvgRnk 갱신 원천 — keyword level 행 한정)
-  recentAvgRnk Decimal?   @db.Decimal(5, 2)
+  // 시간대별 노출 순위는 네이버 SA 미제공(Issue #947) → 항상 null 이던 recentAvgRnk 컬럼 제거.
+  // Keyword.recentAvgRnk(일별 fallback)만 rank 권고 원천으로 사용.
   // 매출/전환 / raw 는 본 PR 비포함 — 시간별 매출 조인은 P2 후속 결정
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt

@@ -11,7 +11,7 @@
  * - 캠페인 N개 선택 → `syncAdgroups(advertiserId, { campaignIds })` 로 부분 동기화
  * - 응답: { ok: true; synced; skipped; durationMs } | { ok: false; error }
  *
- * 키 미설정(`hasKeys=false`) → 비활성화 + 안내 tooltip (sync-adgroups-button 동일).
+ * 키 미설정(`hasKeys=false`) → 비활성화 + 안내 tooltip.
  *
  * UX 디테일 (extensions 와 동일):
  * - 캠페인 1개뿐 → multi-select 표시 안 하고 일반 sync 버튼
@@ -19,7 +19,7 @@
  * - 캠페인 ≥ 10 → 검색 input 노출
  * - 모바일(<sm) → Popover/Dropdown 대신 Dialog 사용
  *
- * 본 컴포넌트는 AdgroupsPage 만 사용. sync-adgroups-button.tsx 는 무변경 (다른 페이지 영향 X).
+ * 본 컴포넌트는 AdgroupsPage 만 사용.
  *
  * SPEC 6.2 F-2.2 / 11.2.
  */

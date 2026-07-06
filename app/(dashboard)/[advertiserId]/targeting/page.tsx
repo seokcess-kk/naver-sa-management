@@ -91,13 +91,13 @@ export default async function TargetingPage({
             <p className="font-medium text-foreground">사용 방법</p>
             <p className="mt-1.5 leading-relaxed">
               7×24 시간 가중치, 디바이스 가중치, 지역 가중치를 룰로 등록하면
-              자동 입찰가 계산에 반영됩니다. 본 페이지의 변경은 자동 비딩이 켜진
-              키워드에만 영향을 미칩니다.
+              입찰가 조정 권고 계산에 반영됩니다. 본 페이지의 변경은 자동 비딩이
+              켜진 키워드의 권고에만 영향을 미칩니다.
             </p>
             <p className="mt-2 font-medium text-foreground">적용 흐름</p>
             <p className="mt-1.5 leading-relaxed">
-              매시간 자동 입찰가 계산 시 <strong>기본 입찰가 × 시간대 가중치
-              × 디바이스 가중치</strong> 로 곱해 적용됩니다. 룰을 비활성화하면
+              입찰가 조정 권고 계산 시 <strong>기본 입찰가 × 시간대 가중치
+              × 디바이스 가중치</strong> 로 곱해 반영됩니다. 룰을 비활성화하면
               가중치 1.0 (효과 없음), 빈 셀은 기본 가중치가 적용됩니다.
             </p>
           </>

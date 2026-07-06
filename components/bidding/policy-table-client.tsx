@@ -161,7 +161,7 @@ export function PolicyTableClient({
           <p className="text-sm font-medium">아직 비딩 정책이 없습니다</p>
           <p className="mt-1 text-xs text-muted-foreground">
             키워드를 선택해 PC / 모바일 별 목표 노출 순위 정책을 추가하세요.
-            매시간 자동으로 입찰가가 조정됩니다.
+            최근 평균순위와 Estimate 추정 기반 입찰 조정 권고가 생성됩니다.
           </p>
           {canMutate && (
             <div className="mt-4">
@@ -275,7 +275,7 @@ export function PolicyTableClient({
           <DialogHeader>
             <DialogTitle>정책 삭제</DialogTitle>
             <DialogDescription>
-              이 정책을 삭제하면 해당 키워드의 자동 조정 대상에서 제외됩니다.
+              이 정책을 삭제하면 해당 키워드의 권고 생성 대상에서 제외됩니다.
               과거 OptimizationRun 로그는 보존됩니다 (감사용).
             </DialogDescription>
           </DialogHeader>

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const mockAdvertiserFindMany = vi.fn()
 const mockAdvertiserFindUnique = vi.fn()
+const mockAdvertiserCount = vi.fn()
 const mockBidAutomationConfigFindUnique = vi.fn()
 const mockKeywordPerformanceProfileFindUnique = vi.fn()
 const mockBiddingPolicyFindMany = vi.fn()
@@ -30,6 +31,7 @@ vi.mock("@/lib/db/prisma", () => ({
     advertiser: {
       findMany: (...args: unknown[]) => mockAdvertiserFindMany(...args),
       findUnique: (...args: unknown[]) => mockAdvertiserFindUnique(...args),
+      count: (...args: unknown[]) => mockAdvertiserCount(...args),
     },
     bidAutomationConfig: {
       findUnique: (...args: unknown[]) =>
@@ -124,6 +126,8 @@ beforeEach(() => {
       bidAutomationConfig: { mode: "inbox" },
     },
   ])
+  // 기본: kill switch 로 제외된 광고주 0 (kill switch describe 에서 override).
+  mockAdvertiserCount.mockResolvedValue(0)
   mockBidAutomationConfigFindUnique.mockResolvedValue({
     mode: "inbox",
     budgetPacingMode: "focus",
@@ -177,8 +181,8 @@ beforeEach(() => {
   })
   // rank 단계 — 기본 후보 0건 (rank describe 블록에서 override).
   mockGetCachedAveragePositionBid.mockResolvedValue({ data: [], cachedAll: false })
-  // StatHourly 6h 가중평균 — 기본 0행 (rank describe 블록에서 override).
-  // weightedMap 비어 있음 → 모든 후보가 last_non_null fallback (기존 6개 케이스 호환).
+  // StatHourly.findMany 는 rank 경로에서 더 이상 호출되지 않음 (시간대별 순위 SA 미제공).
+  // 레거시 mock 하네스 유지 — 호출되지 않는 no-op (다른 코드가 statHourly 를 쓸 때 대비).
   mockStatHourlyFindMany.mockResolvedValue([])
   // 광고그룹 단위 rank 권고 (Phase 2A) — 기본 후보 0건 (adgroup 권고 describe 에서 override).
   mockAdGroupFindMany.mockResolvedValue([])
@@ -229,6 +233,48 @@ describe("cron bid-suggest — budget suggestions", () => {
       where: { id: "s_existing", status: "pending" },
       data: { status: "dismissed" },
     })
+  })
+})
+
+// =============================================================================
+// biddingKillSwitch — 긴급 정지 오버라이드 (SQL 단계 사전 제외)
+// =============================================================================
+//
+// auto-bidding cron 무해화 후 bid-suggest 가 Kill Switch 의 유일 실소비처.
+// mode!=='off' 여도 biddingKillSwitch=true 광고주는 활성 광고주 조회 where 에서 제외되어
+// rank/marginal/budget/targeting 어떤 엔진도 권고를 생성하지 않는다 (긴급 정지의 의미).
+
+describe("cron bid-suggest — biddingKillSwitch 긴급 정지", () => {
+  it("활성 광고주 조회 where 에 biddingKillSwitch:false 포함 (SQL 단계 사전 제외)", async () => {
+    await GET(makeReq("Bearer test-secret") as never)
+
+    expect(mockAdvertiserFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          status: "active",
+          biddingKillSwitch: false,
+        }),
+      }),
+    )
+  })
+
+  it("mode!=='off' 이지만 killSwitch=true → SQL 제외 → 어떤 BidSuggestion 도 upsert 0", async () => {
+    // SQL where(biddingKillSwitch:false) 가 kill switch 광고주를 제외 → findMany 결과 비어 있음.
+    // (활성 광고주가 kill switch 켜진 1명뿐이라고 가정.)
+    mockAdvertiserFindMany.mockResolvedValue([])
+    mockAdvertiserCount.mockResolvedValue(1)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    // 처리 대상 0 — 전부 kill switch 로 제외.
+    expect(body.advertisersTotal).toBe(0)
+    // 어떤 엔진도 권고를 생성/수정하지 않음.
+    expect(mockBidSuggestionCreate).not.toHaveBeenCalled()
+    expect(mockBidSuggestionUpdate).not.toHaveBeenCalled()
+    // processAdvertiser 진입 자체가 없어야 함 (config 로드도 호출 X).
+    expect(mockBidAutomationConfigFindUnique).not.toHaveBeenCalled()
   })
 })
 
@@ -765,7 +811,7 @@ describe("cron bid-suggest — bid_suggestion_new dispatch", () => {
 // keyword.findMany mock 이 호출 횟수 / where 인자에 따라 다른 결과를 반환하도록 분기.
 //
 // rank 단계 keyword.findMany 식별:
-//   - where.OR (last non-null > target / weightedMissedNccIds 분기)
+//   - where.recentAvgRnk ({ not: null, gt: target } — 일별 측정값 기준)
 //   - select.adgroup.select.campaign 정의됨 (광고주 횡단 차단용)
 //
 // marginal 단계 keyword.findMany 식별:
@@ -789,8 +835,8 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
   it("후보 0건 → 통계 0 (no-op)", async () => {
     // rank findMany 호출에도 후보 0건.
     mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
+      (args: { where?: { recentAvgRnk?: unknown } }) => {
+        if (args?.where?.recentAvgRnk) {
           return Promise.resolve([])
         }
         return Promise.resolve([])
@@ -814,8 +860,8 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
   it("후보 1건 + Estimate 정상 → BidSuggestion create + rankCreated=1", async () => {
     // rank 후보 1건 — recentAvgRnk=8 (target=5 초과), bidAmt=500.
     mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
+      (args: { where?: { recentAvgRnk?: unknown } }) => {
+        if (args?.where?.recentAvgRnk) {
           return Promise.resolve([
             {
               id: "kw_rank_1",
@@ -892,7 +938,7 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
     expect(arg.data.action.currentBid).toBe(500)
     expect(arg.data.action.suggestedBid).toBe(1500)
     expect(arg.data.severity).toBe("info")
-    // 신규 필드 — StatHourly 6h 가중평균 mock 0행(default) → fallback 경로.
+    // 시간대별 가중평균 경로 제거 — rankWindowHours / rankSampleImpressions 은 항상 null.
     expect(arg.data.action.rankWindowHours).toBeNull()
     expect(arg.data.action.rankSampleImpressions).toBeNull()
     // reason 본문 fallback suffix.
@@ -901,8 +947,8 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
 
   it("Estimate < currentBid → hold (rankHoldNotReached=1, create 호출 X)", async () => {
     mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
+      (args: { where?: { recentAvgRnk?: unknown } }) => {
+        if (args?.where?.recentAvgRnk) {
           return Promise.resolve([
             {
               id: "kw_rank_2",
@@ -950,8 +996,8 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
 
   it("Estimate throw → rankEstimateFailed=1 (cron 진행 계속)", async () => {
     mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
+      (args: { where?: { recentAvgRnk?: unknown } }) => {
+        if (args?.where?.recentAvgRnk) {
           return Promise.resolve([
             {
               id: "kw_rank_3",
@@ -988,8 +1034,8 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
 
   it("기존 marginal pending 권고 있는 키워드 → rank 결과로 update 덮어쓰기 (rankUpdated=1)", async () => {
     mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
+      (args: { where?: { recentAvgRnk?: unknown } }) => {
+        if (args?.where?.recentAvgRnk) {
           return Promise.resolve([
             {
               id: "kw_rank_4",
@@ -1052,8 +1098,8 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
   it("BiddingPolicy 등록 키워드 (자동 실행 대상) → rank 단계 제외", async () => {
     mockBiddingPolicyFindMany.mockResolvedValue([{ keywordId: "kw_rank_5" }])
     mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
+      (args: { where?: { recentAvgRnk?: unknown } }) => {
+        if (args?.where?.recentAvgRnk) {
           return Promise.resolve([
             {
               id: "kw_rank_5", // policy 등록됨
@@ -1084,21 +1130,14 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
 })
 
 // =============================================================================
-// rank 권고 단계 — StatHourly 6h 노출 가중평균 보정 (신규 5개 케이스)
+// rank 권고 단계 — stale 정리 (W4)
 // =============================================================================
 //
-// 정책:
-//   - last non-null `Keyword.recentAvgRnk` 만 보면 단일 시간 노이즈가 그대로 권고에 반영됨.
-//   - StatHourly 최근 6시간 (impressions × recentAvgRnk) / Σimpressions 가중평균이 더 안정.
-//   - 가중평균이 target 미달인 키워드도 OR 조건으로 후보 진입 (last non-null 도달이어도).
-//   - 가중평균 행이 없는 키워드 (노출 0 / NULL) 는 last non-null fallback.
-//   - action.rankWindowHours / rankSampleImpressions + reason 본문 출처 suffix.
-//
-// mock 식별:
-//   - mockStatHourlyFindMany 가 광고주 keyword level 6h 행을 반환.
-//   - refId === Keyword.nccKeywordId 매칭 (loadWeightedRankMap 의 accum key).
+// 시간대별 순위는 SA 미제공 → 과거 StatHourly 6h 가중평균 경로는 제거됨.
+// rank 권고는 Keyword.recentAvgRnk (일별 측정값) 기준으로만 계산.
+// 본 블록은 후보에서 빠진 키워드의 below_target_rank pending dismiss (stale 정리) 검증.
 
-describe("cron bid-suggest — rank suggestions (StatHourly 6h 가중평균)", () => {
+describe("cron bid-suggest — rank suggestions (stale 정리)", () => {
   beforeEach(() => {
     mockKeywordPerformanceProfileFindUnique.mockResolvedValue({
       dataDays: 28,
@@ -1110,294 +1149,12 @@ describe("cron bid-suggest — rank suggestions (StatHourly 6h 가중평균)", (
     mockStatDailyGroupBy.mockImplementation(() => Promise.resolve([]))
   })
 
-  it("가중평균이 target 이하 → effectiveRank 컷 → 권고 0 (false positive 제거)", async () => {
-    // 후보: last non-null=8 (target=5 초과 → SQL 통과)
-    mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
-          return Promise.resolve([
-            {
-              id: "kw_w_1",
-              nccKeywordId: "ncc_kw_w_1",
-              keyword: "신발",
-              bidAmt: 500,
-              recentAvgRnk: 8,
-              adgroup: {
-                id: "ag_1",
-                name: "광고그룹 A",
-                campaign: { advertiserId: "adv_1" },
-              },
-            },
-          ])
-        }
-        return Promise.resolve([])
-      },
-    )
-    // StatHourly 6h: impressions 10000 × rnk 4.5 → weighted=4.5 ≤ target=5
-    mockStatHourlyFindMany.mockResolvedValue([
-      { refId: "ncc_kw_w_1", impressions: 10000, recentAvgRnk: 4.5 },
-    ])
-
-    const res = await GET(makeReq("Bearer test-secret") as never)
-    const body = await res.json()
-    expect(body.ok).toBe(true)
-    // SQL 후보로는 1건 진입했지만 메모리에서 effectiveRank 컷 → candidatesScanned 0.
-    expect(body.rankCandidatesScanned).toBe(0)
-    expect(body.rankCreated).toBe(0)
-    // Estimate 호출도 안 됨 (effectiveRank 컷이 Estimate 전).
-    expect(mockGetCachedAveragePositionBid).not.toHaveBeenCalled()
-  })
-
-  it("가중평균 미달 + last non-null 미달 → suggest. action.rankWindowHours=6 + weighted 카운트", async () => {
-    mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
-          return Promise.resolve([
-            {
-              id: "kw_w_2",
-              nccKeywordId: "ncc_kw_w_2",
-              keyword: "신발",
-              bidAmt: 500,
-              recentAvgRnk: 8, // last non-null 도 미달
-              adgroup: {
-                id: "ag_1",
-                name: "광고그룹 A",
-                campaign: { advertiserId: "adv_1" },
-              },
-            },
-          ])
-        }
-        return Promise.resolve([])
-      },
-    )
-    // 가중평균 = (10000*7 + 5000*9) / 15000 = (70000+45000)/15000 = 7.6666
-    mockStatHourlyFindMany.mockResolvedValue([
-      { refId: "ncc_kw_w_2", impressions: 10000, recentAvgRnk: 7 },
-      { refId: "ncc_kw_w_2", impressions: 5000, recentAvgRnk: 9 },
-    ])
-    mockGetCachedAveragePositionBid.mockResolvedValue({
-      data: [
-        { keyword: "신발", position: 1, bid: 3000 },
-        { keyword: "신발", position: 2, bid: 2500 },
-        { keyword: "신발", position: 3, bid: 2000 },
-        { keyword: "신발", position: 4, bid: 1700 },
-        { keyword: "신발", position: 5, bid: 1500 },
-      ],
-      cachedAll: false,
-    })
-
-    const res = await GET(makeReq("Bearer test-secret") as never)
-    const body = await res.json()
-    expect(body.ok).toBe(true)
-    expect(body.rankCandidatesScanned).toBe(1)
-    expect(body.rankCreated).toBe(1)
-    expect(body.rankWeightedSourceCount).toBe(1)
-    expect(body.rankFallbackSourceCount).toBe(0)
-
-    // W1 — StatHourly findMany where 절에 device='ALL' 명시 (lib/stat-hourly/ingest.ts
-    // 의 단일 적재 정책 고정). 향후 PC/MOBILE 분리 적재 도입 시 device 필터 누락으로
-    // 인한 가중평균 왜곡(impressions ~3배 부풀림) 방지.
-    expect(mockStatHourlyFindMany).toHaveBeenCalled()
-    const statHourlyCallArgs = mockStatHourlyFindMany.mock.calls[0][0]
-    expect(statHourlyCallArgs.where.device).toBe("ALL")
-    expect(statHourlyCallArgs.where.level).toBe("keyword")
-
-    // BidSuggestion.create payload — action 필드 검증.
-    const rankCreates = mockBidSuggestionCreate.mock.calls.filter(
-      (c) =>
-        c[0].data.engineSource === "bid" &&
-        c[0].data.keywordId === "kw_w_2",
-    )
-    expect(rankCreates).toHaveLength(1)
-    const arg = rankCreates[0][0]
-    expect(arg.data.action.rankWindowHours).toBe(6)
-    expect(arg.data.action.rankSampleImpressions).toBe(15000)
-    // currentAvgRank 는 effectiveRank (가중평균) — last non-null 8 이 아닌 ~7.67.
-    expect(arg.data.action.currentAvgRank).toBeCloseTo(7.6666, 2)
-    // reason 본문 출처 suffix.
-    expect(arg.data.reason).toContain("최근 6시간 가중평균")
-    expect(arg.data.reason).toContain("15,000")
-  })
-
-  it("StatHourly 데이터 없음(노출 0) → fallback. action.rankWindowHours=null + fallback 카운트", async () => {
-    mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
-          return Promise.resolve([
-            {
-              id: "kw_w_3",
-              nccKeywordId: "ncc_kw_w_3",
-              keyword: "운동화",
-              bidAmt: 500,
-              recentAvgRnk: 8,
-              adgroup: {
-                id: "ag_1",
-                name: "광고그룹 A",
-                campaign: { advertiserId: "adv_1" },
-              },
-            },
-          ])
-        }
-        return Promise.resolve([])
-      },
-    )
-    // 가중평균 행 없음 — fallback 경로.
-    mockStatHourlyFindMany.mockResolvedValue([])
-    mockGetCachedAveragePositionBid.mockResolvedValue({
-      data: [
-        { keyword: "운동화", position: 1, bid: 3000 },
-        { keyword: "운동화", position: 2, bid: 2500 },
-        { keyword: "운동화", position: 3, bid: 2000 },
-        { keyword: "운동화", position: 4, bid: 1700 },
-        { keyword: "운동화", position: 5, bid: 1500 },
-      ],
-      cachedAll: false,
-    })
-
-    const res = await GET(makeReq("Bearer test-secret") as never)
-    const body = await res.json()
-    expect(body.ok).toBe(true)
-    expect(body.rankCreated).toBe(1)
-    expect(body.rankWeightedSourceCount).toBe(0)
-    expect(body.rankFallbackSourceCount).toBe(1)
-
-    const rankCreates = mockBidSuggestionCreate.mock.calls.filter(
-      (c) =>
-        c[0].data.engineSource === "bid" &&
-        c[0].data.keywordId === "kw_w_3",
-    )
-    expect(rankCreates).toHaveLength(1)
-    const arg = rankCreates[0][0]
-    expect(arg.data.action.rankWindowHours).toBeNull()
-    expect(arg.data.action.rankSampleImpressions).toBeNull()
-    expect(arg.data.action.currentAvgRank).toBe(8)
-    expect(arg.data.reason).toContain("최근 1시간 측정값")
-  })
-
-  it("가중평균만 미달 (last non-null 도달) → OR 후보 진입 후 권고 적재", async () => {
-    // last non-null=4 (target=5 도달 — 기존 SQL 만으로는 후보 제외)
-    // 가중평균=7 (target=5 초과 — OR 분기로 진입)
-    mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown; nccKeywordId?: unknown } }) => {
-        if (args?.where?.OR) {
-          // SQL 결과: weightedMissedNccIds OR 분기로 후보 진입.
-          return Promise.resolve([
-            {
-              id: "kw_w_4",
-              nccKeywordId: "ncc_kw_w_4",
-              keyword: "가방",
-              bidAmt: 500,
-              recentAvgRnk: 4, // last non-null 은 도달
-              adgroup: {
-                id: "ag_1",
-                name: "광고그룹 A",
-                campaign: { advertiserId: "adv_1" },
-              },
-            },
-          ])
-        }
-        return Promise.resolve([])
-      },
-    )
-    // 가중평균 = 7 — target 5 초과 → weightedMissedNccIds 진입.
-    mockStatHourlyFindMany.mockResolvedValue([
-      { refId: "ncc_kw_w_4", impressions: 8000, recentAvgRnk: 7 },
-    ])
-    mockGetCachedAveragePositionBid.mockResolvedValue({
-      data: [
-        { keyword: "가방", position: 1, bid: 3000 },
-        { keyword: "가방", position: 2, bid: 2500 },
-        { keyword: "가방", position: 3, bid: 2000 },
-        { keyword: "가방", position: 4, bid: 1700 },
-        { keyword: "가방", position: 5, bid: 1500 },
-      ],
-      cachedAll: false,
-    })
-
-    const res = await GET(makeReq("Bearer test-secret") as never)
-    const body = await res.json()
-    expect(body.ok).toBe(true)
-    expect(body.rankCreated).toBe(1)
-    expect(body.rankWeightedSourceCount).toBe(1)
-
-    // SQL 호출의 where.OR 안에 weightedMissedNccIds 분기 포함됐는지 검증.
-    const rankCalls = mockKeywordFindMany.mock.calls.filter(
-      (c) => (c[0] as { where?: { OR?: unknown } })?.where?.OR,
-    )
-    expect(rankCalls.length).toBeGreaterThan(0)
-    const orArg = (rankCalls[0][0] as { where: { OR: unknown[] } }).where.OR
-    expect(Array.isArray(orArg)).toBe(true)
-    // weightedMissedNccIds 분기 — { nccKeywordId: { in: [...] } }
-    const hasWeightedBranch = (orArg as Array<Record<string, unknown>>).some(
-      (b) =>
-        typeof b.nccKeywordId === "object" &&
-        b.nccKeywordId !== null &&
-        Array.isArray((b.nccKeywordId as { in?: unknown }).in) &&
-        ((b.nccKeywordId as { in: string[] }).in).includes("ncc_kw_w_4"),
-    )
-    expect(hasWeightedBranch).toBe(true)
-  })
-
-  it("StatHourly 가중평균 행이 NULL only (impressions=0 / NULL) → fallback", async () => {
-    // 모든 행이 가중평균 비대상 — impressions=0 또는 recentAvgRnk=NULL.
-    mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
-          return Promise.resolve([
-            {
-              id: "kw_w_5",
-              nccKeywordId: "ncc_kw_w_5",
-              keyword: "신발",
-              bidAmt: 500,
-              recentAvgRnk: 8,
-              adgroup: {
-                id: "ag_1",
-                name: "광고그룹 A",
-                campaign: { advertiserId: "adv_1" },
-              },
-            },
-          ])
-        }
-        return Promise.resolve([])
-      },
-    )
-    mockStatHourlyFindMany.mockResolvedValue([
-      // impressions=0 → 가중평균 비대상.
-      { refId: "ncc_kw_w_5", impressions: 0, recentAvgRnk: 7 },
-      // recentAvgRnk=NULL → 가중평균 비대상.
-      { refId: "ncc_kw_w_5", impressions: 5000, recentAvgRnk: null },
-    ])
-    mockGetCachedAveragePositionBid.mockResolvedValue({
-      data: [
-        { keyword: "신발", position: 1, bid: 3000 },
-        { keyword: "신발", position: 5, bid: 1500 },
-      ],
-      cachedAll: false,
-    })
-
-    const res = await GET(makeReq("Bearer test-secret") as never)
-    const body = await res.json()
-    expect(body.ok).toBe(true)
-    expect(body.rankCreated).toBe(1)
-    expect(body.rankWeightedSourceCount).toBe(0)
-    expect(body.rankFallbackSourceCount).toBe(1)
-
-    const rankCreates = mockBidSuggestionCreate.mock.calls.filter(
-      (c) =>
-        c[0].data.engineSource === "bid" &&
-        c[0].data.keywordId === "kw_w_5",
-    )
-    expect(rankCreates).toHaveLength(1)
-    expect(rankCreates[0][0].data.action.rankWindowHours).toBeNull()
-    expect(rankCreates[0][0].data.action.rankSampleImpressions).toBeNull()
-  })
-
   it("stale 정리 (W4) — 후보 빠진 키워드의 below_target_rank pending dismiss", async () => {
     // 모든 키워드가 5위 도달 → 후보 SQL OR 양쪽 다 매칭 안 됨 → enriched=[].
     // 그럼에도 stale 정리는 실행되어야 함 — handledKeywordIds=[] → 모든 below_target_rank pending dismiss.
     mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
+      (args: { where?: { recentAvgRnk?: unknown } }) => {
+        if (args?.where?.recentAvgRnk) {
           return Promise.resolve([])
         }
         return Promise.resolve([])
@@ -1474,7 +1231,7 @@ describe("cron bid-suggest — adgroup rank suggestions (Phase 2A)", () => {
     expect(mockGetCachedAveragePositionBid).not.toHaveBeenCalled()
   })
 
-  it("광고그룹 가중평균 미달 → suggest, scope='adgroup', kind='adgroup_default_bid_update'", async () => {
+  it("광고그룹 평균 순위 미달 → suggest, scope='adgroup', kind='adgroup_default_bid_update'", async () => {
     mockAdGroupFindMany.mockResolvedValue([
       {
         id: "ag_a",
@@ -1487,12 +1244,8 @@ describe("cron bid-suggest — adgroup rank suggestions (Phase 2A)", () => {
         ],
       },
     ])
-    // 가중평균 산출 — kw_a1: imp 10000 × rnk 8, kw_a2: imp 5000 × rnk 7
-    // 광고그룹 = (10000*8 + 5000*7) / 15000 = (80000+35000)/15000 = 7.6666
-    mockStatHourlyFindMany.mockResolvedValue([
-      { refId: "ncc_kw_a1", impressions: 10000, recentAvgRnk: 8 },
-      { refId: "ncc_kw_a2", impressions: 5000, recentAvgRnk: 7 },
-    ])
+    // effectiveRank = last non-null 단순 평균 (8+7)/2 = 7.5 > target=5.
+    // 대표 키워드 = 첫 키워드 kw_a1 "신발".
     mockGetCachedAveragePositionBid.mockResolvedValue({
       data: [
         { keyword: "신발", position: 1, bid: 3000 },
@@ -1509,8 +1262,6 @@ describe("cron bid-suggest — adgroup rank suggestions (Phase 2A)", () => {
     expect(body.ok).toBe(true)
     expect(body.adgroupRankCandidatesScanned).toBe(1)
     expect(body.adgroupRankCreated).toBe(1)
-    expect(body.adgroupRankWeightedSourceCount).toBe(1)
-    expect(body.adgroupRankFallbackSourceCount).toBe(0)
 
     // BidSuggestion.create payload — scope='adgroup', kind='adgroup_default_bid_update'.
     const adgroupCreates = mockBidSuggestionCreate.mock.calls.filter(
@@ -1533,66 +1284,14 @@ describe("cron bid-suggest — adgroup rank suggestions (Phase 2A)", () => {
     expect(arg.data.action.direction).toBe("up")
     expect(arg.data.action.currentBid).toBe(500)
     expect(arg.data.action.suggestedBid).toBe(1500)
-    expect(arg.data.action.rankWindowHours).toBe(6)
-    expect(arg.data.action.rankSampleImpressions).toBe(15000)
-    expect(arg.data.action.currentAvgRank).toBeCloseTo(7.6666, 2)
+    // 가중평균 경로 제거 — rankWindowHours / rankSampleImpressions 은 항상 null.
+    expect(arg.data.action.rankWindowHours).toBeNull()
+    expect(arg.data.action.rankSampleImpressions).toBeNull()
+    // last non-null 단순 평균 (8+7)/2 = 7.5.
+    expect(arg.data.action.currentAvgRank).toBe(7.5)
     expect(arg.data.severity).toBe("info")
-    expect(arg.data.reason).toContain("광고그룹 평균 순위")
     expect(arg.data.reason).toContain("광고그룹 2개 키워드")
-    expect(arg.data.reason).toContain("최근 6시간 가중평균")
-    expect(arg.data.reason).toContain("15,000")
-  })
-
-  it("대표 키워드 — 노출 TOP 1 (Estimate 호출이 그 키워드로 발동)", async () => {
-    mockAdGroupFindMany.mockResolvedValue([
-      {
-        id: "ag_b",
-        nccAdgroupId: "ncc_ag_b",
-        name: "광고그룹 B",
-        bidAmt: 500,
-        keywords: [
-          // kw_b1: imp 1000 (TOP 아님)
-          { id: "kw_b1", nccKeywordId: "ncc_kw_b1", keyword: "낮은노출", recentAvgRnk: 8 },
-          // kw_b2: imp 50000 (TOP — 대표 키워드)
-          { id: "kw_b2", nccKeywordId: "ncc_kw_b2", keyword: "대표키워드", recentAvgRnk: 7 },
-          // kw_b3: imp 5000
-          { id: "kw_b3", nccKeywordId: "ncc_kw_b3", keyword: "중간노출", recentAvgRnk: 9 },
-        ],
-      },
-    ])
-    mockStatHourlyFindMany.mockResolvedValue([
-      { refId: "ncc_kw_b1", impressions: 1000, recentAvgRnk: 8 },
-      { refId: "ncc_kw_b2", impressions: 50000, recentAvgRnk: 7 },
-      { refId: "ncc_kw_b3", impressions: 5000, recentAvgRnk: 9 },
-    ])
-    mockGetCachedAveragePositionBid.mockResolvedValue({
-      data: [
-        { keyword: "대표키워드", position: 1, bid: 3000 },
-        { keyword: "대표키워드", position: 5, bid: 1500 },
-      ],
-      cachedAll: false,
-    })
-
-    await GET(makeReq("Bearer test-secret") as never)
-
-    // Estimate 호출 인자 — 대표 키워드 = kw_b2.
-    // BID_RANK_DEVICE_SCOPE 기본 'BOTH' → PC + MOBILE 둘 다 호출.
-    expect(mockGetCachedAveragePositionBid).toHaveBeenCalled()
-    const adgroupEstimateCalls = mockGetCachedAveragePositionBid.mock.calls.filter(
-      (c) => c[0].keywordId === "kw_b2",
-    )
-    expect(adgroupEstimateCalls).toHaveLength(2)
-    const pcCall = adgroupEstimateCalls.find((c) => c[0].device === "PC")
-    const mobileCall = adgroupEstimateCalls.find((c) => c[0].device === "MOBILE")
-    expect(pcCall).toBeTruthy()
-    expect(mobileCall).toBeTruthy()
-    const estArgs = pcCall![0]
-    expect(estArgs.advertiserId).toBe("adv_1")
-    expect(estArgs.customerId).toBe("1234567")
-    expect(estArgs.keywordText).toBe("대표키워드")
-    expect(estArgs.device).toBe("PC")
-    expect(mobileCall![0].keywordText).toBe("대표키워드")
-    expect(mobileCall![0].device).toBe("MOBILE")
+    expect(arg.data.reason).toContain("최근 1시간 측정값 단순 평균")
   })
 
   it("StatHourly 데이터 없음 → fallback (last non-null 단순 평균, rankWindowHours=null)", async () => {
@@ -1623,8 +1322,6 @@ describe("cron bid-suggest — adgroup rank suggestions (Phase 2A)", () => {
     const body = await res.json()
     expect(body.ok).toBe(true)
     expect(body.adgroupRankCreated).toBe(1)
-    expect(body.adgroupRankWeightedSourceCount).toBe(0)
-    expect(body.adgroupRankFallbackSourceCount).toBe(1)
 
     const adgroupCreates = mockBidSuggestionCreate.mock.calls.filter(
       (c) =>
@@ -1861,8 +1558,8 @@ describe("cron bid-suggest — MOBILE Estimate 확장 (키워드)", () => {
     mockCampaignFindMany.mockResolvedValue([])
     mockStatDailyGroupBy.mockImplementation(() => Promise.resolve([]))
     mockKeywordFindMany.mockImplementation(
-      (args: { where?: { OR?: unknown } }) => {
-        if (args?.where?.OR) {
+      (args: { where?: { recentAvgRnk?: unknown } }) => {
+        if (args?.where?.recentAvgRnk) {
           return Promise.resolve([
             {
               id: "kw_mobile_1",

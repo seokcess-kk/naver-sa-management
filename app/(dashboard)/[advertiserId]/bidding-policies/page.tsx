@@ -96,8 +96,9 @@ export default async function BiddingPoliciesPage({
             <p className="font-medium text-foreground">사용 방법</p>
             <p className="mt-1.5 leading-relaxed">
               키워드 단위로 목표 노출 순위(1~10위)와 입찰가 상·하한을 등록하면,
-              매시간 자동으로 입찰가를 조정해 순위를 유지합니다. 비상 시 상단의
-              Kill Switch 로 즉시 정지할 수 있습니다.
+              최근 평균순위(측정값, 15~30분 지연)와 Estimate 추정을 기반으로 입찰가
+              조정 권고를 생성합니다. 권고는 운영 Inbox 에서 검토·승인 후 적용되며,
+              비상 시 상단의 Kill Switch 로 권고 생성을 즉시 정지할 수 있습니다.
             </p>
           </>
         }

@@ -95,8 +95,8 @@ export function KillSwitchToggleModal({
           </DialogTitle>
           <DialogDescription>
             {nextEnabled
-              ? "본 광고주의 자동 입찰가 조정 / 룰 트리거 / 최적화 실행이 모두 차단됩니다. 수동 입찰가 변경은 영향 없습니다."
-              : "본 광고주의 자동 비딩이 다시 활성화됩니다. 다음 처리 주기부터 정책에 따라 입찰가가 자동 조정됩니다."}
+              ? "본 광고주의 입찰가 조정 권고 생성 / 룰 트리거 / 최적화 실행이 모두 차단됩니다. 수동 입찰가 변경은 영향 없습니다."
+              : "본 광고주의 자동 비딩이 다시 활성화됩니다. 다음 처리 주기부터 정책에 따라 입찰가 조정 권고가 생성됩니다."}
           </DialogDescription>
         </DialogHeader>
 
@@ -110,7 +110,7 @@ export function KillSwitchToggleModal({
           >
             {nextEnabled
               ? "정지 후에도 변경 이력은 그대로 보존되며, 이미 진행 중인 처리는 끝까지 완료됩니다."
-              : "재개는 즉시 적용됩니다. 다음 매시간 정각부터 정책 평가가 시작됩니다."}
+              : "재개는 즉시 적용됩니다. 다음 처리 주기부터 정책 평가와 권고 생성이 시작됩니다."}
           </div>
 
           <div className="flex flex-col gap-1.5">

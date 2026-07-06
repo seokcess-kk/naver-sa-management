@@ -83,7 +83,7 @@ export function PolicyFormModal({
           </DialogTitle>
           <DialogDescription>
             {mode === "create"
-              ? "키워드 + 디바이스(PC/모바일) 단위로 목표 노출 순위 정책을 등록합니다. 매시간 자동으로 본 정책을 기준으로 입찰가가 조정됩니다."
+              ? "키워드 + 디바이스(PC/모바일) 단위로 목표 노출 순위 정책을 등록합니다. 본 정책을 기준으로 최근 평균순위(측정값)와 Estimate 추정에 따라 입찰가 조정 권고가 생성되며, 운영 Inbox 에서 승인 후 적용됩니다."
               : "변경 가능 항목: 목표 순위 / 입찰 상한 / 입찰 하한 / 활성 여부. 키워드 또는 디바이스를 바꾸려면 새 정책을 추가하고 기존 정책을 삭제하세요."}
           </DialogDescription>
         </DialogHeader>
@@ -497,7 +497,7 @@ function PolicyFormBody({
           </p>
         ) : (
           <p className="-mt-2 text-[11px] text-muted-foreground">
-            자동 조정 시 이 범위 안에서만 입찰가가 움직입니다. 빈값이면 그
+            입찰가 조정 권고는 이 범위 안에서만 생성됩니다. 빈값이면 그
             방향으로는 제한 없음.
           </p>
         )}
@@ -508,7 +508,7 @@ function PolicyFormBody({
             checked={enabled}
             onCheckedChange={(v) => setEnabled(!!v)}
           />
-          정책 활성화 (자동 조정 대상)
+          정책 활성화 (권고 생성 대상)
         </Label>
       </div>
 

@@ -3,7 +3,7 @@
 /**
  * 확장소재 동기화 + 캠페인 필터 (F-5.1 / F-5.2)
  *
- * 기존 `sync-extensions-button.tsx` 의 확장 — 캠페인 multi-select Popover/Dialog 추가.
+ * 캠페인 multi-select Popover/Dialog 로 부분 동기화 지원.
  *
  * 동작:
  * - 캠페인 0개 선택 → 광고주 전체 동기화 (기본 동작 유지)
@@ -11,17 +11,17 @@
  * - 사용자가 dropdown 닫고 sync 버튼 누르면 호출 (드롭다운 안에서는 누적만)
  * - sync 버튼 라벨에 선택 개수 배지 (0개 = "전체")
  *
- * 키 미설정(`hasKeys=false`) → 비활성화 + 안내 tooltip (sync-extensions-button 동일)
+ * 키 미설정(`hasKeys=false`) → 비활성화 + 안내 tooltip
  *
  * UX 디테일:
- * - 캠페인 1개뿐 → multi-select 표시 안 하고 일반 sync 버튼 (기존 sync-extensions-button 동등)
+ * - 캠페인 1개뿐 → multi-select 표시 안 하고 일반 sync 버튼
  * - 캠페인 status='off' → 회색 글씨 (선택은 가능)
  * - 캠페인 ≥ 10 → 검색 input 노출
  * - 모바일(<sm) → Popover/Dropdown 대신 Dialog 사용 (좁은 폭 호환)
  *
- * toast.promise 패턴은 sync-extensions-button 그대로 (페이지 이동 후에도 결과 토스트 유지).
+ * toast.promise 패턴 사용 (페이지 이동 후에도 결과 토스트 유지).
  *
- * 본 컴포넌트는 ExtensionsPage 만 사용. sync-extensions-button.tsx 는 무변경 (다른 페이지 영향 X).
+ * 본 컴포넌트는 ExtensionsPage 만 사용.
  *
  * SPEC 6.2 F-5.1 / F-5.2 / 11.2.
  */
@@ -99,7 +99,7 @@ export function SyncExtensionsWithFilter({
   )
   const [running, setRunning] = React.useState(false)
 
-  // 동기화 호출 핸들러 — sync-extensions-button 의 toast.promise 패턴 그대로.
+  // 동기화 호출 핸들러 — toast.promise 패턴.
   const handleSync = React.useCallback(() => {
     if (!hasKeys) {
       toast.error("키 미설정 — API 키 / Secret 키를 먼저 입력하세요")

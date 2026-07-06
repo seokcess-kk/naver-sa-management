@@ -9,12 +9,12 @@
  * 동작:
  * - 캠페인 0개 선택 → 광고주 전체 동기화 (기본 동작 유지)
  * - 캠페인 N개 선택 → `syncKeywords(advertiserId, { campaignIds })` 로 부분 동기화
- * - 결과 → `useSyncBatchPolling.start()` 위임 (sync-keywords-button.tsx 와 동일):
+ * - 결과 → `useSyncBatchPolling.start()` 위임:
  *     · ok=false              → toast.error
  *     · batchId=null,total=0  → toast.info ("동기화할 광고그룹이 없습니다")
  *     · batchId !== null      → toast.loading + GET /api/batch/{id} 5초 polling
  *
- * 키 미설정(`hasKeys=false`) → 비활성화 + 안내 tooltip (sync-keywords-button 동일).
+ * 키 미설정(`hasKeys=false`) → 비활성화 + 안내 tooltip.
  *
  * UX 디테일 (extensions 와 동일):
  * - 캠페인 1개뿐 → multi-select 표시 안 하고 일반 sync 버튼
@@ -24,7 +24,7 @@
  *
  * 본 컴포넌트는 KeywordsPage 만 사용.
  *
- * polling 로직은 `useSyncBatchPolling` hook 으로 추출 — sync-keywords-button.tsx 와 공유.
+ * polling 로직은 `useSyncBatchPolling` hook 으로 추출.
  *
  * SPEC v0.2.1 6.2 F-3.1 / 11.2 / 3.5 (Job Table + Chunk Executor).
  */

@@ -16,7 +16,7 @@
  *   - SSR 렌더 시점의 "now" 와 클라이언트 hydration 시점의 "now" 가 다르면 hydration mismatch
  *     → 마운트 전(첫 렌더)은 props.syncedAt 만 신뢰, 마운트 후 1분 간격 useEffect 로 강제 재계산
  *
- * 위치: 페이지 헤더 actions 영역 (동기화 버튼 옆) — SyncKeywordsButton 와 함께 묶어서 노출.
+ * 위치: 페이지 헤더 actions 영역 (동기화 버튼 옆) — 동기화 버튼과 함께 묶어서 노출.
  *
  * SPEC 안전장치 7 (광고주별 컨텍스트). 컴포넌트 자체는 광고주 무관 — 호출부가 광고주별 syncedAt 만 전달.
  */

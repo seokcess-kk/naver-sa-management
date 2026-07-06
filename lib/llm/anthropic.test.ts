@@ -8,7 +8,7 @@
  * 검증 범위:
  *   - computeInputHash: 동일 입력 → 동일 hash, 다른 입력 → 다른 hash
  *   - computeCostUsd: 모델별 가격 정확성
- *   - callLlm: 캐시 검사 → SDK 호출 → LlmCallLog 적재 흐름
+ *   - callLlm: SDK 호출 → LlmCallLog 적재 흐름
  *   - callLlmWithFallback: API 키 없음 → 폴백 텍스트
  *   - assertMonthlyBudgetOk: env 한도 초과 시 throw
  */
@@ -29,14 +29,12 @@ vi.mock("@anthropic-ai/sdk", () => {
   return { default: MockAnthropic }
 })
 
-const mockFindFirst = vi.fn()
 const mockCallLogCreate = vi.fn()
 const mockAggregate = vi.fn()
 
 vi.mock("@/lib/db/prisma", () => ({
   prisma: {
     llmCallLog: {
-      findFirst: (...args: unknown[]) => mockFindFirst(...args),
       create: (...args: unknown[]) => mockCallLogCreate(...args),
       aggregate: (...args: unknown[]) => mockAggregate(...args),
     },
@@ -59,7 +57,6 @@ const ORIGINAL_ENV = { ...process.env }
 
 beforeEach(() => {
   mockCreate.mockReset()
-  mockFindFirst.mockReset()
   mockCallLogCreate.mockReset()
   mockAggregate.mockReset()
   process.env = { ...ORIGINAL_ENV }
@@ -154,7 +151,6 @@ describe("computeCostUsd", () => {
 
 describe("callLlm", () => {
   it("정상 호출 — SDK 호출 + LlmCallLog 적재 + 결과 반환", async () => {
-    mockFindFirst.mockResolvedValueOnce(null) // 캐시 miss
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "응답 텍스트" }],
       usage: { input_tokens: 100, output_tokens: 50 },
@@ -193,29 +189,8 @@ describe("callLlm", () => {
     expect(logCall.data.result).toBe("success")
   })
 
-  it("캐시 hit — 그래도 새 SDK 호출 (text 본문 미저장)", async () => {
-    mockFindFirst.mockResolvedValueOnce({ id: "prev1" }) // 캐시 hit
-    mockCreate.mockResolvedValueOnce({
-      content: [{ type: "text", text: "새 응답" }],
-      usage: { input_tokens: 100, output_tokens: 50 },
-      stop_reason: "end_turn",
-    })
-    mockCallLogCreate.mockResolvedValueOnce({})
-
-    const r = await callLlm({
-      purpose: "bid_suggestion_reason",
-      model: "claude-haiku-4-5-20251001",
-      prompt: "동일 prompt",
-    })
-
-    expect(r.fromCache).toBe(true) // 메타 캐시 hit
-    expect(r.text).toBe("새 응답") // 그래도 새 호출이라 새 응답
-    expect(mockCreate).toHaveBeenCalledTimes(1)
-  })
-
   it("API 키 미설정 → throw", async () => {
     delete process.env.ANTHROPIC_API_KEY
-    mockFindFirst.mockResolvedValueOnce(null)
     mockCallLogCreate.mockResolvedValueOnce({})
 
     await expect(
@@ -228,7 +203,6 @@ describe("callLlm", () => {
   })
 
   it("SDK 에러 → result='error' LlmCallLog 적재 + throw", async () => {
-    mockFindFirst.mockResolvedValueOnce(null)
     mockCreate.mockRejectedValueOnce(new Error("rate_limit"))
     mockCallLogCreate.mockResolvedValueOnce({})
 
@@ -246,7 +220,6 @@ describe("callLlm", () => {
   })
 
   it("refusal stop_reason → result='blocked'", async () => {
-    mockFindFirst.mockResolvedValueOnce(null)
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "" }],
       usage: { input_tokens: 100, output_tokens: 0 },
@@ -273,7 +246,6 @@ describe("callLlm", () => {
 
 describe("callLlmWithFallback", () => {
   it("정상 호출 → usedLlm=true + LLM 텍스트", async () => {
-    mockFindFirst.mockResolvedValueOnce(null)
     mockCreate.mockResolvedValueOnce({
       content: [{ type: "text", text: "LLM 응답" }],
       usage: { input_tokens: 100, output_tokens: 50 },
@@ -296,7 +268,6 @@ describe("callLlmWithFallback", () => {
 
   it("API 키 미설정 → usedLlm=false + 폴백 텍스트", async () => {
     delete process.env.ANTHROPIC_API_KEY
-    mockFindFirst.mockResolvedValueOnce(null)
     mockCallLogCreate.mockResolvedValueOnce({})
 
     const r = await callLlmWithFallback(
