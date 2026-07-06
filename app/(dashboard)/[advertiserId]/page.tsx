@@ -31,6 +31,7 @@ import {
 } from "@/components/ui/card"
 import { DashboardHero } from "@/components/dashboard/dashboard-hero"
 import { QuickNavCard } from "@/components/dashboard/quick-nav-card"
+import { PendingApprovalsCard } from "@/components/dashboard/pending-approvals-card"
 import { KpiCardsSection } from "@/components/dashboard/kpi-cards-section"
 import { TrendChartSection } from "@/components/dashboard/trend-chart-section"
 import { TopListSection } from "@/components/dashboard/top-list-section"
@@ -138,8 +139,13 @@ export default async function AdvertiserDashboardPage({
             initial={kpiInitial}
           />
         </div>
-        <div className="md:col-span-1">
-          <QuickNavCard advertiserId={advertiser.id} />
+        <div className="flex flex-col gap-4 md:col-span-1">
+          {/* 통합 승인 대기 위젯 — 운영 Inbox + 승인 큐 pending 합산·분해·링크 */}
+          <PendingApprovalsCard advertiserId={advertiser.id} />
+          {/* QuickNavCard 는 h-full — flex-1 래퍼로 남은 높이 흡수 (오버플로 방지) */}
+          <div className="flex-1">
+            <QuickNavCard advertiserId={advertiser.id} />
+          </div>
         </div>
       </div>
 
