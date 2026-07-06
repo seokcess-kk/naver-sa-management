@@ -8,7 +8,7 @@
  *   1. CRON_SECRET 검증 (불일치 시 401)
  *   2. 활성 광고주 (BidAutomationConfig.mode != 'off' 만)
  *   3. 광고주 직렬:
- *      a. collectDailyStats — 어제(KST) OptimizationRun + BidSuggestion + AlertEvent 집계
+ *      a. collectDailyStats — 어제(KST) BidSuggestion + AlertEvent 집계
  *      b. generateDailySummary — Sonnet 4.6 (폴백 시 정형 텍스트)
  *      c. AlertEvent 적재 (status='sent', payload={ kind:'llm_daily_summary', ... })
  *      d. NotificationChannel dispatch (log 항상 + telegram TELEGRAM_BOT_TOKEN+CHAT_ID 있을 때)

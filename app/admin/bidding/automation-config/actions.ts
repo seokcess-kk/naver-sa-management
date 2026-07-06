@@ -11,8 +11,7 @@
  *
  * 의미:
  *   - mode = 'inbox'             : bid-suggest cron 이 BidSuggestion 적재. 운영자 승인 시 SA 적용.
- *   - mode = 'auto_policy_only'  : Inbox 비활성. BiddingPolicy 등록 키워드만 자동 비딩(F-11.2 기존 흐름).
- *   - mode = 'off'               : Inbox 비활성 + 자동 비딩 비활성 (안전 모드).
+ *   - mode = 'off'               : Inbox 비활성 (안전 모드 — 권고 생성 차단).
  *   - budgetPacingMode           : 광고주별 페이싱 전략.
  *   - targetCpc / maxCpc / minCtr: CPC 기반 검색광고 운영 기준.
  *   - targetAvgRank              : 평균 노출 순위 기반 정책 권고 기준.
@@ -31,7 +30,7 @@ import { Prisma } from "@/lib/generated/prisma/client"
 // 타입
 // =============================================================================
 
-export type BidAutomationMode = "inbox" | "auto_policy_only" | "off"
+export type BidAutomationMode = "inbox" | "off"
 export type BudgetPacingMode = "focus" | "explore" | "protect"
 
 export type BidAutomationConfigRow = {
@@ -62,7 +61,7 @@ export type ActionResult<T = unknown> =
 
 const advertiserIdSchema = z.string().trim().min(1).max(128)
 
-const modeSchema = z.enum(["inbox", "auto_policy_only", "off"])
+const modeSchema = z.enum(["inbox", "off"])
 const pacingSchema = z.enum(["focus", "explore", "protect"])
 
 const upsertSchema = z.object({

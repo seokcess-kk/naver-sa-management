@@ -175,13 +175,6 @@ export async function processAdvertiser(
         }
       : undefined
 
-  // -- d. BiddingPolicy 등록 키워드 (자동 실행 대상 — 본 cron 제외) -----------
-  const policyKeywords = await prisma.biddingPolicy.findMany({
-    where: { advertiserId, enabled: true },
-    select: { keywordId: true },
-  })
-  const policyKeywordIds = new Set(policyKeywords.map((p) => p.keywordId))
-
   // -- e. TOP N — StatDaily level='keyword' 7일 cost 큰 순 -------------------
   const since = addDays(new Date(), -STATS_WINDOW_DAYS)
   const top = await prisma.statDaily.groupBy({
@@ -214,7 +207,6 @@ export async function processAdvertiser(
       customerId,
       targetAvgRank: cfg.targetAvgRank ?? null,
       maxCpc: cfg.maxCpc ?? null,
-      policyKeywordIds,
     })
     stats.rankCandidatesScanned += rankStatsOnly.candidatesScanned
     stats.rankCreated += rankStatsOnly.created
@@ -272,7 +264,6 @@ export async function processAdvertiser(
     const k = keywordMap.get(row.refId)
     if (!k) continue
     if (k.userLock) continue
-    if (policyKeywordIds.has(k.id)) continue
     if (k.useGroupBidAmt || k.bidAmt == null || k.bidAmt <= 0) continue
 
     const sum = row._sum
@@ -444,7 +435,6 @@ export async function processAdvertiser(
     customerId,
     targetAvgRank: cfg.targetAvgRank ?? null,
     maxCpc: cfg.maxCpc ?? null,
-    policyKeywordIds,
   })
   stats.rankCandidatesScanned += rankStats.candidatesScanned
   stats.rankCreated += rankStats.created

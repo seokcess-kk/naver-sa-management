@@ -59,7 +59,6 @@ import {
 
 const MODE_LABEL: Record<BidAutomationMode, string> = {
   inbox: "Inbox 권고",
-  auto_policy_only: "정책 자동만",
   off: "자동화 끔",
 }
 
@@ -81,9 +80,7 @@ const PACING_DESCRIPTION: Record<BudgetPacingMode, string> = {
 const MODE_DESCRIPTION: Record<BidAutomationMode, string> = {
   inbox:
     "자동 분석이 입찰가 권고를 만들고, 운영자가 운영 Inbox에서 승인해야 실제 변경됩니다.",
-  auto_policy_only:
-    "비딩 정책에 등록된 키워드만 정해진 상한/하한 안에서 자동 조정합니다.",
-  off: "권고 생성과 자동 조정을 모두 끕니다. 가장 안전한 대기 상태입니다.",
+  off: "권고 생성을 끕니다. 가장 안전한 대기 상태입니다.",
 }
 
 function formatDate(iso: string): string {
@@ -168,7 +165,7 @@ export function BidAutomationConfigClient({
                   {r.config ? (
                     <span
                       data-mode={r.config.mode}
-                      className="inline-flex items-center rounded px-2 py-0.5 text-xs data-[mode=inbox]:bg-blue-100 data-[mode=inbox]:text-blue-800 data-[mode=auto_policy_only]:bg-amber-100 data-[mode=auto_policy_only]:text-amber-800 data-[mode=off]:bg-gray-100 data-[mode=off]:text-gray-700"
+                      className="inline-flex items-center rounded px-2 py-0.5 text-xs data-[mode=inbox]:bg-blue-100 data-[mode=inbox]:text-blue-800 data-[mode=off]:bg-gray-100 data-[mode=off]:text-gray-700"
                     >
                       {MODE_LABEL[r.config.mode]}
                     </span>
@@ -399,7 +396,6 @@ function BidAutomationConfigModal({
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="inbox">Inbox 권고</SelectItem>
-                    <SelectItem value="auto_policy_only">정책 자동만</SelectItem>
                     <SelectItem value="off">자동화 끔</SelectItem>
                   </SelectContent>
                 </Select>

@@ -275,8 +275,7 @@ export function PolicyTableClient({
           <DialogHeader>
             <DialogTitle>정책 삭제</DialogTitle>
             <DialogDescription>
-              이 정책을 삭제하면 해당 키워드의 권고 생성 대상에서 제외됩니다.
-              과거 OptimizationRun 로그는 보존됩니다 (감사용).
+              이 비딩 정책을 삭제합니다. 되돌릴 수 없습니다.
             </DialogDescription>
           </DialogHeader>
 

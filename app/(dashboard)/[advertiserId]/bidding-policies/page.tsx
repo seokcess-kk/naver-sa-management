@@ -9,7 +9,7 @@
  * URL 패턴: `/[advertiserId]/bidding-policies` (광고주별 컨텍스트 — SPEC 11.2)
  *
  * 본 페이지 비대상 (별도 PR):
- *   - F-11.2 자동 조정 cron 결과 / OptimizationRun 로그 표시
+ *   - F-11.2 자동 조정 cron / 실행 로그 표시 — Phase B(2026-07-06)에서 은퇴
  *   - F-11.5 Guardrail 추가 설정 UI
  *   - GNB 항상 표시 Kill Switch 배너 (현 PR 은 본 페이지 상단만)
  *

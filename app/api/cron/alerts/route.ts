@@ -49,7 +49,6 @@ import {
   evaluateBudgetPace,
   evaluateRankDeviation,
   evaluateMobileFirstPage,
-  evaluateOptimizationSummary,
   evaluateSuggestionInbox,
   evaluateQualityStagnation,
   evaluateBudgetPacing,
@@ -255,13 +254,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
               minClicks?: number
               maxCandidates?: number
             },
-          })
-          break
-        case "optimization_summary":
-          candidates = await evaluateOptimizationSummary(ctx, {
-            id: rule.id,
-            type: rule.type,
-            params: params as { dailyHourKst?: number },
           })
           break
         case "suggestion_inbox":

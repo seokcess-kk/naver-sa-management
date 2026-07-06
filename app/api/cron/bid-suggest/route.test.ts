@@ -1095,14 +1095,15 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
     expect(upd.data.severity).toBe("info")
   })
 
-  it("BiddingPolicy 등록 키워드 (자동 실행 대상) → rank 단계 제외", async () => {
-    mockBiddingPolicyFindMany.mockResolvedValue([{ keywordId: "kw_rank_5" }])
+  it("BiddingPolicy 등록 키워드도 rank 후보에 포함 (자동적용 트랙 은퇴)", async () => {
+    // Phase B — auto-bidding 자동적용 트랙 은퇴. BiddingPolicy 제외 로직 제거로
+    // 과거 정책 등록 키워드도 rank 권고 후보로 스캔된다 (권고 Inbox 는 정책 유무 무관).
     mockKeywordFindMany.mockImplementation(
       (args: { where?: { recentAvgRnk?: unknown } }) => {
         if (args?.where?.recentAvgRnk) {
           return Promise.resolve([
             {
-              id: "kw_rank_5", // policy 등록됨
+              id: "kw_rank_5", // 과거 policy 등록 키워드 — 더 이상 제외 안 됨
               nccKeywordId: "ncc_kw_rank_5",
               keyword: "신발",
               bidAmt: 500,
@@ -1118,14 +1119,17 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
         return Promise.resolve([])
       },
     )
+    mockGetCachedAveragePositionBid.mockRejectedValue(
+      new Error("naver-sa rate limit"),
+    )
 
     const res = await GET(makeReq("Bearer test-secret") as never)
     const body = await res.json()
     expect(body.ok).toBe(true)
-    // policy 등록 키워드 — 후보 자체에서 제외.
-    expect(body.rankCandidatesScanned).toBe(0)
-    expect(body.rankCreated).toBe(0)
-    expect(mockGetCachedAveragePositionBid).not.toHaveBeenCalled()
+    // 정책 등록 키워드 — 후보로 스캔됨 (Estimate 호출까지 도달).
+    expect(body.rankCandidatesScanned).toBe(1)
+    expect(body.rankEstimateFailed).toBe(1)
+    expect(mockGetCachedAveragePositionBid).toHaveBeenCalled()
   })
 })
 

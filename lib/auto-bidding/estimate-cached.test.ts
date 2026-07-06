@@ -9,7 +9,7 @@
  *   1. cache hit (미만료) → SA 호출 0 + cachedAll=true
  *   2. cache miss → SA 1회 호출 + upsert 1회 + cachedAll=false
  *   3. 만료된 캐시 (expiresAt <= now) → miss 처리 + SA 호출
- *   4. SA throw 시 그대로 전파 (호출부가 catch + OptimizationRun.failed)
+ *   4. SA throw 시 그대로 전파 (호출부 bid-suggest 가 catch + rankEstimateFailed)
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest"

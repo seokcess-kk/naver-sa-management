@@ -143,8 +143,8 @@ async function upsertCacheEntry(args: {
  *   - Server Action: getCurrentAdvertiser + loadKeywordForAdvertiser
  *
  * throw 정책:
- *   - estimateAveragePositionBid 가 throw 하면 그대로 전파 (호출부에서 OptimizationRun
- *     result='failed' / errorMessage 적재).
+ *   - estimateAveragePositionBid 가 throw 하면 그대로 전파 (호출부 bid-suggest 가
+ *     키워드 단위 흡수 → rankEstimateFailed 카운트).
  */
 export async function getCachedAveragePositionBid(
   args: GetCachedAveragePositionBidArgs,

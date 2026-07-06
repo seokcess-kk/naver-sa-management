@@ -51,9 +51,9 @@ export default async function BidAutomationConfigPage() {
             비딩 자동화 설정
           </h1>
           <p className="text-sm text-muted-foreground">
-            광고주별 자동화 모드(Inbox / 정책 자동만 / Off) · 예산 페이싱 모드 ·
+            광고주별 자동화 모드(Inbox / Off) · 예산 페이싱 모드 ·
             목표 CPA/ROAS. 신규 등록 광고주는 기본 off — 운영자가 명시적으로
-            inbox 또는 auto_policy_only 로 전환해야 cron 이 동작합니다.
+            inbox 로 전환해야 bid-suggest cron 이 권고를 생성합니다.
           </p>
         </div>
       </div>

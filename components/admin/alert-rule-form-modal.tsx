@@ -106,12 +106,6 @@ const ALERT_TYPES: { value: AlertRuleType; label: string; description: string }[
       "평균 순위 임계(기본 5위) 초과 + 7일 클릭 표본(기본 50) 충분한 키워드. 강한 신호로만 사용",
   },
   {
-    value: "optimization_summary",
-    label: "자동 비딩 일일 요약 (optimization_summary)",
-    description:
-      "어제(KST) OptimizationRun 결과 집계. 매일 dailyHourKst(기본 9시) 1회 발송",
-  },
-  {
     value: "suggestion_inbox",
     label: "Inbox 권고 누적 (suggestion_inbox)",
     description:

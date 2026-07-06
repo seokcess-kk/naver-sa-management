@@ -37,7 +37,6 @@ export type AlertRuleType =
   | "budget_pace"
   | "rank_deviation"
   | "mobile_first_page"
-  | "optimization_summary"
   | "suggestion_inbox"
   | "quality_stagnation"
   | "budget_pacing"
@@ -77,7 +76,6 @@ const alertRuleTypeSchema = z.enum([
   "budget_pace",
   "rank_deviation",
   "mobile_first_page",
-  "optimization_summary",
   "suggestion_inbox",
   "quality_stagnation",
   "budget_pacing",
@@ -163,13 +161,6 @@ const mobileFirstPageParamsSchema = z
   })
   .strict()
 
-const optimizationSummaryParamsSchema = z
-  .object({
-    advertiserId: advertiserIdSchema,
-    dailyHourKst: z.number().int().min(0).max(23).optional(),
-  })
-  .strict()
-
 const suggestionInboxParamsSchema = z
   .object({
     advertiserId: advertiserIdSchema,
@@ -238,9 +229,6 @@ function validateParams(
       break
     case "mobile_first_page":
       parsed = mobileFirstPageParamsSchema.safeParse(params)
-      break
-    case "optimization_summary":
-      parsed = optimizationSummaryParamsSchema.safeParse(params)
       break
     case "suggestion_inbox":
       parsed = suggestionInboxParamsSchema.safeParse(params)

@@ -85,7 +85,6 @@ const TYPE_LABEL: Record<string, string> = {
   budget_pacing: "어제 예산 100% 도달",
   rank_deviation: "목표 순위 이탈",
   mobile_first_page: "모바일 첫 페이지 이탈",
-  optimization_summary: "자동 비딩 일일 요약",
   suggestion_inbox: "Inbox 권고 누적",
   quality_stagnation: "품질지수 정체",
   llm_daily_summary: "일일 운영 요약",

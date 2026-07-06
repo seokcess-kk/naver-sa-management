@@ -7,11 +7,11 @@
  *   1. listBiddingPolicies         — 광고주 정책 전체 목록 (UI 테이블 / 셀렉터용)
  *   2. createBiddingPolicy         — 정책 신규 생성 (UNIQUE 충돌 사전 차단)
  *   3. updateBiddingPolicy         — 정책 부분 수정 (targetRank/maxBid/minBid/enabled)
- *   4. deleteBiddingPolicy         — 정책 단순 삭제 (Cascade 로 OptimizationRun.policyId SetNull)
+ *   4. deleteBiddingPolicy         — 정책 단순 삭제 (연쇄 로그 없음 — 자동적용 실행 로그 은퇴)
  *   5. listKeywordsWithoutPolicy   — 모달 셀렉터: 본 device 정책이 없는 키워드 후보
  *
  * 본 PR 비대상 (별도 ID):
- *   - F-11.2 자동 조정 cron (OptimizationRun 적재 / SA bidAmt update)
+ *   - F-11.2 자동 조정 cron — Phase B(2026-07-06)에서 은퇴 (권고 트랙으로 피벗)
  *   - F-11.5 Guardrail (maxBid/minBid 외 일 변경 한도)
  *   - F-11.6 Kill Switch toggle 은 본 모듈이 아니라 app/admin/advertisers/actions.ts 에 추가
  *
@@ -457,11 +457,11 @@ export async function updateBiddingPolicy(
 }
 
 // =============================================================================
-// 4. deleteBiddingPolicy — 정책 삭제 (Cascade SetNull on OptimizationRun)
+// 4. deleteBiddingPolicy — 정책 삭제 (연쇄 로그 없음)
 // =============================================================================
 
 /**
- * BiddingPolicy 단순 삭제. Prisma onDelete: SetNull (OptimizationRun.policyId) 로 로그는 유지.
+ * BiddingPolicy 단순 삭제 (연쇄 관계 없음 — 자동적용 실행 로그 은퇴).
  *
  *   1. getCurrentAdvertiser
  *   2. viewer 차단

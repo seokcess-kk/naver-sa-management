@@ -13,7 +13,6 @@
  *   - 운영 중 (Campaign.status='on' AND AdGroup.status='on' AND Keyword.status='on')
  *   - useGroupBidAmt=false / userLock=false / bidAmt > 0 (명시 입찰만)
  *   - recentAvgRnk > targetAvgRank (목표 미달)
- *   - BiddingPolicy.enabled=true 키워드 제외 (auto-bidding cron 책임)
  *   - 광고주당 BID_RANK_PER_ADV_CAP 상한 — recentAvgRnk desc (가장 미달인 키워드 우선)
  *
  * 처리:
@@ -55,7 +54,7 @@ export type RankSuggestionStats = {
   /**
    * stale 정리 — 이번 cron run 에서 effectiveRank > target 후보로 진입하지 않은
    * 키워드의 기존 `reasonCode='below_target_rank'` pending 권고를 dismiss 처리한 수.
-   * 사유: 5위 도달 / 비활성화 / 그룹입찰 전환 / 정책 등록 / userLock / 캠페인 OFF 등.
+   * 사유: 5위 도달 / 비활성화 / 그룹입찰 전환 / userLock / 캠페인 OFF 등.
    * marginal 권고 (다른 reasonCode) 는 action.reasonCode JSON path 매칭으로 보존.
    */
   staleDismissed: number
@@ -66,14 +65,12 @@ export async function processRankSuggestions(args: {
   customerId: string
   targetAvgRank: number | Prisma.Decimal | null
   maxCpc: number | null
-  policyKeywordIds: Set<string>
 }): Promise<RankSuggestionStats> {
   const {
     advertiserId,
     customerId,
     targetAvgRank,
     maxCpc,
-    policyKeywordIds,
   } = args
   const stats: RankSuggestionStats = {
     candidatesScanned: 0,
@@ -88,7 +85,6 @@ export async function processRankSuggestions(args: {
   // -- 후보 추출 ------------------------------------------------------------
   // schema.prisma 기준 enum 값:
   //   KeywordStatus / AdGroupStatus / CampaignStatus = 'on' / 'off' / 'deleted'
-  // BiddingPolicy 는 1:N (Keyword.biddingPolicies) — Set 차단 (호출부가 전달).
   // recentAvgRnk Decimal 비교: targetAvgRank Number 정규화 후 prisma.Decimal 비교 가능하도록
   // findMany 에서 raw Decimal 그대로 받고 decideRankSuggestion 호출 직전 Number 변환.
   const target =
@@ -136,9 +132,7 @@ export async function processRankSuggestions(args: {
   // 광고주 횡단 차단 — Keyword 에는 advertiserId 없음. AdGroup -> Campaign.advertiserId 비교.
   // schema 상 adgroup.campaign 은 항상 존재하지만 일부 mock 구성 (campaign 필드 누락) 방어.
   const filtered = candidates.filter(
-    (k) =>
-      k.adgroup?.campaign?.advertiserId === advertiserId &&
-      !policyKeywordIds.has(k.id),
+    (k) => k.adgroup?.campaign?.advertiserId === advertiserId,
   )
 
   // filtered.length === 0 이어도 마지막 stale dismiss (W4) 흐름까지 도달해야 함.
@@ -287,7 +281,7 @@ export async function processRankSuggestions(args: {
   // -- stale 정리 (W4) ------------------------------------------------------
   // 이번 cron run 에서 effectiveRank > target 후보로 진입한 키워드 (`enriched`) 만
   // handledKeywordIds 로 보존 — cap 에 안 들어가 처리 안 된 키워드도 미달은 미달 → 보존.
-  // 그 외 키워드 (도달 / 비활성화 / 그룹입찰 / 정책 등록 / userLock / 광고그룹·캠페인 OFF) 는
+  // 그 외 키워드 (도달 / 비활성화 / 그룹입찰 / userLock / 광고그룹·캠페인 OFF) 는
   // 후보 SQL 에서 빠져 enriched 에도 없음 → 기존 below_target_rank pending 권고는 stale.
   //
   // action JSON path 매칭 (`reasonCode='below_target_rank'`) 으로 marginal 권고 (다른

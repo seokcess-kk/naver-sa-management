@@ -30,7 +30,7 @@ export type AlertTier = "p1" | "p2"
  *
  * P2 게이트 (순위·최적화·요약 — bid-inbox·LLM 중복 또는 P2 성격, 기본 off):
  *   budget_pace / budget_pacing (예산 dedup — budget_burn 과 캠페인 중복 발송)
- *   rank_deviation / mobile_first_page / optimization_summary / suggestion_inbox /
+ *   rank_deviation / mobile_first_page / suggestion_inbox /
  *   quality_stagnation / llm_daily_summary
  */
 export const ALERT_TIER = {
@@ -43,7 +43,6 @@ export const ALERT_TIER = {
   budget_pace: "p2",
   rank_deviation: "p2",
   mobile_first_page: "p2",
-  optimization_summary: "p2",
   suggestion_inbox: "p2",
   quality_stagnation: "p2",
   budget_pacing: "p2",

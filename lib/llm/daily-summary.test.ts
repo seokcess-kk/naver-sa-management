@@ -12,16 +12,12 @@ vi.mock("@/lib/llm/anthropic", () => ({
   assertMonthlyBudgetOk: (...args: unknown[]) => mockAssertBudget(...args),
 }))
 
-const mockOptGroupBy = vi.fn()
 const mockSugGroupBy = vi.fn()
 const mockSugCount = vi.fn()
 const mockAlertCount = vi.fn()
 
 vi.mock("@/lib/db/prisma", () => ({
   prisma: {
-    optimizationRun: {
-      groupBy: (...args: unknown[]) => mockOptGroupBy(...args),
-    },
     bidSuggestion: {
       groupBy: (...args: unknown[]) => mockSugGroupBy(...args),
       count: (...args: unknown[]) => mockSugCount(...args),
@@ -41,7 +37,6 @@ import {
 beforeEach(() => {
   mockCallLlmWithFallback.mockReset()
   mockAssertBudget.mockReset()
-  mockOptGroupBy.mockReset()
   mockSugGroupBy.mockReset()
   mockSugCount.mockReset()
   mockAlertCount.mockReset()
@@ -52,15 +47,6 @@ const baseInput = {
   advertiserName: "렌트박스",
   date: "2026-05-04",
   stats: {
-    optimizationRuns: {
-      success: 50,
-      skippedUserLock: 2,
-      skippedDeleted: 0,
-      skippedGuardrail: 5,
-      skippedKillSwitch: 0,
-      skippedNoChange: 10,
-      failed: 1,
-    },
     suggestionsCreated: { bid: 30, quality: 5, targeting: 1, budget: 0 },
     suggestionsApplied: 12,
     alertEvents: { info: 5, warn: 2, critical: 0 },
@@ -72,7 +58,6 @@ describe("buildPlainSummary (폴백)", () => {
     const text = __test__.buildPlainSummary(baseInput)
     expect(text).toContain("2026-05-04")
     expect(text).toContain("렌트박스")
-    expect(text).toContain("자동 비딩")
     expect(text).toContain("Inbox 권고")
     expect(text).toContain("적용 12")
   })
@@ -83,7 +68,6 @@ describe("buildUserPrompt", () => {
     const p = __test__.buildUserPrompt(baseInput)
     expect(p).toContain("렌트박스")
     expect(p).toContain("2026-05-04")
-    expect(p).toContain("자동비딩")
     expect(p).toContain("Inbox권고신규")
   })
 })
@@ -119,7 +103,7 @@ describe("generateDailySummary", () => {
     const r = await generateDailySummary(baseInput)
     expect(r.usedLlm).toBe(false)
     expect(r.text).toContain("렌트박스")
-    expect(r.text).toContain("자동 비딩")
+    expect(r.text).toContain("Inbox 권고")
   })
 
   it("model 옵션 override", async () => {
@@ -132,11 +116,6 @@ describe("generateDailySummary", () => {
 
 describe("collectDailyStats", () => {
   it("groupBy / count 호출 + KST 어제 산출", async () => {
-    mockOptGroupBy.mockResolvedValueOnce([
-      { result: "success", _count: { result: 50 } },
-      { result: "failed", _count: { result: 1 } },
-      { result: "skipped_guardrail", _count: { result: 5 } },
-    ])
     mockSugGroupBy.mockResolvedValueOnce([
       { engineSource: "bid", _count: { engineSource: 30 } },
       { engineSource: "quality", _count: { engineSource: 5 } },
@@ -148,9 +127,6 @@ describe("collectDailyStats", () => {
     const fixedNow = new Date("2026-05-04T17:00:00Z")
     const r = await collectDailyStats("adv1", fixedNow)
 
-    expect(r.optimizationRuns.success).toBe(50)
-    expect(r.optimizationRuns.failed).toBe(1)
-    expect(r.optimizationRuns.skippedGuardrail).toBe(5)
     expect(r.suggestionsCreated.bid).toBe(30)
     expect(r.suggestionsCreated.quality).toBe(5)
     expect(r.suggestionsCreated.targeting).toBe(0)
@@ -161,13 +137,11 @@ describe("collectDailyStats", () => {
   })
 
   it("groupBy / count 빈 결과 → 모두 0", async () => {
-    mockOptGroupBy.mockResolvedValueOnce([])
     mockSugGroupBy.mockResolvedValueOnce([])
     mockSugCount.mockResolvedValueOnce(0)
     mockAlertCount.mockResolvedValueOnce(0)
 
     const r = await collectDailyStats("adv1", new Date("2026-05-04T17:00:00Z"))
-    expect(r.optimizationRuns.success).toBe(0)
     expect(r.suggestionsCreated.bid).toBe(0)
     expect(r.suggestionsApplied).toBe(0)
     expect(r.alertEvents.info).toBe(0)

@@ -146,12 +146,12 @@ enum EstimateType {
 // =============================================================================
 // F-11 / F-12 — 비딩 자동화 재설계 (Inbox + ApprovalQueue + 광고주 자동화 설정)
 // =============================================================================
-// 1만 5천+ 키워드 환경 대응. "auto_policy_only" 모드는 광고주 동의된 정책만 자동 실행,
-// "inbox" 는 모든 제안을 운영자 승인 큐로, "off" 는 자동화 일체 차단.
+// 1만 5천+ 키워드 환경 대응. "inbox" 는 모든 제안을 운영자 승인 큐로,
+// "off" 는 권고 생성 일체 차단.
+// (자동적용 모드는 Phase B(2026-07-06)에서 은퇴 — 해당 enum 값 제거.)
 
 enum BidAutomationMode {
   inbox
-  auto_policy_only
   off
 }
 
@@ -277,7 +277,7 @@ model Advertiser {
   secretKeyEnc                  Bytes?
   secretKeyVersion              Int              @default(1)
   // F-11.6 — 비딩 자동화 Kill Switch (광고주 단위).
-  //   true 이면 본 광고주의 자동 비딩 / 룰 트리거 / OptimizationRun 신규 실행 모두 차단.
+  //   true 이면 본 광고주의 bid-suggest 권고 생성 / 룰 트리거 모두 차단 (Phase A 에서 bid-suggest 게이트로 이관).
   //   토글 메타 (At / By) 는 감사 추적 — 누가 언제 정지·재개했는지 기록.
   //   전역 Kill Switch 는 본 PR 비포함 (admin 환경변수로 후속 검토).
   biddingKillSwitch             Boolean          @default(false)
@@ -286,7 +286,7 @@ model Advertiser {
   // F-11.5 — Guardrail (자동 비딩 폭주 방지). 광고주 단위 + 키워드 단위 한도.
   //   guardrailEnabled=false 이면 본 광고주의 가드레일 검사 자체를 스킵 (긴급 운영 시).
   //   maxBidChangePct: 1회 자동 조정에서 입찰가 ±N% 초과 변경 차단 (1..100, 기본 20).
-  //   maxChangesPerKeyword: 키워드별 24h 내 OptimizationRun(result=success) 횟수 한도 (1..20, 기본 3).
+  //   maxChangesPerKeyword: 키워드별 24h 내 자동 변경 횟수 한도 (1..20, 기본 3).
   //   maxChangesPerDay: 광고주별 24h 내 총 변경 횟수 한도 (1..1000, 기본 50).
   //   범위 검증은 호출부 Zod (UpdateAdvertiserGuardrail) 에서 강제. DB 는 default 만 강제.
   //   룰(BiddingPolicy) 단위 한도는 본 PR 비포함 — 운영 데이터 누적 후 재검토.
@@ -313,7 +313,6 @@ model Advertiser {
   statsHourly               StatHourly[]
   estimateCaches            EstimateCache[]
   biddingPolicies           BiddingPolicy[]
-  optimizationRuns          OptimizationRun[]
   targetingRule             TargetingRule? // F-11.4 — 광고주 1:1
   // F-11 / F-12 — 비딩 자동화 재설계 (Inbox + ApprovalQueue + 자동화 설정)
   bidAutomationConfig       BidAutomationConfig? // 1:1 — 자동화 모드 / 페이싱 / 목표
@@ -688,12 +687,8 @@ model EstimateCache {
 //   - "PC 1위 / MOBILE 3위" 같은 분리 정책은 row 2개로 표현
 //   - 그룹 단위 정책은 P2 후속 (별도 모델 또는 ownerType 도입)
 //
-// 자동 조정 흐름 (F-11.2 후속):
-//   1) 매시간 cron 이 enabled=true policies 픽업
-//   2) StatHourly recentAvgRnk 와 targetRank 비교 → bidAmt 조정량 산출
-//   3) Guardrail (F-11.5: maxBid / minBid / 일 변경 한도) 적용
-//   4) Kill Switch (F-11.6: Advertiser.biddingKillSwitch) 검사 → skip
-//   5) ChangeBatch 생성 → SA bidAmt update → OptimizationRun 적재
+// 자동적용 흐름(F-11.2 cron + 실행 로그 적재)은 Phase B(2026-07-06)에서 은퇴.
+//   본 모델은 권고(bid-inbox) 트랙에서의 재활용 여부 미정 상태로 보존(데이터 없음).
 //
 // advertiserId 비정규화 (F-9.x / F-10 패턴 일관) — RLS 단일 EXISTS, Cascade 단순화.
 // 적재 시 keywordId owner advertiser resolve 책임은 backend 측 (호출부 보장).
@@ -711,7 +706,6 @@ model BiddingPolicy {
 
   advertiser Advertiser        @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
   keyword    Keyword           @relation(fields: [keywordId], references: [id], onDelete: Cascade)
-  runs       OptimizationRun[]
 
   // 같은 키워드+device 정책은 1개 — 정책 충돌 방지 (PC/MOBILE 각각 row)
   @@unique([keywordId, device])
@@ -719,55 +713,6 @@ model BiddingPolicy {
   @@index([advertiserId, enabled])
   // 키워드 단위 정책 lookup (정책 편집 / 삭제 / drift 검사)
   @@index([keywordId])
-}
-
-// =============================================================================
-// F-11.7 — 자동 비딩 실행 로그 (P2)
-// =============================================================================
-// 자동 비딩 / 수동 1회 변경 / 롤백 등 비딩 액션 단위 결과 기록.
-// trigger / result 는 string 으로 시작 (enum 승격은 후속 — 운영 중 케이스 확정 후).
-//
-// trigger 후보 (코드 상수 / Zod literal union):
-//   - "auto"     : F-11.2 매시간 cron 자동 조정
-//   - "manual"   : 사용자가 정책 화면에서 1회 적용
-//   - "rollback" : F-6.x 롤백 흐름이 비딩 정책 변경을 되돌림
-//
-// result 후보:
-//   - "success"               : SA bidAmt update 성공
-//   - "skipped_guardrail"     : Guardrail 한도 초과로 변경 미적용
-//   - "skipped_killswitch"    : Kill Switch ON 으로 차단
-//   - "failed"                : SA API 호출 실패 (errorMessage 채움)
-//
-// before / after 스냅샷:
-//   - { bidAmt, recentAvgRnk, targetRank } 등 — Json passthrough.
-//   - 매출/전환 사후 분석은 별도 ETL (본 모델은 변경 시점 스냅샷만).
-//
-// policyId nullable: 수동 1회 변경 (정책 없이 사용자가 1회 입찰가 변경) 케이스.
-//   policy 삭제 시 SetNull — 로그는 유지 (감사 추적).
-//
-// retention:
-//   광고주 N × 정책 M × 시간당 24 row → 1년 후 수십만~수백만 rows.
-//   retention cron 후속 PR (StatHourly / EstimateCache 패턴 일관) — 본 PR 모델만.
-model OptimizationRun {
-  id           String   @id @default(cuid())
-  advertiserId String // F-9.x 비정규화 — 광고주 단일 필터 / RLS 단순화
-  policyId     String? // null = 정책 없는 수동 1회 변경 (또는 정책 삭제 후 SetNull)
-  trigger      String // "auto" / "manual" / "rollback" (enum 승격은 후속)
-  before       Json? // 변경 전 스냅샷 ({ bidAmt, recentAvgRnk, ... })
-  after        Json? // 변경 후 스냅샷
-  result       String // "success" / "skipped_guardrail" / "skipped_killswitch" / "failed"
-  errorMessage String?  @db.VarChar(500)
-  triggeredAt  DateTime @default(now())
-
-  advertiser Advertiser     @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
-  policy     BiddingPolicy? @relation(fields: [policyId], references: [id], onDelete: SetNull)
-
-  // 광고주별 시간 윈도 read (실행 로그 페이지 — 최근 24h / 7d 필터)
-  @@index([advertiserId, triggeredAt])
-  // 정책별 실행 추이 (정책 상세 페이지 — 해당 정책의 최근 실행 결과)
-  @@index([policyId, triggeredAt])
-  // 실패 / 차단 trace (운영 모니터링 — failed / skipped_* 만 빠르게 조회)
-  @@index([result, triggeredAt])
 }
 
 // =============================================================================
@@ -864,7 +809,7 @@ model TargetingRule {
 //      processed=false 행만 ApprovalQueue 적재 cron 이 픽업.
 
 // 광고주 단위 비딩 자동화 설정 (1:1).
-//   mode 가 본 광고주의 자동화 행위 결정 — inbox / auto_policy_only / off.
+//   mode 가 본 광고주의 권고 생성 여부 결정 — inbox / off.
 //   목표 CPC / CTR / 평균순위는 CPC 기반 파워링크 운영 기준.
 //   목표 CPA / ROAS 는 전환·매출 데이터가 있을 때 사용하는 고급 판정 기준.
 model BidAutomationConfig {

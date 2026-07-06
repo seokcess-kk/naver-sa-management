@@ -22,16 +22,6 @@ import {
 // =============================================================================
 
 export type DailySummaryStats = {
-  /** 어제 KST 0시 ~ 24시 OptimizationRun 결과 카운트 (정책 등록 키워드 자동 비딩). */
-  optimizationRuns: {
-    success: number
-    skippedUserLock: number
-    skippedDeleted: number
-    skippedGuardrail: number
-    skippedKillSwitch: number
-    skippedNoChange: number
-    failed: number
-  }
   /** 어제 신규 적재된 BidSuggestion 카운트 (engineSource 별). */
   suggestionsCreated: {
     bid: number
@@ -69,22 +59,12 @@ export type DailySummaryResult = {
 // =============================================================================
 
 function buildPlainSummary(input: DailySummaryInput): string {
-  const o = input.stats.optimizationRuns
   const s = input.stats.suggestionsCreated
   const a = input.stats.alertEvents
-  const oTotal =
-    o.success +
-    o.skippedUserLock +
-    o.skippedDeleted +
-    o.skippedGuardrail +
-    o.skippedKillSwitch +
-    o.skippedNoChange +
-    o.failed
   const sTotal = s.bid + s.quality + s.targeting + s.budget
 
   return [
     `${input.date} ${input.advertiserName} 운영 요약`,
-    `자동 비딩 ${oTotal}건 — 성공 ${o.success} / Guardrail ${o.skippedGuardrail} / 실패 ${o.failed}`,
     `Inbox 권고 신규 ${sTotal}건 (입찰 ${s.bid} / 품질 ${s.quality} / 타게팅 ${s.targeting} / 예산 ${s.budget})`,
     `Inbox 적용 ${input.stats.suggestionsApplied}건`,
     `알림 — info ${a.info} / warn ${a.warn} / critical ${a.critical}`,
@@ -108,22 +88,12 @@ const SYSTEM_PROMPT = [
 ].join("\n")
 
 function buildUserPrompt(input: DailySummaryInput): string {
-  const o = input.stats.optimizationRuns
   const s = input.stats.suggestionsCreated
   const a = input.stats.alertEvents
   return JSON.stringify(
     {
       광고주: input.advertiserName,
       날짜: input.date,
-      자동비딩: {
-        성공: o.success,
-        가드레일차단: o.skippedGuardrail,
-        킬스위치차단: o.skippedKillSwitch,
-        userLock차단: o.skippedUserLock,
-        deleted차단: o.skippedDeleted,
-        변경없음: o.skippedNoChange,
-        실패: o.failed,
-      },
       Inbox권고신규: {
         입찰: s.bid,
         품질: s.quality,
@@ -209,51 +179,6 @@ export async function collectDailyStats(
     .toISOString()
     .slice(0, 10)
 
-  // -- OptimizationRun 결과별 카운트 ---------------------------------------
-  const optRows = await prisma.optimizationRun.groupBy({
-    by: ["result"],
-    where: {
-      advertiserId,
-      triggeredAt: { gte: yesterdayStart, lt: yesterdayEnd },
-    },
-    _count: { result: true },
-  })
-  const optCounts: DailySummaryStats["optimizationRuns"] = {
-    success: 0,
-    skippedUserLock: 0,
-    skippedDeleted: 0,
-    skippedGuardrail: 0,
-    skippedKillSwitch: 0,
-    skippedNoChange: 0,
-    failed: 0,
-  }
-  for (const r of optRows) {
-    const c = r._count.result
-    switch (r.result) {
-      case "success":
-        optCounts.success += c
-        break
-      case "skipped_user_lock":
-        optCounts.skippedUserLock += c
-        break
-      case "skipped_deleted":
-        optCounts.skippedDeleted += c
-        break
-      case "skipped_guardrail":
-        optCounts.skippedGuardrail += c
-        break
-      case "skipped_killswitch":
-        optCounts.skippedKillSwitch += c
-        break
-      case "skipped_no_change":
-        optCounts.skippedNoChange += c
-        break
-      case "failed":
-        optCounts.failed += c
-        break
-    }
-  }
-
   // -- BidSuggestion 신규 적재 (engineSource 별) ---------------------------
   const sugRows = await prisma.bidSuggestion.groupBy({
     by: ["engineSource"],
@@ -309,7 +234,6 @@ export async function collectDailyStats(
   })
 
   return {
-    optimizationRuns: optCounts,
     suggestionsCreated: sugCounts,
     suggestionsApplied: appliedCount,
     alertEvents: {

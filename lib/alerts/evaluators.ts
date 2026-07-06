@@ -4,7 +4,7 @@
  * tier 구분 (lib/alerts/registry.ts 가 단일 진실 원천):
  *   - P1 코어(항상 평가): budget_burn / bizmoney_low / inspect_rejected / cpc_surge / impressions_drop
  *   - P2 게이트(P2_ALERTS_ENABLED=true 일 때만): budget_pace / budget_pacing / rank_deviation /
- *     mobile_first_page / optimization_summary / suggestion_inbox / quality_stagnation
+ *     mobile_first_page / suggestion_inbox / quality_stagnation
  *   - api_auth_error: 평가기 함수는 보존하되 cron 합성 프로브에서 제외됨. 인증 실패의
  *     단일 출처는 실호출 실패 경로(lib/naver-sa/credentials.ts). 아래 3번 섹션 주석 참조.
  *
@@ -1054,99 +1054,6 @@ export async function evaluateMobileFirstPage(
 
   if (candidates.length > maxCandidates) return candidates.slice(0, maxCandidates)
   return candidates
-}
-
-// =============================================================================
-// 10. optimization_summary — 자동 비딩 일일 요약 (F-12.3)
-// =============================================================================
-
-/** optimization_summary rule.params shape. */
-export type OptimizationSummaryParams = {
-  /** KST 기준 보고 시각 (시간). 기본 9 (오전 9시). 0..23. */
-  dailyHourKst?: number
-}
-
-/**
- * 어제(KST) OptimizationRun 집계 → 광고주별 1건 일일 요약.
- *
- * Cron 매시간 호출되지만 KST 현재 시각 != dailyHourKst 면 빈 배열 (시간 게이트).
- * muteKey 에 yyyy-mm-dd (KST) 포함 — 같은 날 1회 보장.
- */
-export async function evaluateOptimizationSummary(
-  ctx: EvalContext,
-  rule: RuleSlice<OptimizationSummaryParams>,
-): Promise<AlertCandidate[]> {
-  const rawHour = rule.params?.dailyHourKst
-  const dailyHourKst =
-    typeof rawHour === "number" && Number.isFinite(rawHour) && rawHour >= 0 && rawHour <= 23
-      ? Math.floor(rawHour)
-      : 9
-
-  // 현재 KST 시각 (UTC + 9h)
-  const now = new Date()
-  const kstHour = (now.getUTCHours() + 9) % 24
-  if (kstHour !== dailyHourKst) return []
-
-  // 어제 KST 00:00 ~ 23:59 → UTC 변환 (KST 0시 = UTC 전날 15시)
-  const kstMs = now.getTime() + 9 * 60 * 60 * 1000
-  const kstDateOnly = new Date(kstMs)
-  kstDateOnly.setUTCHours(0, 0, 0, 0)
-  // 어제 KST 0시 (UTC)
-  const yesterdayKstStart = new Date(kstDateOnly.getTime() - 24 * 60 * 60 * 1000 - 9 * 60 * 60 * 1000)
-  const yesterdayKstEnd = new Date(yesterdayKstStart.getTime() + 24 * 60 * 60 * 1000)
-
-  // 어제 OptimizationRun 광고주별 result 집계
-  const runs = await prisma.optimizationRun.groupBy({
-    by: ["result"],
-    where: {
-      advertiserId: ctx.advertiserId,
-      triggeredAt: { gte: yesterdayKstStart, lt: yesterdayKstEnd },
-    },
-    _count: { result: true },
-  })
-
-  if (runs.length === 0) return []
-
-  const counts = {
-    success: 0,
-    skipped_user_lock: 0,
-    skipped_deleted: 0,
-    skipped_guardrail: 0,
-    skipped_no_change: 0,
-    skipped_other: 0,
-    failed: 0,
-  } as Record<string, number>
-  for (const r of runs) {
-    const k = r.result
-    counts[k] = (counts[k] ?? 0) + r._count.result
-  }
-  const total = Object.values(counts).reduce((s, n) => s + n, 0)
-  const success = counts.success ?? 0
-  const failed = counts.failed ?? 0
-  const guardrail = counts.skipped_guardrail ?? 0
-
-  // KST 어제 yyyy-mm-dd 문자열 (mute key)
-  const yyyyMmDd = new Date(yesterdayKstStart.getTime() + 9 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10)
-
-  const severity = failed > 0 ? "warn" : "info"
-
-  return [
-    {
-      ruleType: "optimization_summary",
-      severity,
-      title: `자동 비딩 일일 요약 (${yyyyMmDd})`,
-      body: `총 ${total}건 — 성공 ${success}건 / Guardrail ${guardrail}건 / 실패 ${failed}건.`,
-      meta: {
-        advertiserId: ctx.advertiserId,
-        date: yyyyMmDd,
-        counts,
-        total,
-      },
-      muteKey: `optimization_summary:${ctx.advertiserId}:${yyyyMmDd}`,
-    },
-  ]
 }
 
 // =============================================================================

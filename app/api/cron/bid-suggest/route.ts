@@ -30,7 +30,7 @@
  * 정책:
  *   - BidSuggestion 키워드별 active pending engineSource='bid' 1개만 (코드 강제)
  *   - expiresAt = +7d 기본
- *   - BiddingPolicy 등록 키워드 제외 — auto-bidding cron 이 자동 실행 대상
+ *   - BiddingPolicy 등록 키워드도 후보에 포함 — 권고(Inbox)는 정책 유무와 무관
  *
  * Vercel maxDuration:
  *   - Pro 900s 한도 → 800. 광고주 N <= ~13 + TOP 100 키워드 직렬 가정.
