@@ -1,12 +1,19 @@
 /**
  * 빠른 진입 카드 (사이드 1/3)
  *
- * - 광고 구조 5종(캠페인 / 광고그룹 / 키워드 / 소재 / 확장소재)
- * - 비딩 최적화 (P2) 3종(비딩 정책 / 한계효용 분석 / 시간대 타게팅)
+ * section-nav(components/navigation/dashboard-section-nav.tsx) 와 동일한 항목·라벨을
+ * 노출한다. 라벨은 lib/navigation/section-labels(단일 진실 원천)을 참조 —
+ * nav / quick-nav 간 명칭 불일치를 제거하기 위함.
+ *
+ * 구성 (section-nav 그룹과 1:1 대응):
+ *   - 광고 구조 5종 (캠페인 / 광고그룹 / 키워드 / 소재 / 확장소재)
+ *   - 비딩 3종 (비딩 정책 / 운영 Inbox / 타게팅)
+ *   - 분석 2종 (한계효용 / 검색어 분석)
+ *   - 승인 1종 (승인 대기)
  *
  * RSC. 인터랙션 없음 — 단순 Link 묶음 (Next.js prefetch 적용).
  *
- * URL 패턴: `/[advertiserId]/{feature}` (광고주별 컨텍스트 — SPEC 11.2 / 안전장치 7).
+ * URL 패턴: `/[advertiserId]/{segment}` (광고주별 컨텍스트 — SPEC 11.2 / 안전장치 7).
  */
 
 import Link from "next/link"
@@ -17,32 +24,47 @@ import {
   ImageIcon,
   MessageSquareIcon,
   TrendingUpIcon,
-  BarChart3Icon,
+  InboxIcon,
   ClockIcon,
+  BarChart3Icon,
+  SearchIcon,
+  ClipboardCheckIcon,
   type LucideIcon,
 } from "lucide-react"
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  SECTION_LABELS,
+  type SectionSegment,
+} from "@/lib/navigation/section-labels"
 
 type NavLink = {
-  /** 광고주 컨텍스트 경로의 마지막 segment (예: "campaigns"). */
-  segment: string
+  /** 광고주 컨텍스트 경로의 마지막 segment (예: "campaigns"). 라벨은 SECTION_LABELS 참조. */
+  segment: SectionSegment
   icon: LucideIcon
-  label: string
 }
 
 const STRUCTURE_LINKS: NavLink[] = [
-  { segment: "campaigns", icon: MegaphoneIcon, label: "캠페인" },
-  { segment: "adgroups", icon: FolderIcon, label: "광고그룹" },
-  { segment: "keywords", icon: KeyboardIcon, label: "키워드" },
-  { segment: "ads", icon: ImageIcon, label: "소재" },
-  { segment: "extensions", icon: MessageSquareIcon, label: "확장소재" },
+  { segment: "campaigns", icon: MegaphoneIcon },
+  { segment: "adgroups", icon: FolderIcon },
+  { segment: "keywords", icon: KeyboardIcon },
+  { segment: "ads", icon: ImageIcon },
+  { segment: "extensions", icon: MessageSquareIcon },
 ]
 
-const P2_LINKS: NavLink[] = [
-  { segment: "bidding-policies", icon: TrendingUpIcon, label: "비딩 정책" },
-  { segment: "marginal-utility", icon: BarChart3Icon, label: "한계효용 분석" },
-  { segment: "targeting", icon: ClockIcon, label: "시간대 타게팅" },
+const BIDDING_LINKS: NavLink[] = [
+  { segment: "bidding-policies", icon: TrendingUpIcon },
+  { segment: "bid-inbox", icon: InboxIcon },
+  { segment: "targeting", icon: ClockIcon },
+]
+
+const ANALYSIS_LINKS: NavLink[] = [
+  { segment: "marginal-utility", icon: BarChart3Icon },
+  { segment: "search-term-import", icon: SearchIcon },
+]
+
+const APPROVAL_LINKS: NavLink[] = [
+  { segment: "approval-queue", icon: ClipboardCheckIcon },
 ]
 
 export function QuickNavCard({ advertiserId }: { advertiserId: string }) {
@@ -59,8 +81,20 @@ export function QuickNavCard({ advertiserId }: { advertiserId: string }) {
         />
         <div className="border-t" aria-hidden />
         <NavSection
-          title="비딩 최적화"
-          links={P2_LINKS}
+          title="비딩"
+          links={BIDDING_LINKS}
+          advertiserId={advertiserId}
+        />
+        <div className="border-t" aria-hidden />
+        <NavSection
+          title="분석"
+          links={ANALYSIS_LINKS}
+          advertiserId={advertiserId}
+        />
+        <div className="border-t" aria-hidden />
+        <NavSection
+          title="승인"
+          links={APPROVAL_LINKS}
           advertiserId={advertiserId}
         />
       </CardContent>
@@ -92,7 +126,7 @@ function NavSection({
               className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-muted"
             >
               <Icon className="size-4 shrink-0 text-muted-foreground" />
-              <span className="truncate">{l.label}</span>
+              <span className="truncate">{SECTION_LABELS[l.segment]}</span>
             </Link>
           )
         })}

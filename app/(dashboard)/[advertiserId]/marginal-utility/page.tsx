@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/card"
 import { MarginalUtilityClient } from "@/components/bidding/marginal-utility-client"
 import { PageHeader } from "@/components/navigation/page-header"
+import { SECTION_LABELS } from "@/lib/navigation/section-labels"
 
 export default async function MarginalUtilityPage({
   params,
@@ -57,7 +58,7 @@ export default async function MarginalUtilityPage({
   return (
     <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
-        title="한계효용 분석"
+        title={SECTION_LABELS["marginal-utility"]}
         description="최근 7일 · 디바이스별 1~5위 입찰 한계효용 비교"
         helpText={
           <>
@@ -88,7 +89,7 @@ export default async function MarginalUtilityPage({
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
-          { label: "한계효용 분석" },
+          { label: SECTION_LABELS["marginal-utility"] },
         ]}
       />
 

@@ -19,6 +19,7 @@ import {
   parseAdgroupScopeIds,
   parseCampaignScopeIds,
 } from "@/lib/navigation/campaign-scope"
+import { SECTION_LABELS } from "@/lib/navigation/section-labels"
 import { cn } from "@/lib/utils"
 
 type DashboardSection = {
@@ -27,13 +28,14 @@ type DashboardSection = {
 }
 
 // 1차 — 매일 사용하는 6개 운영 화면. sticky 탭으로 항상 노출.
+// 라벨은 lib/navigation/section-labels(단일 진실 원천) 참조.
 const primarySections: DashboardSection[] = [
-  { href: "", label: "대시보드" },
-  { href: "/campaigns", label: "캠페인" },
-  { href: "/adgroups", label: "광고그룹" },
-  { href: "/keywords", label: "키워드" },
-  { href: "/ads", label: "소재" },
-  { href: "/extensions", label: "확장소재" },
+  { href: "", label: SECTION_LABELS.dashboard },
+  { href: "/campaigns", label: SECTION_LABELS.campaigns },
+  { href: "/adgroups", label: SECTION_LABELS.adgroups },
+  { href: "/keywords", label: SECTION_LABELS.keywords },
+  { href: "/ads", label: SECTION_LABELS.ads },
+  { href: "/extensions", label: SECTION_LABELS.extensions },
 ]
 
 // 2차 — 주간/이벤트성으로 쓰는 6개. "더보기" 드롭다운으로 접되 그룹 라벨로 분리.
@@ -47,21 +49,26 @@ const advancedGroups: AdvancedGroup[] = [
   {
     label: "비딩",
     sections: [
-      { href: "/bidding-policies", label: "비딩 정책" },
-      { href: "/bid-inbox", label: "운영 Inbox" },
-      { href: "/targeting", label: "타게팅" },
+      { href: "/bidding-policies", label: SECTION_LABELS["bidding-policies"] },
+      { href: "/bid-inbox", label: SECTION_LABELS["bid-inbox"] },
+      { href: "/targeting", label: SECTION_LABELS.targeting },
     ],
   },
   {
     label: "분석",
     sections: [
-      { href: "/marginal-utility", label: "한계효용" },
-      { href: "/search-term-import", label: "검색어 분석" },
+      { href: "/marginal-utility", label: SECTION_LABELS["marginal-utility"] },
+      {
+        href: "/search-term-import",
+        label: SECTION_LABELS["search-term-import"],
+      },
     ],
   },
   {
     label: "승인",
-    sections: [{ href: "/approval-queue", label: "승인 큐" }],
+    sections: [
+      { href: "/approval-queue", label: SECTION_LABELS["approval-queue"] },
+    ],
   },
 ]
 

@@ -25,6 +25,7 @@ import {
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
 import { PageHeader } from "@/components/navigation/page-header"
+import { SECTION_LABELS } from "@/lib/navigation/section-labels"
 import { SearchTermImportClient } from "@/components/dashboard/search-term-import-client"
 
 export default async function SearchTermImportPage({
@@ -111,7 +112,7 @@ export default async function SearchTermImportPage({
   return (
     <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
-        title="검색어 보고서 분석"
+        title={SECTION_LABELS["search-term-import"]}
         helpText={
           <>
             <p className="font-medium text-foreground">사용 방법</p>
@@ -124,7 +125,7 @@ export default async function SearchTermImportPage({
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
-          { label: "검색어 분석" },
+          { label: SECTION_LABELS["search-term-import"] },
         ]}
       />
 

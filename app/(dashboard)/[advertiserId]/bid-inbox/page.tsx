@@ -1,5 +1,5 @@
 /**
- * Suggestion Inbox 페이지 (F-11.4 Phase B.3)
+ * 운영 Inbox 페이지 (F-11.4 Phase B.3) — 코드/URL 은 bid-inbox, UI 명칭은 "운영 Inbox"
  *
  * - RSC. 권한 검증 → BidSuggestion 활성 pending 조회 (engineSource 필터 옵션)
  *   → 클라이언트 테이블 위임
@@ -23,6 +23,7 @@ import {
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
 import { PageHeader } from "@/components/navigation/page-header"
+import { SECTION_LABELS } from "@/lib/navigation/section-labels"
 import { BidSuggestionTable } from "@/components/bidding/bid-suggestion-table"
 import type { BidSuggestionRow } from "@/app/(dashboard)/[advertiserId]/bid-inbox/actions"
 
@@ -126,7 +127,7 @@ export default async function BidInboxPage({
   return (
     <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
-        title="운영 Inbox"
+        title={SECTION_LABELS["bid-inbox"]}
         helpText={
           <>
             <p className="font-medium text-foreground">사용 방법</p>
@@ -140,7 +141,7 @@ export default async function BidInboxPage({
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
-          { label: "운영 Inbox" },
+          { label: SECTION_LABELS["bid-inbox"] },
         ]}
       />
 

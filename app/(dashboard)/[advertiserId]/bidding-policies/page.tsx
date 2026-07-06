@@ -29,6 +29,7 @@ import { listBiddingPolicies } from "@/app/(dashboard)/[advertiserId]/bidding-po
 import { PolicyTableClient } from "@/components/bidding/policy-table-client"
 import { KillSwitchBanner } from "@/components/bidding/kill-switch-banner"
 import { PageHeader } from "@/components/navigation/page-header"
+import { SECTION_LABELS } from "@/lib/navigation/section-labels"
 
 export default async function BiddingPoliciesPage({
   params,
@@ -90,7 +91,7 @@ export default async function BiddingPoliciesPage({
   return (
     <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
-        title="비딩 정책"
+        title={SECTION_LABELS["bidding-policies"]}
         helpText={
           <>
             <p className="font-medium text-foreground">사용 방법</p>
@@ -104,7 +105,7 @@ export default async function BiddingPoliciesPage({
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
-          { label: "비딩 정책" },
+          { label: SECTION_LABELS["bidding-policies"] },
         ]}
       />
 

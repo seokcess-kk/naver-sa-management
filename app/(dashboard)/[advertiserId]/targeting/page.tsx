@@ -30,6 +30,7 @@ import {
 import { TargetingClient } from "@/components/bidding/targeting-client"
 import { getTargetingRule } from "@/app/(dashboard)/[advertiserId]/targeting/actions"
 import { PageHeader } from "@/components/navigation/page-header"
+import { SECTION_LABELS } from "@/lib/navigation/section-labels"
 
 export default async function TargetingPage({
   params,
@@ -64,10 +65,10 @@ export default async function TargetingPage({
     return (
       <div className="flex flex-col gap-6 p-4 md:p-6">
         <PageHeader
-          title="시간대·지역 타게팅"
+          title={SECTION_LABELS.targeting}
           breadcrumbs={[
             { label: advertiser.name, href: `/${advertiserId}` },
-            { label: "타게팅" },
+            { label: SECTION_LABELS.targeting },
           ]}
         />
         <Card>
@@ -85,7 +86,7 @@ export default async function TargetingPage({
   return (
     <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
-        title="시간대·지역 타게팅"
+        title={SECTION_LABELS.targeting}
         helpText={
           <>
             <p className="font-medium text-foreground">사용 방법</p>
@@ -104,7 +105,7 @@ export default async function TargetingPage({
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
-          { label: "타게팅" },
+          { label: SECTION_LABELS.targeting },
         ]}
       />
 

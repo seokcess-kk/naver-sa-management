@@ -342,8 +342,9 @@ export function TargetingClient({
             지역 가중치 (자동 비딩 미적용 — 후속 PR)
           </CardTitle>
           <CardDescription>
-            네이버 SA API 가 키워드별 노출 지역을 분리 응답하지 않아 매칭
-            불가합니다. 입력값은 모델만 보존됩니다.
+            네이버 SA API 가 키워드별 노출 지역을 분리 응답하지 않아 매칭이
+            불가합니다. 아래 값을 저장해도 입찰가 권고에는 반영되지 않으며, SA
+            응답이 확장되는 시점을 대비해 입력값(모델)만 보존됩니다.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-3 py-4 sm:grid-cols-3 md:grid-cols-4">

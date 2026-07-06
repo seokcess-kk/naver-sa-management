@@ -539,10 +539,11 @@ export function SearchTermImportClient({
           {/* 보고서 저장 (선택) */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">보고서 저장 (선택)</CardTitle>
+              <CardTitle className="text-base">보고서 저장 (준비 중)</CardTitle>
               <CardDescription>
-                분석 결과를 보고서로 저장합니다. 같은 광고주 · 같은 주차는
-                덮어쓰기됩니다. 저장된 보고서는 이후 승인 큐로 자동 전달됩니다.
+                분석 결과를 주차별 보고서로 저장하는 기능입니다. 저장 데이터를
+                활용하는 후속 화면이 아직 없어 현재는 비활성입니다. 신규 후보는
+                위 표의 &quot;승인 큐로&quot; 버튼으로 바로 등록하세요.
               </CardDescription>
             </CardHeader>
             <CardContent className="flex flex-wrap items-end gap-3">
@@ -559,26 +560,21 @@ export function SearchTermImportClient({
                   className="w-44"
                 />
               </div>
+              {/*
+               * 보고서 저장: SearchTermReport 는 아직 write-only(읽는 화면 없음)라
+               * "설정하면 되는" 오해를 준다. 준비 중 표기 + 영구 비활성.
+               * 신규 후보 등록의 실제 경로는 위 표의 "승인 큐로" 버튼.
+               */}
               <Button
                 onClick={handleSaveReport}
-                disabled={!canMutate || saving || !result}
+                disabled
                 size="sm"
                 variant="outline"
+                title="후속 화면 준비 중"
               >
-                {saving ? (
-                  "저장 중..."
-                ) : (
-                  <>
-                    <SaveIcon className="size-4" />
-                    보고서 저장
-                  </>
-                )}
+                <SaveIcon className="size-4" />
+                보고서 저장 (준비 중)
               </Button>
-              {!canMutate && (
-                <span className="text-xs text-muted-foreground">
-                  (viewer 는 저장 불가)
-                </span>
-              )}
               {savedReportId && (
                 <span className="break-all font-mono text-[11px] text-muted-foreground">
                   saved · {savedReportId}

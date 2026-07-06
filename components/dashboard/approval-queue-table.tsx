@@ -331,8 +331,12 @@ export function ApprovalQueueTable({
             <SelectItem value="search_term_promote">
               신규 키워드 등록
             </SelectItem>
-            <SelectItem value="search_term_exclude">
-              제외 키워드 등록 (보류)
+            {/*
+             * 제외 키워드 등록: 생성 경로가 아직 없어(네이버 SA endpoint 미확인)
+             * 필터해도 결과가 늘 비어 오해를 준다. 준비 중 표기 + 비활성.
+             */}
+            <SelectItem value="search_term_exclude" disabled>
+              제외 키워드 등록 (준비 중)
             </SelectItem>
           </SelectContent>
         </Select>
@@ -377,7 +381,7 @@ export function ApprovalQueueTable({
                     aria-label="필터된 항목 전체 선택"
                   />
                 </TableHead>
-                <TableHead className="w-44">kind</TableHead>
+                <TableHead className="w-44">유형</TableHead>
                 <TableHead>검색어</TableHead>
                 <TableHead className="w-64">광고그룹</TableHead>
                 <TableHead className="w-24 text-right">노출</TableHead>

@@ -309,17 +309,9 @@ function ResultView<TItem>({
         >
           <CopyIcon />
         </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled
-          title="롤백 화면 준비 중"
-        >
-          롤백 페이지로 이동
-        </Button>
       </div>
       <p className="text-[11px] text-muted-foreground">
-        롤백 페이지에서 위 ID 로 변경 이력을 조회·되돌릴 수 있습니다.
+        admin 변경 이력 화면에서 이 변경 ID로 조회할 수 있습니다.
       </p>
 
       {failedItems.length > 0 && (

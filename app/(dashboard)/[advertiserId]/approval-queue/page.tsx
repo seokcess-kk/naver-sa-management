@@ -25,6 +25,7 @@ import {
 } from "@/lib/auth/access"
 import { prisma } from "@/lib/db/prisma"
 import { PageHeader } from "@/components/navigation/page-header"
+import { SECTION_LABELS } from "@/lib/navigation/section-labels"
 import {
   ApprovalQueueTable,
   type ApprovalQueueRow,
@@ -107,7 +108,7 @@ export default async function ApprovalQueuePage({
   return (
     <div className="flex flex-col gap-6 p-4 md:p-6">
       <PageHeader
-        title="승인 큐"
+        title={SECTION_LABELS["approval-queue"]}
         helpText={
           <>
             <p className="font-medium text-foreground">사용 방법</p>
@@ -119,7 +120,7 @@ export default async function ApprovalQueuePage({
         }
         breadcrumbs={[
           { label: advertiser.name, href: `/${advertiserId}` },
-          { label: "승인 큐" },
+          { label: SECTION_LABELS["approval-queue"] },
         ]}
       />
 
