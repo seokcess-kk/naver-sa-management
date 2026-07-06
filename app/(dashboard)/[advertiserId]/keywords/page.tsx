@@ -39,7 +39,7 @@ import type {
   KeywordRow,
   AdgroupOption,
 } from "@/components/dashboard/keywords-table"
-import { SyncKeywordsWithFilter } from "@/components/dashboard/sync-keywords-with-filter"
+import { SyncWithCampaignFilter } from "@/components/dashboard/sync-with-campaign-filter"
 import { LastSyncBadge } from "@/components/dashboard/last-sync-badge"
 import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import { getLastSyncAt } from "@/lib/sync/last-sync-at"
@@ -323,7 +323,8 @@ export default async function KeywordsPage({
         actions={
           <>
             <LastSyncBadge syncedAt={keywordsLastSync} />
-            <SyncKeywordsWithFilter
+            <SyncWithCampaignFilter
+              entity="keywords"
               advertiserId={advertiserId}
               hasKeys={advertiser.hasKeys}
               campaigns={syncCampaigns}

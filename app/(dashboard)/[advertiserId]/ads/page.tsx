@@ -35,7 +35,7 @@ import type {
   AdRow,
   AdAdgroupOption,
 } from "@/components/dashboard/ads-table"
-import { SyncAdsWithFilter } from "@/components/dashboard/sync-ads-with-filter"
+import { SyncWithCampaignFilter } from "@/components/dashboard/sync-with-campaign-filter"
 import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import {
   parseAdgroupScopeIds,
@@ -233,7 +233,8 @@ export default async function AdsPage({
           { label: "소재" },
         ]}
         actions={
-          <SyncAdsWithFilter
+          <SyncWithCampaignFilter
+            entity="ads"
             advertiserId={advertiserId}
             hasKeys={advertiser.hasKeys}
             campaigns={syncCampaigns}

@@ -112,9 +112,9 @@ import {
   type AdgroupFilterOption,
 } from "@/components/dashboard/keywords-scope-filter"
 import {
-  KeywordsDeleteModal,
+  SingleDeleteModal,
   type DeleteTargetRow,
-} from "@/components/dashboard/keywords-delete-modal"
+} from "@/components/dashboard/single-delete-modal"
 import { KeywordEstimateModal } from "@/components/dashboard/keyword-estimate-modal"
 import {
   DropdownMenu,
@@ -1964,7 +1964,8 @@ export function KeywordsTable({
 
       {/* F-3.7 단건 삭제 모달 */}
       {deleteRow !== null && (
-        <KeywordsDeleteModal
+        <SingleDeleteModal
+          entity="keyword"
           advertiserId={advertiserId}
           row={mapToDeleteTarget(deleteRow)}
           open

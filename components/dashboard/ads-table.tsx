@@ -26,7 +26,7 @@
  *   - 헤더 "소재 추가" 버튼. hasKeys=false / 광고그룹 0개 시 disabled.
  *
  * F-4.7 — 단건 삭제 (admin 한정 + 2차 확인):
- *   - 행 케밥 메뉴 → AdsDeleteModal (nccAdId 재입력)
+ *   - 행 케밥 메뉴 → SingleDeleteModal(entity="ad") (nccAdId 재입력)
  *   - userRole !== 'admin' 일 때 메뉴 자체 disabled
  *   - status='deleted' 행은 메뉴 disabled (이미 삭제됨)
  *
@@ -108,9 +108,9 @@ import {
   type AdAdgroupOption,
 } from "@/components/dashboard/ads-add-modal"
 import {
-  AdsDeleteModal,
+  SingleDeleteModal,
   type DeleteAdTargetRow,
-} from "@/components/dashboard/ads-delete-modal"
+} from "@/components/dashboard/single-delete-modal"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -1581,7 +1581,8 @@ export function AdsTable({
 
       {/* F-4.7 단건 삭제 모달 (admin 한정) — deleteRow!=null 시만 mount → 자동 reset */}
       {deleteRow !== null && (
-        <AdsDeleteModal
+        <SingleDeleteModal
+          entity="ad"
           advertiserId={advertiserId}
           row={mapToDeleteTarget(deleteRow)}
           open

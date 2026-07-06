@@ -3,7 +3,7 @@
 /**
  * 키워드 페이지 toolbar용 캠페인 / 광고그룹 다중 선택 필터 (F-3.1).
  *
- * sync-keywords-with-filter.tsx 의 CampaignMultiSelect 패턴 복제 — 키워드 동기화 범위 선택과는 별개로
+ * sync-with-campaign-filter.tsx 의 CampaignMultiSelect 패턴 복제 — 키워드 동기화 범위 선택과는 별개로
  * 키워드 목록 조회 범위(URL `campaignIds` / `adgroupIds`)를 인터랙티브하게 좁히는 용도.
  *
  * 동작:
@@ -14,7 +14,7 @@
  *
  * UI:
  *   - 데스크탑: DropdownMenu (sm 이상)
- *   - 모바일:   Dialog (sm 미만) — sync-keywords-with-filter 와 동일
+ *   - 모바일:   Dialog (sm 미만) — sync-with-campaign-filter 와 동일
  *   - 10개 이상이면 검색 input 노출
  *
  * SPEC v0.2.1 6.2 F-3.1 / 11.2.

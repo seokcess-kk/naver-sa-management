@@ -31,7 +31,7 @@ import { prisma } from "@/lib/db/prisma"
 import { PageHeader } from "@/components/navigation/page-header"
 import { AdgroupsTable } from "@/components/dashboard/adgroups-table"
 import type { AdgroupRow } from "@/components/dashboard/adgroups-table"
-import { SyncAdgroupsWithFilter } from "@/components/dashboard/sync-adgroups-with-filter"
+import { SyncWithCampaignFilter } from "@/components/dashboard/sync-with-campaign-filter"
 import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import {
   parseAdgroupScopeIds,
@@ -164,7 +164,8 @@ export default async function AdgroupsPage({
           { label: "광고그룹" },
         ]}
         actions={
-          <SyncAdgroupsWithFilter
+          <SyncWithCampaignFilter
+            entity="adgroups"
             advertiserId={advertiserId}
             hasKeys={advertiser.hasKeys}
             campaigns={syncCampaigns}

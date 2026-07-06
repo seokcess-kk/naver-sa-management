@@ -40,7 +40,7 @@ import type {
   ExtensionRow,
   ExtensionAdgroupOption,
 } from "@/components/dashboard/extensions-table"
-import { SyncExtensionsWithFilter } from "@/components/dashboard/sync-extensions-with-filter"
+import { SyncWithCampaignFilter } from "@/components/dashboard/sync-with-campaign-filter"
 import { ScopeClearLink } from "@/components/dashboard/scope-clear-link"
 import {
   parseAdgroupScopeIds,
@@ -249,7 +249,8 @@ export default async function ExtensionsPage({
           { label: "확장소재" },
         ]}
         actions={
-          <SyncExtensionsWithFilter
+          <SyncWithCampaignFilter
+            entity="extensions"
             advertiserId={advertiser.id}
             hasKeys={advertiser.hasKeys}
             campaigns={syncCampaigns}

@@ -34,7 +34,7 @@
  *
  * 폼 라이브러리:
  *   useState — 단순 입력 5개 + 동기 검증만 필요해 react-hook-form 비용 대비 가치 낮음.
- *   본 코드베이스 다른 모달 (KeywordsAddModal / AdsDeleteModal) 도 동일 패턴.
+ *   본 코드베이스 다른 모달 (KeywordsAddModal / SingleDeleteModal) 도 동일 패턴.
  *
  * SPEC 6.2 F-4.6.
  */

@@ -26,7 +26,7 @@
  *   - 헤더 "확장소재 추가" 버튼. hasKeys=false / 광고그룹 0개 시 disabled.
  *
  * F-5.x — 단건 삭제 (admin 한정 + 2차 확인):
- *   - 행 케밥 메뉴 → ExtensionsDeleteModal (텍스트 재입력)
+ *   - 행 케밥 메뉴 → SingleDeleteModal(entity="extension") (텍스트 재입력)
  *   - userRole !== 'admin' 일 때 메뉴 자체 disabled
  *   - status='deleted' 행은 메뉴 disabled (이미 삭제됨)
  *
@@ -109,9 +109,9 @@ import {
 } from "@/components/dashboard/extensions-add-modal"
 import { ExtensionsImageAddModal } from "@/components/dashboard/extensions-image-add-modal"
 import {
-  ExtensionsDeleteModal,
+  SingleDeleteModal,
   type DeleteAdExtensionTargetRow,
-} from "@/components/dashboard/extensions-delete-modal"
+} from "@/components/dashboard/single-delete-modal"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -1427,7 +1427,8 @@ export function ExtensionsTable({
 
       {/* 단건 삭제 모달 (admin 한정) */}
       {deleteRow !== null && (
-        <ExtensionsDeleteModal
+        <SingleDeleteModal
+          entity="extension"
           advertiserId={advertiserId}
           row={mapToDeleteTarget(deleteRow)}
           open
