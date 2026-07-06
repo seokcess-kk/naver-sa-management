@@ -94,12 +94,6 @@ const ALERT_TYPES: { value: AlertRuleType; label: string; description: string }[
     description: "현재 시각 기준 예상 페이스 대비 N%p 이상 초과 소진 (기본 +30%p)",
   },
   {
-    value: "rank_deviation",
-    label: "목표 순위 이탈 (rank_deviation)",
-    description:
-      "BiddingPolicy 등록 키워드의 평균 노출 순위가 목표 ±N에서 벗어남 (기본 ±2)",
-  },
-  {
     value: "mobile_first_page",
     label: "모바일 첫 페이지 이탈 (mobile_first_page)",
     description:

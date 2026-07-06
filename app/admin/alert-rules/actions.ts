@@ -35,7 +35,6 @@ export type AlertRuleType =
   | "cpc_surge"
   | "impressions_drop"
   | "budget_pace"
-  | "rank_deviation"
   | "mobile_first_page"
   | "suggestion_inbox"
   | "quality_stagnation"
@@ -74,7 +73,6 @@ const alertRuleTypeSchema = z.enum([
   "cpc_surge",
   "impressions_drop",
   "budget_pace",
-  "rank_deviation",
   "mobile_first_page",
   "suggestion_inbox",
   "quality_stagnation",
@@ -141,14 +139,6 @@ const budgetPaceParamsSchema = z
     advertiserId: advertiserIdSchema,
     deviationPct: z.number().int().min(5).max(100).optional(),
     minHour: z.number().int().min(1).max(23).optional(),
-  })
-  .strict()
-
-const rankDeviationParamsSchema = z
-  .object({
-    advertiserId: advertiserIdSchema,
-    tolerance: z.number().int().min(1).max(10).optional(),
-    maxCandidates: z.number().int().min(1).max(200).optional(),
   })
   .strict()
 
@@ -223,9 +213,6 @@ function validateParams(
       break
     case "budget_pace":
       parsed = budgetPaceParamsSchema.safeParse(params)
-      break
-    case "rank_deviation":
-      parsed = rankDeviationParamsSchema.safeParse(params)
       break
     case "mobile_first_page":
       parsed = mobileFirstPageParamsSchema.safeParse(params)

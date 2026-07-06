@@ -7,7 +7,7 @@
  *
  * 구성 (section-nav 그룹과 1:1 대응):
  *   - 광고 구조 5종 (캠페인 / 광고그룹 / 키워드 / 소재 / 확장소재)
- *   - 비딩 3종 (비딩 정책 / 운영 Inbox / 타게팅)
+ *   - 비딩 2종 (운영 Inbox / 타게팅)
  *   - 분석 2종 (한계효용 / 검색어 분석)
  *   - 승인 1종 (승인 대기)
  *
@@ -23,7 +23,6 @@ import {
   KeyboardIcon,
   ImageIcon,
   MessageSquareIcon,
-  TrendingUpIcon,
   InboxIcon,
   ClockIcon,
   BarChart3Icon,
@@ -53,7 +52,6 @@ const STRUCTURE_LINKS: NavLink[] = [
 ]
 
 const BIDDING_LINKS: NavLink[] = [
-  { segment: "bidding-policies", icon: TrendingUpIcon },
   { segment: "bid-inbox", icon: InboxIcon },
   { segment: "targeting", icon: ClockIcon },
 ]

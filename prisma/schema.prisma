@@ -289,7 +289,6 @@ model Advertiser {
   //   maxChangesPerKeyword: 키워드별 24h 내 자동 변경 횟수 한도 (1..20, 기본 3).
   //   maxChangesPerDay: 광고주별 24h 내 총 변경 횟수 한도 (1..1000, 기본 50).
   //   범위 검증은 호출부 Zod (UpdateAdvertiserGuardrail) 에서 강제. DB 는 default 만 강제.
-  //   룰(BiddingPolicy) 단위 한도는 본 PR 비포함 — 운영 데이터 누적 후 재검토.
   guardrailEnabled              Boolean          @default(true)
   guardrailMaxBidChangePct      Int              @default(20)
   guardrailMaxChangesPerKeyword Int              @default(3)
@@ -312,7 +311,6 @@ model Advertiser {
   stats                     StatDaily[]
   statsHourly               StatHourly[]
   estimateCaches            EstimateCache[]
-  biddingPolicies           BiddingPolicy[]
   targetingRule             TargetingRule? // F-11.4 — 광고주 1:1
   // F-11 / F-12 — 비딩 자동화 재설계 (Inbox + ApprovalQueue + 자동화 설정)
   bidAutomationConfig       BidAutomationConfig? // 1:1 — 자동화 모드 / 페이싱 / 목표
@@ -401,7 +399,6 @@ model Keyword {
 
   adgroup         AdGroup         @relation(fields: [adgroupId], references: [id], onDelete: Cascade)
   estimateCaches  EstimateCache[]
-  biddingPolicies BiddingPolicy[]
   bidSuggestions  BidSuggestion[]
 
   @@index([adgroupId, status])
@@ -679,49 +676,12 @@ model EstimateCache {
 }
 
 // =============================================================================
-// F-11.1 — 비딩 정책 (P2)
-// =============================================================================
-// 키워드 단위 목표 노출 순위 정책. 디바이스(PC/MOBILE)는 별도 row 로 분리:
-//   - StatDevice enum 재사용 (PC / MOBILE 만 사용. ALL 은 본 모델에서 비사용 — 코드 정책)
-//   - UNIQUE [keywordId, device] → 같은 키워드+device 조합당 정책 1개
-//   - "PC 1위 / MOBILE 3위" 같은 분리 정책은 row 2개로 표현
-//   - 그룹 단위 정책은 P2 후속 (별도 모델 또는 ownerType 도입)
-//
-// 자동적용 흐름(F-11.2 cron + 실행 로그 적재)은 Phase B(2026-07-06)에서 은퇴.
-//   본 모델은 권고(bid-inbox) 트랙에서의 재활용 여부 미정 상태로 보존(데이터 없음).
-//
-// advertiserId 비정규화 (F-9.x / F-10 패턴 일관) — RLS 단일 EXISTS, Cascade 단순화.
-// 적재 시 keywordId owner advertiser resolve 책임은 backend 측 (호출부 보장).
-model BiddingPolicy {
-  id           String     @id @default(cuid())
-  advertiserId String // F-9.x 비정규화 — RLS 단일 EXISTS / 광고주 단일 필터
-  keywordId    String // 내부 Keyword.id (nccKeywordId 아님, FK Cascade)
-  device       StatDevice // PC / MOBILE 만 사용 (ALL 비사용 — 코드 정책)
-  targetRank   Int // 목표 노출 순위 (1..10 권고, 호출부 Zod 검증)
-  maxBid       Int? // 자동 조정 상한 (원). null = 미제한
-  minBid       Int? // 자동 조정 하한 (원). null = 미제한
-  enabled      Boolean    @default(true) // false 면 자동 조정 대상 제외 (수동 보존)
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
-
-  advertiser Advertiser        @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
-  keyword    Keyword           @relation(fields: [keywordId], references: [id], onDelete: Cascade)
-
-  // 같은 키워드+device 정책은 1개 — 정책 충돌 방지 (PC/MOBILE 각각 row)
-  @@unique([keywordId, device])
-  // 광고주별 활성 정책 픽업 (F-11.2 cron: 매시간 enabled=true 스캔)
-  @@index([advertiserId, enabled])
-  // 키워드 단위 정책 lookup (정책 편집 / 삭제 / drift 검사)
-  @@index([keywordId])
-}
-
-// =============================================================================
 // F-11.4 — 타겟팅 가중치 룰 (P2)
 // =============================================================================
 // 광고주 단위 시간대 / 지역 / 디바이스 입찰 가중 (multiplier).
 // 본 PR 단순화 결정:
-//   1) 광고주 1:1 (advertiserId @unique) — 정책별(BiddingPolicy) override 는 후속.
-//      "PC 1.2x / MOBILE 1.0x" 같은 광고주 전역 가중을 cron 이 모든 활성 정책에 곱함.
+//   1) 광고주 1:1 (advertiserId @unique) — 키워드별 override 는 후속.
+//      "PC 1.2x / MOBILE 1.0x" 같은 광고주 전역 가중을 cron 이 대상 키워드에 곱함.
 //   2) 단일 row + JSON 컬럼 — 168(시간) + 17(시도) + 2(디바이스) ≈ 187 entry 를
 //      별도 row 정규화하면 row 수만 부풀고 read 패턴은 항상 "광고주 1행 전체" 이므로
 //      JSON passthrough 가 더 단순 (운영 stable 후 재검토).
@@ -746,7 +706,7 @@ model BiddingPolicy {
 // 자동 비딩 흐름 (F-11.x cron 후속):
 //   1) cron 픽업 시 advertiser → TargetingRule 1행 lazy upsert (없으면 default 생성)
 //   2) enabled=false 면 weight 적용 0 (defaultWeight 1.0 동등 — clamp 결과)
-//   3) BiddingPolicy 가 산출한 baseBid 에 hourWeights[현재요일-시각] × deviceWeights[디바이스] 곱
+//   3) 산출된 baseBid 에 hourWeights[현재요일-시각] × deviceWeights[디바이스] 곱
 //   4) Guardrail (F-11.5) 통과 시 SA bidAmt update
 //
 // advertiserId @unique 결정 근거:

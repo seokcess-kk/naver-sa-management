@@ -21,8 +21,6 @@ async function main() {
 
   const configs = await prisma.bidAutomationConfig.findMany()
   const profiles = await prisma.keywordPerformanceProfile.findMany()
-  const policiesEnabled = await prisma.biddingPolicy.count({ where: { enabled: true } })
-  const policiesTotal = await prisma.biddingPolicy.count()
   const suggPending = await prisma.bidSuggestion.count({ where: { status: "pending" } })
   const suggTotal = await prisma.bidSuggestion.count()
   const statDailyByAdv = await prisma.statDaily.groupBy({
@@ -37,7 +35,6 @@ async function main() {
   console.log(JSON.stringify(configs, null, 2))
   console.log("\n=== KeywordPerformanceProfile ===")
   console.log(JSON.stringify(profiles, null, 2))
-  console.log("\n=== BiddingPolicy ===", { total: policiesTotal, enabled: policiesEnabled })
   console.log("\n=== BidSuggestion ===", { total: suggTotal, pending: suggPending })
   console.log("\n=== StatDaily latest per advertiser ===")
   console.log(JSON.stringify(statDailyByAdv, null, 2))

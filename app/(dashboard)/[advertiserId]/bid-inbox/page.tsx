@@ -25,6 +25,7 @@ import { prisma } from "@/lib/db/prisma"
 import { PageHeader } from "@/components/navigation/page-header"
 import { SECTION_LABELS } from "@/lib/navigation/section-labels"
 import { BidSuggestionTable } from "@/components/bidding/bid-suggestion-table"
+import { KillSwitchBanner } from "@/components/bidding/kill-switch-banner"
 import type { BidSuggestionRow } from "@/app/(dashboard)/[advertiserId]/bid-inbox/actions"
 
 export default async function BidInboxPage({
@@ -54,47 +55,74 @@ export default async function BidInboxPage({
     throw e
   }
 
-  // BidSuggestion 활성 pending — 광고주 한정.
+  // BidSuggestion 활성 pending + Kill Switch 메타 병렬 조회 — 광고주 한정.
   //   actions.listBidSuggestions 와 동일 정책. RSC 직접 prisma 조회 (권한은 위에서 검증).
-  const rows = await prisma.bidSuggestion.findMany({
-    where: {
-      advertiserId,
-      status: "pending",
-      expiresAt: { gt: new Date() },
-    },
-    select: {
-      id: true,
-      engineSource: true,
-      severity: true,
-      reason: true,
-      action: true,
-      createdAt: true,
-      expiresAt: true,
-      scope: true,
-      affectedCount: true,
-      targetName: true,
-      keyword: {
-        select: {
-          id: true,
-          nccKeywordId: true,
-          keyword: true,
-          matchType: true,
-          bidAmt: true,
-          useGroupBidAmt: true,
-          userLock: true,
-          status: true,
-          adgroup: {
-            select: {
-              name: true,
-              campaign: { select: { name: true } },
+  //   Kill Switch (biddingKillSwitch / At / By) 는 bid-suggest 권고 생성 게이트라
+  //   운영자가 권고를 검토하는 본 페이지 상단에서 긴급 정지/재개한다 (F-11.6).
+  //   biddingKillSwitch* 필드는 AccessibleAdvertiser 에 없어 Advertiser 직접 조회
+  //   (시크릿 노출 안전선 유지).
+  const [rows, killSwitchMeta, toggledByUser] = await Promise.all([
+    prisma.bidSuggestion.findMany({
+      where: {
+        advertiserId,
+        status: "pending",
+        expiresAt: { gt: new Date() },
+      },
+      select: {
+        id: true,
+        engineSource: true,
+        severity: true,
+        reason: true,
+        action: true,
+        createdAt: true,
+        expiresAt: true,
+        scope: true,
+        affectedCount: true,
+        targetName: true,
+        keyword: {
+          select: {
+            id: true,
+            nccKeywordId: true,
+            keyword: true,
+            matchType: true,
+            bidAmt: true,
+            useGroupBidAmt: true,
+            userLock: true,
+            status: true,
+            adgroup: {
+              select: {
+                name: true,
+                campaign: { select: { name: true } },
+              },
             },
           },
         },
       },
-    },
-    orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
-    take: 1000,
-  })
+      orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
+      take: 1000,
+    }),
+    prisma.advertiser.findUniqueOrThrow({
+      where: { id: advertiserId },
+      select: {
+        biddingKillSwitch: true,
+        biddingKillSwitchAt: true,
+        biddingKillSwitchBy: true,
+      },
+    }),
+    // 토글한 사용자 displayName 표시용. nullable.
+    prisma.advertiser
+      .findUnique({
+        where: { id: advertiserId },
+        select: { biddingKillSwitchBy: true },
+      })
+      .then(async (a) => {
+        if (!a?.biddingKillSwitchBy) return null
+        return prisma.userProfile.findUnique({
+          where: { id: a.biddingKillSwitchBy },
+          select: { displayName: true },
+        })
+      }),
+  ])
 
   const suggestions: BidSuggestionRow[] = rows.map((r) => ({
     id: r.id,
@@ -143,6 +171,18 @@ export default async function BidInboxPage({
           { label: advertiser.name, href: `/${advertiserId}` },
           { label: SECTION_LABELS["bid-inbox"] },
         ]}
+      />
+
+      <KillSwitchBanner
+        advertiserId={advertiserId}
+        enabled={killSwitchMeta.biddingKillSwitch}
+        toggledAt={
+          killSwitchMeta.biddingKillSwitchAt
+            ? killSwitchMeta.biddingKillSwitchAt.toISOString()
+            : null
+        }
+        toggledByName={toggledByUser?.displayName ?? null}
+        userRole={userRole}
       />
 
       <BidSuggestionTable

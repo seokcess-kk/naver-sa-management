@@ -15,8 +15,8 @@
  *   근거:
  *     1) AD_DETAIL collapse 가 메인 적재 경로 (avgRnk 노출가중 평균까지 PC/MOBILE 별 보존).
  *     2) Stats API 보강의 device='ALL' 은 device 차원을 잃은 단일 행 — 보조 데이터.
- *     3) 기존 device 받는 코드 (BiddingPolicy / EstimateCache / TargetingRule /
- *        marginal-actions / marginal-utility) 가 모두 PC / MOBILE 로 분기 — 옵션 B 가 일관.
+ *     3) 기존 device 받는 코드 (EstimateCache / TargetingRule /
+ *        marginal-utility) 가 모두 PC / MOBILE 로 분기 — 옵션 B 가 일관.
  *     4) 옵션 A (device='ALL' 단일) 채택 시 AD_DETAIL collapse 의 avgRnk 노출가중
  *        정밀도가 사라지고, ALL 미적재 광고주 (보강 단계 실패) 데이터 0 이 되는 위험.
  *

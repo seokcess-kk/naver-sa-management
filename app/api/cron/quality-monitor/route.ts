@@ -14,7 +14,7 @@
  *
  * 정책:
  *   - SA 호출 0 (DB read-only)
- *   - BiddingPolicy 등록 키워드도 후보로 포함 (정책 키워드도 OFF 권고는 의미 있음 — 운영자 선택)
+ *   - 모든 활성 키워드가 후보 대상 — OFF 권고는 운영자가 Inbox 에서 최종 선택
  *   - userLock=true / status='deleted' 키워드는 사전 제외 (scanQualityCandidates 가 처리)
  *   - 자동 OFF X — BidSuggestion 으로 권고만
  *   - expiresAt = +14일 (14일 윈도와 일치)

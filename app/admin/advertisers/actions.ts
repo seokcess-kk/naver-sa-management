@@ -711,7 +711,7 @@ export async function registerAdvertisersBulk(input: {
 //   - revalidatePath:
 //       /admin/advertisers/{id}        — admin 상세 페이지
 //       /[advertiserId]                — 광고주 컨텍스트 (대시보드 헤더 배너 등)
-//       /[advertiserId]/bidding-policies  — 정책 페이지 상태 표시
+//       /[advertiserId]/bid-inbox      — Kill Switch 배너 상태 표시 (권고 검토 화면)
 //
 // 본 PR 비대상:
 //   - 자동 비딩 cron 측 Kill Switch 검사 (F-11.2 후속) — 본 액션은 컬럼 토글만.
@@ -735,7 +735,7 @@ export type ToggleKillSwitchResult =
  *   3. 광고주 존재 확인 (없으면 ok:false). status 'archived' 도 차단.
  *   4. update biddingKillSwitch / biddingKillSwitchAt / biddingKillSwitchBy
  *   5. AuditLog 적재 — before/after 에 enabled / at / by
- *   6. revalidatePath (admin + 광고주 컨텍스트 + 정책 페이지)
+ *   6. revalidatePath (admin + 광고주 컨텍스트 + 운영 Inbox 배너)
  */
 export async function toggleBiddingKillSwitch(
   input: ToggleKillSwitchInput,
@@ -805,7 +805,7 @@ export async function toggleBiddingKillSwitch(
 
   revalidatePath(`/admin/advertisers/${advertiserId}`)
   revalidatePath(`/${advertiserId}`)
-  revalidatePath(`/${advertiserId}/bidding-policies`)
+  revalidatePath(`/${advertiserId}/bid-inbox`)
 
   // -- kill_switch_triggered 알림 (Event 3b) -------------------------------
   // false → true 전환 시점에만 dispatch (다시 false 로 풀 때는 알림 X — critical 알림 폭주 방지).

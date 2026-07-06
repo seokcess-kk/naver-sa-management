@@ -10,7 +10,7 @@
  *
  * 운영 정책 (CLAUDE.md / 안전장치):
  *   - 진입부 getCurrentAdvertiser(advertiserId) — 광고주 화이트리스트 검증
- *   - mutation 액션은 viewer 차단 (operator+ 만) — bidding-policies/actions.ts 와 동일 패턴
+ *   - mutation 액션은 viewer 차단 (operator+ 만) — (dashboard) mutation 액션 공통 패턴
  *   - "staging → 미리보기 → 확정" 모델: 본 액션은 "확정" 시점만
  *     · 키워드 입찰/OFF: ChangeBatch + ChangeItem 적재 → /api/batch/run cron 실행
  *     · 타게팅/예산: 외부 배치 호환성이 없어 즉시 반영 후 done ChangeItem 기록

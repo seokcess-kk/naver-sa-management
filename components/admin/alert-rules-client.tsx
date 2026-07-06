@@ -67,7 +67,6 @@ const TYPE_LABEL: Record<string, string> = {
   // P2 게이트
   budget_pace: "예산 페이스 이상",
   budget_pacing: "어제 예산 100% 도달",
-  rank_deviation: "목표 순위 이탈",
   mobile_first_page: "모바일 첫 페이지 이탈",
   suggestion_inbox: "Inbox 권고 누적",
   quality_stagnation: "품질지수 정체",

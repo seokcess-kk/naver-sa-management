@@ -18,7 +18,6 @@ export const SECTION_LABELS = {
   ads: "소재",
   extensions: "확장소재",
   // 비딩
-  "bidding-policies": "비딩 정책",
   "bid-inbox": "운영 Inbox",
   targeting: "타게팅",
   // 분석

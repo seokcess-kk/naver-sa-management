@@ -47,7 +47,6 @@ import {
   evaluateCpcSurge,
   evaluateImpressionsDrop,
   evaluateBudgetPace,
-  evaluateRankDeviation,
   evaluateMobileFirstPage,
   evaluateSuggestionInbox,
   evaluateQualityStagnation,
@@ -236,13 +235,6 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
             id: rule.id,
             type: rule.type,
             params: params as { deviationPct?: number; minHour?: number },
-          })
-          break
-        case "rank_deviation":
-          candidates = await evaluateRankDeviation(ctx, {
-            id: rule.id,
-            type: rule.type,
-            params: params as { tolerance?: number; maxCandidates?: number },
           })
           break
         case "mobile_first_page":

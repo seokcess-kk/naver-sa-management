@@ -13,7 +13,6 @@ const mockAdvertiserFindUnique = vi.fn()
 const mockAdvertiserCount = vi.fn()
 const mockBidAutomationConfigFindUnique = vi.fn()
 const mockKeywordPerformanceProfileFindUnique = vi.fn()
-const mockBiddingPolicyFindMany = vi.fn()
 const mockStatDailyGroupBy = vi.fn()
 const mockStatDailyFindFirst = vi.fn()
 const mockKeywordFindMany = vi.fn()
@@ -40,9 +39,6 @@ vi.mock("@/lib/db/prisma", () => ({
     keywordPerformanceProfile: {
       findUnique: (...args: unknown[]) =>
         mockKeywordPerformanceProfileFindUnique(...args),
-    },
-    biddingPolicy: {
-      findMany: (...args: unknown[]) => mockBiddingPolicyFindMany(...args),
     },
     statDaily: {
       groupBy: (...args: unknown[]) => mockStatDailyGroupBy(...args),
@@ -139,7 +135,6 @@ beforeEach(() => {
     targetAvgRank: null,
   })
   mockKeywordPerformanceProfileFindUnique.mockResolvedValue(null)
-  mockBiddingPolicyFindMany.mockResolvedValue([])
   mockKeywordFindMany.mockResolvedValue([])
   // 기본: lastSyncAt 키 미보유 (fallback 경로 검증) — StatDaily.updatedAt 으로 판정.
   mockAdvertiserFindUnique.mockResolvedValue({ lastSyncAt: {} })
@@ -1095,15 +1090,15 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
     expect(upd.data.severity).toBe("info")
   })
 
-  it("BiddingPolicy 등록 키워드도 rank 후보에 포함 (자동적용 트랙 은퇴)", async () => {
-    // Phase B — auto-bidding 자동적용 트랙 은퇴. BiddingPolicy 제외 로직 제거로
-    // 과거 정책 등록 키워드도 rank 권고 후보로 스캔된다 (권고 Inbox 는 정책 유무 무관).
+  it("모든 활성 키워드가 rank 후보에 포함 (정책 제외 로직 없음)", async () => {
+    // Phase B — auto-bidding 자동적용 트랙 은퇴 후. 정책 제외 로직이 없으므로
+    // 모든 활성 키워드가 rank 권고 후보로 스캔된다 (권고 Inbox 는 정책 유무 무관).
     mockKeywordFindMany.mockImplementation(
       (args: { where?: { recentAvgRnk?: unknown } }) => {
         if (args?.where?.recentAvgRnk) {
           return Promise.resolve([
             {
-              id: "kw_rank_5", // 과거 policy 등록 키워드 — 더 이상 제외 안 됨
+              id: "kw_rank_5", // 활성 키워드 — 제외 로직 없음
               nccKeywordId: "ncc_kw_rank_5",
               keyword: "신발",
               bidAmt: 500,

@@ -51,7 +51,7 @@ import {
   analyzeMarginalUtility,
   listAnalyzableKeywords,
   type AnalyzableKeywordOption,
-} from "@/app/(dashboard)/[advertiserId]/bidding-policies/marginal-actions"
+} from "@/app/(dashboard)/[advertiserId]/marginal-utility/actions"
 import type { MarginalUtilityResult } from "@/lib/marginal-utility/calculate"
 
 type Device = "PC" | "MOBILE"

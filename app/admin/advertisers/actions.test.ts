@@ -256,7 +256,7 @@ describe("toggleBiddingKillSwitch", () => {
     expect(auditCall.after.by).toBe(ADMIN_ID)
   })
 
-  it("revalidatePath: admin 상세 + 광고주 컨텍스트 + 정책 페이지", async () => {
+  it("revalidatePath: admin 상세 + 광고주 컨텍스트 + 운영 Inbox", async () => {
     mockAdvertiserFindUnique.mockResolvedValue({
       id: ADV_ID,
       name: "광고주1",
@@ -276,7 +276,7 @@ describe("toggleBiddingKillSwitch", () => {
     const calls = mockRevalidatePath.mock.calls.map((c) => c[0])
     expect(calls).toContain(`/admin/advertisers/${ADV_ID}`)
     expect(calls).toContain(`/${ADV_ID}`)
-    expect(calls).toContain(`/${ADV_ID}/bidding-policies`)
+    expect(calls).toContain(`/${ADV_ID}/bid-inbox`)
   })
 
   // ===========================================================================

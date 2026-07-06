@@ -3,7 +3,7 @@
  *
  * tier 구분 (lib/alerts/registry.ts 가 단일 진실 원천):
  *   - P1 코어(항상 평가): budget_burn / bizmoney_low / inspect_rejected / cpc_surge / impressions_drop
- *   - P2 게이트(P2_ALERTS_ENABLED=true 일 때만): budget_pace / budget_pacing / rank_deviation /
+ *   - P2 게이트(P2_ALERTS_ENABLED=true 일 때만): budget_pace / budget_pacing /
  *     mobile_first_page / suggestion_inbox / quality_stagnation
  *   - api_auth_error: 평가기 함수는 보존하되 cron 합성 프로브에서 제외됨. 인증 실패의
  *     단일 출처는 실호출 실패 경로(lib/naver-sa/credentials.ts). 아래 3번 섹션 주석 참조.
@@ -851,103 +851,6 @@ export async function evaluateBudgetPace(
     })
   }
 
-  return candidates
-}
-
-// =============================================================================
-// 8. rank_deviation — 목표 순위 이탈 (F-12.1, BiddingPolicy 등록 키워드 한정)
-// =============================================================================
-
-/** rank_deviation rule.params shape. */
-export type RankDeviationParams = {
-  /** 목표 순위 ±N 이탈 임계. 기본 2 (운영 일반론). 1..10. */
-  tolerance?: number
-  /** 한 번에 보고할 최대 후보 수. 기본 20. 1..200. */
-  maxCandidates?: number
-}
-
-/**
- * BiddingPolicy 등록 키워드 + Keyword.recentAvgRnk 가 목표 ±N 이탈 시 알림.
- *
- * 주의 (사용자 검토 반영):
- *   - "모바일 5위 밖 = 미노출" 같은 절대 임계 X — 운영자 등록 정책 기준
- *   - Keyword.recentAvgRnk 는 device 무관 단일값 — PC/MOBILE 분리는 후속 PR
- *   - BiddingPolicy.device 기준 PC/MOBILE 별 row → 둘 다 비교 (둘 다 이탈하면 같은 키워드 2건 가능)
- *
- * muteKey: `rank_deviation:${nccKeywordId}:${device}` — 키워드+device 1시간 1회.
- */
-export async function evaluateRankDeviation(
-  ctx: EvalContext,
-  rule: RuleSlice<RankDeviationParams>,
-): Promise<AlertCandidate[]> {
-  const rawTol = rule.params?.tolerance
-  const tolerance =
-    typeof rawTol === "number" && Number.isFinite(rawTol) && rawTol >= 1 && rawTol <= 10
-      ? Math.floor(rawTol)
-      : 2
-  const rawMax = rule.params?.maxCandidates
-  const maxCandidates =
-    typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax >= 1 && rawMax <= 200
-      ? Math.floor(rawMax)
-      : 20
-
-  // 활성 정책 + 키워드 join (recentAvgRnk / status / userLock)
-  const policies = await prisma.biddingPolicy.findMany({
-    where: {
-      advertiserId: ctx.advertiserId,
-      enabled: true,
-      keyword: {
-        status: { not: "deleted" },
-        userLock: false,
-        recentAvgRnk: { not: null },
-      },
-    },
-    select: {
-      id: true,
-      device: true,
-      targetRank: true,
-      keyword: {
-        select: {
-          nccKeywordId: true,
-          keyword: true,
-          recentAvgRnk: true,
-        },
-      },
-    },
-    take: maxCandidates * 2, // 컷 전 여유
-  })
-
-  const candidates: AlertCandidate[] = []
-  for (const p of policies) {
-    const rank = p.keyword.recentAvgRnk
-    if (rank == null) continue
-    const current = Number(rank)
-    const diff = Math.abs(current - p.targetRank)
-    if (diff <= tolerance) continue
-
-    // critical: 이탈량이 tolerance 의 2배 이상 (예: 목표 1, 현재 5+)
-    const severity =
-      diff >= tolerance * 2 ? "warn" : "info"
-
-    candidates.push({
-      ruleType: "rank_deviation",
-      severity,
-      title: `목표 순위 이탈 — ${p.keyword.keyword} (${p.device})`,
-      body: `목표 ${p.targetRank}위, 현재 평균 ${current.toFixed(1)}위 (이탈 ${diff > 0 ? "+" : ""}${(current - p.targetRank).toFixed(1)})`,
-      meta: {
-        advertiserId: ctx.advertiserId,
-        nccKeywordId: p.keyword.nccKeywordId,
-        keyword: p.keyword.keyword,
-        device: p.device,
-        targetRank: p.targetRank,
-        currentRank: Number(current.toFixed(2)),
-        deviation: Number((current - p.targetRank).toFixed(2)),
-      },
-      muteKey: `rank_deviation:${p.keyword.nccKeywordId}:${p.device}`,
-    })
-  }
-
-  if (candidates.length > maxCandidates) return candidates.slice(0, maxCandidates)
   return candidates
 }
 

@@ -13,9 +13,10 @@
  *   * admin 이면 "정지" 버튼 (KillSwitchToggleModal)
  *   * operator/viewer 는 상태만 표시 (토글 버튼 X)
  *
- * 위치 결정 (현 PR):
- *   - 비딩 정책 페이지 상단에만 표시. GNB / 광고주 layout 통합은 후속 PR.
- *   - 사유: 본 PR 범위 단순화. 운영 사고 시 즉시 발견하도록 하려면 GNB 통합 권고.
+ * 위치:
+ *   - 운영 Inbox(bid-inbox) 페이지 상단에 표시. Kill Switch 는 bid-suggest 권고 생성
+ *     게이트이므로, 운영자가 권고를 검토하는 이 페이지가 긴급 정지의 자연스러운 위치.
+ *   - GNB / 광고주 layout 통합은 후속 PR (운영 사고 시 어느 화면에서도 즉시 발견).
  *
  * SPEC 6.11 F-11.6.
  */

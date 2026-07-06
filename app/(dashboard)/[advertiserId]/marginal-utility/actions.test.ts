@@ -66,7 +66,7 @@ vi.mock("@/lib/marginal-utility/calculate", async () => {
 import {
   analyzeMarginalUtility,
   listAnalyzableKeywords,
-} from "@/app/(dashboard)/[advertiserId]/bidding-policies/marginal-actions"
+} from "@/app/(dashboard)/[advertiserId]/marginal-utility/actions"
 
 // =============================================================================
 // 공통 setup
