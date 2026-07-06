@@ -4,7 +4,10 @@
  * 사용처:
  *   - dispatch() 직전에 호출하여 동일 이벤트 중복 발송 차단
  *   - cron 1회 1광고주 1 dispatch 패턴 (bid_suggestion_new)
- *   - 광고주별 시간당 1회 dispatch 패턴 (api_auth_failed)
+ *   - 광고주별 시간당 1회 dispatch 패턴 (예: 요약/누적 알림)
+ *
+ * 참고: api_auth_error(인증 실패)는 본 Redis throttle 이 아니라 cron 공통 flow 의
+ *   muteKey(api_auth:{advertiserId}) + AlertEvent 1시간 윈도 dedup 으로 음소거된다.
  *
  * 동작:
  *   - SET key "1" NX EX ttlSec

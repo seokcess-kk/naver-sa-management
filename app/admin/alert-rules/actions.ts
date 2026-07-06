@@ -20,6 +20,7 @@ import { z } from "zod"
 import { prisma } from "@/lib/db/prisma"
 import { assertRole } from "@/lib/auth/access"
 import { logAudit } from "@/lib/audit/log"
+import { alertTier, isP2AlertsEnabled } from "@/lib/alerts/registry"
 import type { Prisma } from "@/lib/generated/prisma/client"
 
 // =============================================================================
@@ -339,7 +340,8 @@ export async function listAlertRules(): Promise<AlertRuleRow[]> {
 /**
  * admin: AlertRule 생성.
  *
- * - type 화이트리스트 (4종) + type 별 params 검증 (advertiserId 필수)
+ * - type 화이트리스트 (P1 코어 6종 + P2 게이트 8종) + type 별 params 검증 (advertiserId 필수)
+ * - P2 종류는 P2_ALERTS_ENABLED=true 일 때만 생성 허용 (registry.alertTier 기준)
  * - advertiserId 존재성 + status != 'archived' 검증 (params 안에 들어있는 값)
  * - AuditLog: action="alert_rule.create"
  */
@@ -355,6 +357,14 @@ export async function createAlertRule(input: {
     return { ok: false, error: parsed.error.issues[0]?.message ?? "유효하지 않은 입력" }
   }
   const { type, params, channelHint, enabled } = parsed.data
+
+  // P2 게이트: 플래그 off 면 P2 종류 생성 차단 (UI 숨김의 서버측 방어).
+  if (alertTier(type) === "p2" && !isP2AlertsEnabled()) {
+    return {
+      ok: false,
+      error: "P2 알림은 P2_ALERTS_ENABLED 설정 시에만 생성할 수 있습니다",
+    }
+  }
 
   const paramsCheck = validateParams(type, params)
   if (!paramsCheck.ok) {

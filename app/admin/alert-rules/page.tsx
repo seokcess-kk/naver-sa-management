@@ -7,7 +7,7 @@
  *   - 광고주 셀렉트(생성/편집 모달)용 active/paused 광고주 목록 동시 로드
  *
  * 가상화 미사용:
- *   - 룰 수 수십 건 가정 (광고주별 최대 4종 × N광고주). shadcn Table 기본.
+ *   - 룰 수 수십 건 가정 (광고주별 최대 N종 × N광고주). shadcn Table 기본.
  *
  * 안전장치:
  *   - listAlertRules / createAlertRule / updateAlertRule / deleteAlertRule 모두 admin 가드
@@ -25,6 +25,7 @@ import {
   listAlertRules,
   type AlertRuleRow,
 } from "@/app/admin/alert-rules/actions"
+import { isP2AlertsEnabled } from "@/lib/alerts/registry"
 import { AlertRulesClient } from "@/components/admin/alert-rules-client"
 import {
   Card,
@@ -35,6 +36,7 @@ import {
 } from "@/components/ui/card"
 
 export default async function AlertRulesPage() {
+  const p2Enabled = isP2AlertsEnabled()
   let rules: AlertRuleRow[]
   let advertisers: { id: string; name: string; customerId: string }[]
   try {
@@ -61,8 +63,10 @@ export default async function AlertRulesPage() {
             알림 룰 관리
           </h1>
           <p className="text-sm text-muted-foreground">
-            P1 4종 알림: 예산 소진(budget_burn) / 비즈머니 부족(bizmoney_low) /
-            API 인증 실패(api_auth_error) / 검수 거절(inspect_rejected). 룰은
+            P1 기본 알림: 예산 소진(budget_burn) / 비즈머니 부족(bizmoney_low) /
+            API 인증 실패(api_auth_error) / 검수 거절(inspect_rejected) / CPC
+            급등(cpc_surge) / 노출 급감(impressions_drop). 순위·최적화·요약 등 P2
+            알림은 {p2Enabled ? "현재 활성화되어 있습니다" : "P2_ALERTS_ENABLED 설정 시 활성화됩니다"}. 룰은
             광고주별로 등록하며 1시간 음소거 정책이 적용됩니다.
           </p>
         </div>
@@ -77,7 +81,11 @@ export default async function AlertRulesPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="px-0">
-          <AlertRulesClient rules={rules} advertisers={advertisers} />
+          <AlertRulesClient
+            rules={rules}
+            advertisers={advertisers}
+            p2Enabled={p2Enabled}
+          />
         </CardContent>
       </Card>
     </div>

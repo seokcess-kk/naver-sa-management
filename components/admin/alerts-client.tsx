@@ -73,10 +73,22 @@ function formatDateTime(iso: string) {
 }
 
 const TYPE_LABEL: Record<string, string> = {
+  // P1 코어
   budget_burn: "예산 소진",
   bizmoney_low: "비즈머니 부족",
   api_auth_error: "API 인증 실패",
   inspect_rejected: "검수 거절",
+  cpc_surge: "CPC 급등",
+  impressions_drop: "노출 급감",
+  // P2 게이트
+  budget_pace: "예산 페이스 이상",
+  budget_pacing: "어제 예산 100% 도달",
+  rank_deviation: "목표 순위 이탈",
+  mobile_first_page: "모바일 첫 페이지 이탈",
+  optimization_summary: "자동 비딩 일일 요약",
+  suggestion_inbox: "Inbox 권고 누적",
+  quality_stagnation: "품질지수 정체",
+  llm_daily_summary: "일일 운영 요약",
 }
 
 const STATUS_LABEL: Record<string, string> = {

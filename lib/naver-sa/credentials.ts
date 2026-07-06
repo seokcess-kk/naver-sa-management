@@ -17,59 +17,20 @@
 
 import { prisma } from "@/lib/db/prisma"
 import { decrypt } from "@/lib/crypto/secret"
-import { dispatch } from "@/lib/notifier"
-import { shouldThrottle } from "@/lib/notifier/throttle"
 import {
   setCredentialsResolver,
   type NaverSaCredentials,
 } from "@/lib/naver-sa/client"
 
 /**
- * decrypt 실패 시 알림 — Event 4 (api_auth_failed).
+ * 인증 실패 알림 단일 소스 = cron 합성 프로브(lib/alerts/evaluators.ts evaluateApiAuthError).
  *
- * - Throttle: 광고주별 60분 (Redis nsa:notify:api_auth:{customerId})
- *   · 같은 광고주 1시간 동안 1회만 dispatch (폭주 방지)
- * - 시크릿 X: meta 에 customerId / advertiserName 만
- * - 실패 격리: dispatch throw 가 resolve flow 에 영향 X (catch + warn)
- *
- * 호출 후 호출부의 throw 를 그대로 진행 — 본 함수는 알림만 책임.
+ *   - 프로브가 getBizmoney 를 실호출하므로 decrypt 실패(키 손상)와 라이브 401(SA측 키
+ *     취소·만료)을 모두 감지한다. ruleType="api_auth_error", muteKey="api_auth:{advertiserId}"
+ *     로 cron 공통 flow 가 dispatch + AlertEvent 적재 + 광고주당 1시간 음소거를 처리.
+ *   - 따라서 본 resolver 는 인증 실패 시 자체 dispatch/적재를 하지 않는다(이중 발생 방지).
+ *     decrypt 실패는 그대로 throw 하여 호출부(client.ts)로 전파.
  */
-async function notifyApiAuthFailed(
-  customerId: string,
-  advertiserId: string | null,
-  advertiserName: string | null,
-): Promise<void> {
-  try {
-    const throttled = await shouldThrottle(
-      `nsa:notify:api_auth:${customerId}`,
-      60 * 60,
-    )
-    if (throttled) return
-
-    console.info(
-      `[naver-sa/credentials] notify api_auth_failed customerId=${customerId} advertiserId=${advertiserId}`,
-    )
-
-    await dispatch({
-      ruleType: "api_auth_failed",
-      severity: "critical",
-      title: `[인증 실패] 광고주 ${advertiserName ?? "(unknown)"} (${customerId})`,
-      body: `API 키 복호화 실패 — ENCRYPTION_KEY 미스매치 또는 키 손상. 시크릿 재입력 필요.`,
-      meta: {
-        advertiserId,
-        customerId,
-        advertiserName,
-        failureType: "decrypt",
-      },
-    })
-  } catch (e) {
-    console.warn(
-      "[naver-sa/credentials] notifyApiAuthFailed failed:",
-      e instanceof Error ? e.message : String(e),
-    )
-  }
-}
-
 async function resolve(customerId: string): Promise<NaverSaCredentials> {
   const advertiser = await prisma.advertiser.findUnique({
     where: { customerId },
@@ -92,24 +53,16 @@ async function resolve(customerId: string): Promise<NaverSaCredentials> {
   }
 
   // Prisma Bytes 컬럼 → Buffer 로 감싸서 decrypt 호출 (컨벤션 #2).
-  // decrypt throw → 'decrypt: authentication failed' 등 — 운영자 즉시 알림 (Event 4).
-  // try/catch 로 dispatch 후 throw 그대로 진행 (호출 흐름 영향 X).
-  let apiKey: string
-  let secretKey: string
-  try {
-    apiKey = decrypt(
-      Buffer.from(advertiser.apiKeyEnc),
-      advertiser.apiKeyVersion,
-    )
-    secretKey = decrypt(
-      Buffer.from(advertiser.secretKeyEnc),
-      advertiser.secretKeyVersion,
-    )
-  } catch (e) {
-    // dispatch 는 await 하되 (발송 보장), 실패해도 throw 는 그대로.
-    await notifyApiAuthFailed(customerId, advertiser.id, advertiser.name)
-    throw e
-  }
+  // decrypt throw → 'decrypt: authentication failed' 등. 그대로 전파 —
+  // 인증 실패 알림은 cron 프로브(evaluateApiAuthError)가 단일 소스로 담당(위 헤더 주석).
+  const apiKey = decrypt(
+    Buffer.from(advertiser.apiKeyEnc),
+    advertiser.apiKeyVersion,
+  )
+  const secretKey = decrypt(
+    Buffer.from(advertiser.secretKeyEnc),
+    advertiser.secretKeyVersion,
+  )
 
   return { apiKey, secretKey }
 }

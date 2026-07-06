@@ -56,6 +56,7 @@ import {
   type AlertCandidate,
   type EvalContext,
 } from "@/lib/alerts/evaluators"
+import { isAlertTypeEnabled, isP2AlertsEnabled } from "@/lib/alerts/registry"
 import type { Prisma } from "@/lib/generated/prisma/client"
 
 // Prisma 사용 → Edge 가 아닌 Node 런타임 강제.
@@ -119,6 +120,9 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   // 광고주 컨텍스트 캐싱 (한 Cron 호출 동안 동일 광고주 N번 조회 방지)
   const advertiserCtxMap = new Map<string, EvalContext | null>()
 
+  // P2 게이트 플래그 (호출당 1회 조회). false 면 P2 종류는 평가 자체를 skip.
+  const p2Enabled = isP2AlertsEnabled()
+
   let rulesEvaluated = 0
   let rulesSkipped = 0
   let totalCandidates = 0
@@ -127,6 +131,14 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
   let totalFailed = 0
 
   for (const rule of rules) {
+    // -- P2 게이트 ----------------------------------------------------------
+    // P2_ALERTS_ENABLED=false 면 P2 종류(순위·최적화·요약·예산 pace/pacing)는
+    // 평가기 호출 자체를 건너뜀. rule row 는 DB 에 남되 후보 생성/발송 안 됨.
+    if (!isAlertTypeEnabled(rule.type, p2Enabled)) {
+      rulesSkipped++
+      continue
+    }
+
     // -- params.advertiserId 추출 -------------------------------------------
     const params = (rule.params ?? {}) as Record<string, unknown>
     const advertiserId =
@@ -188,6 +200,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<CronResponse>>
             params: params as { days?: number },
           })
           break
+        // api_auth_error: 인증 실패의 단일 소스(합성 프로브).
+        // getBizmoney 실호출 → decrypt 실패(키 손상) + 라이브 401(SA측 키 취소·만료)
+        // 를 모두 감지. 후보 발송/적재/음소거(muteKey=api_auth:{advertiserId})는
+        // 아래 cron 공통 flow 가 처리 → 광고주당 1시간 최대 1알림.
+        // (credentials.ts 는 이 소스와 중복되지 않도록 자체 dispatch/적재 안 함.)
         case "api_auth_error":
           candidates = await evaluateApiAuthError(ctx)
           break

@@ -1,12 +1,19 @@
 /**
- * 이상 징후 알림 평가기 (F-8.x — P1 4종)
+ * 이상 징후 알림 평가기 (F-8.x)
+ *
+ * tier 구분 (lib/alerts/registry.ts 가 단일 진실 원천):
+ *   - P1 코어(항상 평가): budget_burn / bizmoney_low / inspect_rejected / cpc_surge / impressions_drop
+ *   - P2 게이트(P2_ALERTS_ENABLED=true 일 때만): budget_pace / budget_pacing / rank_deviation /
+ *     mobile_first_page / optimization_summary / suggestion_inbox / quality_stagnation
+ *   - api_auth_error: 평가기 함수는 보존하되 cron 합성 프로브에서 제외됨. 인증 실패의
+ *     단일 출처는 실호출 실패 경로(lib/naver-sa/credentials.ts). 아래 3번 섹션 주석 참조.
  *
  * 본 모듈 스코프:
- *   - 4종 평가기를 각각 export. Cron 핸들러(app/api/cron/alerts/route.ts)가 rule.type 에 따라 분기 호출.
+ *   - 각 평가기를 개별 export. Cron 핸들러(app/api/cron/alerts/route.ts)가 rule.type 에 따라 분기 호출.
  *   - 각 평가기는 광고주 컨텍스트(EvalContext) + AlertRule (params) 받아 AlertCandidate[] 반환.
  *   - candidate 는 발송 후보일 뿐 — 실제 발송/적재/음소거는 Cron 책임.
  *   - 평가기 내부에서 fetch/HTTP 직접 호출 X. 항상 lib/naver-sa/* 통과.
- *   - SA 호출 실패는 candidate 생성으로 변환 (api_auth_error 평가기). 그 외 평가기는 throw 허용
+ *   - SA 호출 실패는 candidate 생성으로 변환하거나(evaluateApiAuthError) throw 허용
  *     (Cron 이 console.error + 다음 rule 계속).
  *
  * candidate.muteKey:
@@ -239,12 +246,15 @@ export async function evaluateBizmoneyLow(
 // =============================================================================
 
 /**
- * 본 PR 단순화: 마지막 호출 결과를 redis 에 누적 적재해야 의미 있는 "실패율" 도출 가능.
- * 따라서 본 평가기는 즉시 1회 getBizmoney 시도 → 401 / NaverSaAuthError catch 시 candidate 1개.
+ * ⚠️ 현재 cron 미사용 (합성 프로브 제거됨 — 알림 계층 압축).
  *
- * 후속 PR (P1 마무리):
- *   - lib/naver-sa/client.ts 에 호출 결과(ok/fail) Redis 카운터 적재
- *   - 본 평가기는 카운터 임계(예: 5분 내 실패율 50%) 기반으로 변경
+ *   - 과거: cron 이 매시 이 평가기를 호출 → 인증 확인 목적으로 getBizmoney 를 실호출.
+ *     광고주 × 매시 불필요한 SA 호출을 소모하고, credentials 경로와 문자열/적재 정책이 갈렸음.
+ *   - 현재: 인증 실패의 단일 출처는 실호출 실패 경로(lib/naver-sa/credentials.ts).
+ *     ruleType 은 "api_auth_error" 로 통일, 그 경로가 dispatch + AlertEvent 적재 담당.
+ *   - 본 함수는 순수 보존(삭제 X) — 향후 실패율 카운터 기반으로 재도입 시 즉시 재활용.
+ *
+ * (원설계) 즉시 1회 getBizmoney 시도 → 401 / NaverSaAuthError catch 시 candidate 1개.
  *
  * muteKey: `api_auth:${advertiserId}` — 광고주당 1시간 1회.
  */

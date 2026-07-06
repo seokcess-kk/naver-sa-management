@@ -51,6 +51,7 @@ import {
   type AlertRuleRow,
   type AlertRuleType,
 } from "@/app/admin/alert-rules/actions"
+import { alertTier } from "@/lib/alerts/registry"
 
 // =============================================================================
 // 상수 / 헬퍼
@@ -286,6 +287,7 @@ export function AlertRuleFormModal({
   open,
   onOpenChange,
   advertisers,
+  p2Enabled,
   onDone,
 }: {
   mode: "create" | "edit"
@@ -294,6 +296,8 @@ export function AlertRuleFormModal({
   open: boolean
   onOpenChange: (next: boolean) => void
   advertisers: { id: string; name: string; customerId: string }[]
+  /** P2 알림 종류를 생성 드롭다운에 노출할지 (RSC 가 P2_ALERTS_ENABLED 로 계산). */
+  p2Enabled: boolean
   /** 성공 시 parent 측 router.refresh() 등에 사용. */
   onDone: () => void
 }) {
@@ -316,6 +320,7 @@ export function AlertRuleFormModal({
       open={open}
       onOpenChange={onOpenChange}
       advertisers={advertisers}
+      p2Enabled={p2Enabled}
       onDone={onDone}
     />
   )
@@ -327,6 +332,7 @@ function AlertRuleFormModalInner({
   open,
   onOpenChange,
   advertisers,
+  p2Enabled,
   onDone,
 }: {
   mode: "create" | "edit"
@@ -334,6 +340,7 @@ function AlertRuleFormModalInner({
   open: boolean
   onOpenChange: (next: boolean) => void
   advertisers: { id: string; name: string; customerId: string }[]
+  p2Enabled: boolean
   onDone: () => void
 }) {
   const isEdit = mode === "edit" && rule != null
@@ -497,7 +504,14 @@ function AlertRuleFormModalInner({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {ALERT_TYPES.map((t) => (
+                {ALERT_TYPES.filter(
+                  // P2 종류는 플래그 활성 시에만 노출. 단 편집 중인 현재 type 은
+                  // (기존 P2 룰이어도) 값 표시를 위해 항상 포함.
+                  (t) =>
+                    t.value === type ||
+                    p2Enabled ||
+                    alertTier(t.value) !== "p2",
+                ).map((t) => (
                   <SelectItem key={t.value} value={t.value}>
                     {t.label}
                   </SelectItem>
