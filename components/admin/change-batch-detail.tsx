@@ -481,13 +481,14 @@ function RollbackModal({
   const [open, setOpen] = React.useState(false)
   const [pending, setPending] = React.useState(false)
   const [ignoreDrift, setIgnoreDrift] = React.useState(false)
-  const [saRecheck, setSaRecheck] = React.useState(false)
+  // 기본 true(정밀 재검증) — action 기본값(saRecheck !== false)과 정합. 안전장치 #3.
+  const [saRecheck, setSaRecheck] = React.useState(true)
 
   function handleOpenChange(next: boolean) {
     setOpen(next)
     if (!next) {
       setIgnoreDrift(false)
-      setSaRecheck(false)
+      setSaRecheck(true)
     }
   }
 
@@ -501,7 +502,7 @@ function RollbackModal({
       )
       setOpen(false)
       setIgnoreDrift(false)
-      setSaRecheck(false)
+      setSaRecheck(true)
       router.refresh()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -537,10 +538,10 @@ function RollbackModal({
           <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs">
             <div className="font-medium text-foreground">drift 감지</div>
             <p className="mt-1 text-muted-foreground">
-              기본은 DB 현재값과 적재된 after JSON 이 다르면 drift 로
-              판정합니다. SA 재조회 옵션을 켜면 네이버 SA 측 현재값과 직접
-              비교해 외부 변경(타 사용자/자동화/네이버측)도 감지합니다. drift
-              항목은 기본 skip.
+              기본은 네이버 SA 측 현재값과 적재된 after JSON 을 직접 비교해 외부
+              변경(타 사용자/자동화/네이버측)까지 감지합니다(SA 재조회). 이
+              옵션을 끄면 DB 현재값과만 비교하는 레거시 모드로 내려가며 외부
+              변경은 감지하지 못합니다. drift 항목은 기본 skip.
             </p>
           </div>
 
@@ -550,10 +551,12 @@ function RollbackModal({
               onCheckedChange={(v) => setSaRecheck(v === true)}
             />
             <span>
-              <strong>SA 재조회로 정밀 검사</strong>
+              <strong>SA 재조회로 정밀 검사 (기본 권장)</strong>
               <span className="ml-1 text-muted-foreground">
                 — 네이버 SA 측 외부 변경(타 사용자/자동화/네이버측)을
-                감지합니다. 호출이 늘어 시간이 더 걸립니다.
+                감지합니다. 광고그룹별 조회 + 광고주 단위 조회가 발생해 호출이
+                늘고 시간이 더 걸립니다. 끄면 DB비교(레거시)로 빠르지만 외부 변경
+                미감지.
               </span>
             </span>
           </label>

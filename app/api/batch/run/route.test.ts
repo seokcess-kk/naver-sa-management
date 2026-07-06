@@ -16,6 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const mockQueryRaw = vi.fn()
+const mockExecuteRaw = vi.fn()
 const mockChangeItemFindMany = vi.fn()
 const mockChangeItemUpdate = vi.fn()
 const mockChangeItemCount = vi.fn()
@@ -27,6 +28,7 @@ const mockApplyChange = vi.fn()
 vi.mock("@/lib/db/prisma", () => ({
   prisma: {
     $queryRaw: (...args: unknown[]) => mockQueryRaw(...args),
+    $executeRaw: (...args: unknown[]) => mockExecuteRaw(...args),
     changeItem: {
       findMany: (...args: unknown[]) => mockChangeItemFindMany(...args),
       update: (...args: unknown[]) => mockChangeItemUpdate(...args),
@@ -74,6 +76,8 @@ function makeReq(authHeader: string | null): {
 beforeEach(() => {
   vi.clearAllMocks()
   process.env.CRON_SECRET = "test-secret"
+  // heartbeat 기본 — lease 소유 유지(1행 영향). lease 상실 케이스만 0 으로 재정의.
+  mockExecuteRaw.mockResolvedValue(1)
 })
 
 afterEach(() => {
@@ -223,5 +227,74 @@ describe("batch.run — change_batch_failed dispatch", () => {
     expect(all).not.toMatch(/Bearer\s+[A-Za-z0-9._\-]{12,}/u)
     expect(all).not.toMatch(/[A-Fa-f0-9]{32,}/u)
     expect(all).toContain("[REDACTED]")
+  })
+})
+
+describe("batch.run — lease heartbeat (안전장치 #2 이중 처리 방지)", () => {
+  it("chunk 의 각 item 마다 heartbeat($executeRaw) 로 lease 갱신", async () => {
+    mockQueryRaw.mockResolvedValue([{ id: "batch_1" }])
+    // 첫 pending fetch → 2건, 두번째 → [] (finalize 진입)
+    let pendingCall = 0
+    mockChangeItemFindMany.mockImplementation(
+      (args: { where?: { status?: string } }) => {
+        if (args.where?.status === "pending") {
+          pendingCall++
+          if (pendingCall === 1) {
+            return Promise.resolve([
+              { id: "item_1", targetType: "Keyword", after: {}, targetId: "kw_1" },
+              { id: "item_2", targetType: "Keyword", after: {}, targetId: "kw_2" },
+            ])
+          }
+          return Promise.resolve([])
+        }
+        return Promise.resolve([])
+      },
+    )
+    mockApplyChange.mockResolvedValue({}) // syncSummary/nccKeywordId 없음
+    mockChangeItemUpdate.mockResolvedValue({})
+    // remaining=0, failed=0 → 성공 finalize
+    mockChangeItemCount.mockResolvedValue(0)
+    mockChangeBatchUpdate.mockResolvedValue({})
+    mockChangeBatchFindUnique.mockResolvedValue({
+      id: "batch_1",
+      action: "keyword.csv",
+      summary: null,
+    })
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+    // item 2건 처리 + heartbeat 2회 (item 당 1회)
+    expect(mockApplyChange).toHaveBeenCalledTimes(2)
+    expect(mockExecuteRaw).toHaveBeenCalledTimes(2)
+  })
+
+  it("heartbeat 0행(lease 상실) → 즉시 중단, finalize/lease정리 없이 조기 종료", async () => {
+    mockQueryRaw.mockResolvedValue([{ id: "batch_1" }])
+    mockChangeItemFindMany.mockImplementation(
+      (args: { where?: { status?: string } }) => {
+        if (args.where?.status === "pending") {
+          return Promise.resolve([
+            { id: "item_1", targetType: "Keyword", after: {}, targetId: "kw_1" },
+            { id: "item_2", targetType: "Keyword", after: {}, targetId: "kw_2" },
+          ])
+        }
+        return Promise.resolve([])
+      },
+    )
+    mockApplyChange.mockResolvedValue({})
+    mockChangeItemUpdate.mockResolvedValue({})
+    // 첫 heartbeat 부터 0행 → lease 상실
+    mockExecuteRaw.mockResolvedValue(0)
+
+    const res = await GET(makeReq("Bearer test-secret") as never)
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.leaseLost).toBe(true)
+    // 첫 item 만 처리하고 즉시 중단 (두번째 item applyChange 미호출)
+    expect(mockApplyChange).toHaveBeenCalledTimes(1)
+    expect(mockExecuteRaw).toHaveBeenCalledTimes(1)
+    // 조기 종료 — remaining count / finalize / dispatch 미진입
+    expect(mockChangeItemCount).not.toHaveBeenCalled()
+    expect(mockDispatch).not.toHaveBeenCalled()
   })
 })

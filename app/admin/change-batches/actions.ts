@@ -18,9 +18,11 @@
  *   - 시크릿은 logAudit 적재 단계에서 마스킹됨 (lib/audit/log.ts sanitize). 본 모듈은 raw 응답·payload 첨부 금지.
  *
  * 롤백 drift 감지 (RollbackOptions.saRecheck):
- *   - 기본 (saRecheck=false): DB 현재값 vs ChangeItem.after 비교만. SA 호출 0회. 외부 변경 감지 X.
- *   - 정밀 (saRecheck=true, F-6.4): SA 재조회로 외부 변경(타 사용자/자동화/네이버측)까지 감지.
+ *   - 기본 (saRecheck 미지정=true, F-6.4): SA 재조회로 외부 변경(타 사용자/자동화/네이버측)까지
+ *     감지. 안전장치 #3("롤백은 현재 상태 재검증")의 안전 경로.
  *     비용: 광고그룹별 list API + 광고주 단위 list 1~2회. 토큰 버킷 자동 throttle.
+ *   - 레거시 (saRecheck=false 명시): DB 현재값 vs ChangeItem.after 비교만. SA 호출 0회.
+ *     외부 변경 감지 X — 동기화 직후 상태로 신뢰할 수 있을 때만 명시적으로 선택.
  *   - ignoreDrift=true 일 때만 drift 행도 강제 롤백. 기본값(false)은 skip.
  *
  * UI 는 `import { ... } from "@/app/admin/change-batches/actions"` 로 호출.
@@ -142,15 +144,15 @@ export type RollbackOptions = {
   /** true 면 drift 항목도 강제 롤백. 기본 false (drift 행은 skip). */
   ignoreDrift?: boolean
   /**
-   * true=SA 재조회로 정밀 검사. false(기본)=DB current vs after 단순 비교(레거시).
+   * 미지정(기본)=true → SA 재조회로 정밀 검사. false 명시 → DB current vs after 단순 비교(레거시).
    *
-   * SA 재조회 모드 (F-6.4 정밀화):
+   * SA 재조회 모드 (기본, F-6.4 정밀화):
    *   - DB 가 아닌 네이버 SA 측 현재값을 진실로 비교 → 외부 변경(타 사용자/자동화/네이버측) 감지.
    *   - targetType 별 list API 1회로 전체 nccId 인덱싱 → 단건 N회 호출 회피.
    *     (Keyword/Ad/AdExtension 은 광고그룹 단위 list 라 광고그룹 K개면 K회.)
    *   - SA 호출 실패 시 보수적으로 drift=true 처리 (롤백 차단).
    *
-   * 레거시 모드 (기본):
+   * 레거시 모드 (saRecheck=false 명시로만 진입):
    *   - SA 호출 0회. DB 현재 컬럼 vs ChangeItem.after 만 비교.
    *   - 동기화(*.sync) 후 외부 변경은 감지 못 함.
    */
@@ -947,8 +949,8 @@ async function failAllWith(
  *   3. ROLLBACK_SUPPORTED_ACTIONS 화이트리스트 검증 — 비지원이면 throw
  *   4. summary.advertiserId → advertiser + hasKeys 검증
  *   5. drift 감지 (옵션):
- *      - saRecheck=false (기본): DB 현재값 vs ChangeItem.after 비교 (레거시 — SA 호출 0회)
- *      - saRecheck=true: SA 재조회로 외부 변경 감지 (광고그룹별 list API K회 + 광고주별 1회)
+ *      - saRecheck 미지정=true (기본): SA 재조회로 외부 변경 감지 (광고그룹별 list API K회 + 광고주별 1회)
+ *      - saRecheck=false (명시): DB 현재값 vs ChangeItem.after 비교 (레거시 — SA 호출 0회)
  *      - 일치하면 drift 없음 → 롤백 적용
  *      - 불일치 시 drift — ignoreDrift=false 면 skip + reason="drift"
  *   6. 새 ChangeBatch 생성 (action="rollback:${원action}", attempt=1, summary={advertiserId, originalBatchId})
@@ -959,9 +961,9 @@ async function failAllWith(
  *  10. AuditLog action="batch.rollback"
  *
  * drift 감지 모드:
- *   - 레거시 (saRecheck=false, 기본): DB 비교만. 동기화 직후 상태 가정. SA 외부 변경 감지 X.
- *   - 정밀 (saRecheck=true, F-6.4): SA 재조회로 비교. 외부 변경(타 사용자/자동화/네이버측) 감지.
- *     비용: 광고그룹 K개면 K회 + 광고주 단위 1~2회 (list API).
+ *   - 정밀 (saRecheck 미지정=true, 기본, F-6.4): SA 재조회로 비교. 외부 변경(타 사용자/자동화/네이버측) 감지.
+ *     비용: 광고그룹 K개면 K회 + 광고주 단위 1~2회 (list API). 안전장치 #3 상 의도된 비용.
+ *   - 레거시 (saRecheck=false 명시): DB 비교만. 동기화 직후 상태 가정. SA 외부 변경 감지 X.
  */
 export async function rollbackChangeBatch(
   batchId: string,
@@ -971,7 +973,9 @@ export async function rollbackChangeBatch(
   const id = shortId.parse(batchId)
   const opts = rollbackOptionsSchema.parse(options ?? {})
   const ignoreDrift = opts.ignoreDrift === true
-  const saRecheck = opts.saRecheck === true
+  // 기본 true(정밀 재검증) — 안전장치 #3("롤백은 현재 상태 재검증")의 진짜 안전 경로는
+  // SA 재조회다. 명시적으로 saRecheck=false 를 넘긴 경우에만 레거시 DB비교로 다운그레이드.
+  const saRecheck = opts.saRecheck !== false
 
   // -- 1. 원 batch 조회 -------------------------------------------------------
   const batch = await prisma.changeBatch.findUnique({
@@ -1007,7 +1011,7 @@ export async function rollbackChangeBatch(
   const advertiserMeta = await loadAdvertiserOrThrow(advertiserId)
 
   // -- 3. drift 감지 ---------------------------------------------------------
-  // saRecheck=true → SA 재조회 (외부 변경 감지). false(기본) → DB 비교 (레거시).
+  // saRecheck 기본 true → SA 재조회 (외부 변경 감지). false 명시 → DB 비교 (레거시).
   // 둘 다 targetType 별 list API 1회로 인덱싱 (단건 N회 호출 회피).
   const driftMap = saRecheck
     ? await detectDriftSA(batch.items, advertiserMeta.customerId)

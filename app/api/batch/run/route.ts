@@ -10,7 +10,8 @@
  *      - ORDER BY createdAt ASC LIMIT 1
  *   3. ChangeItem.status='pending' 100건씩 픽업 (cursor 아닌 status 정렬)
  *   4. 각 item → applyChange (lib/batch/apply.ts) → done / failed 적재
- *   5. 시간 한계(50s) 도달 시 lease 해제 → 다음 Cron 이 이어 처리 (self-invoke X)
+ *      + item 마다 heartbeat(lease 갱신) — 활성 워커는 lease 를 계속 살려 재획득 차단
+ *   5. 시간 예산(TIME_BUDGET_MS) 도달 또는 pending 소진 시 lease 해제 → 다음 Cron 이어 처리 (self-invoke X)
  *   6. 모든 pending 처리 완료 시 ChangeBatch.status = done(failed=0) 또는 failed
  *
  * Cron 등록 (vercel.json):
@@ -20,6 +21,10 @@
  * 안전장치:
  *   - CRON_SECRET 미설정 시 항상 401 (개발 로컬 의도치 않은 실행 차단)
  *   - lease IS NULL 조건 + FOR UPDATE SKIP LOCKED — 동시 워커 race 방지
+ *   - item 단위 heartbeat(lease 갱신) — 활성 워커가 TIME_BUDGET_MS(250s) 처리 중에도 lease(90s)를
+ *     계속 살려두어, 다음 cron(매 분)이 같은 batch 를 재획득(leaseExpiresAt<now())하지 못하게 함.
+ *     → 두 워커가 동일 pending ChangeItem 을 동시 처리(자연키 TOCTOU → 이중 생성)하는 것을 원천 차단.
+ *     워커가 죽으면 heartbeat 중단 → 최대 90s 후 자연 만료 → 다음 cron 회수(빠른 회복 유지).
  *   - status='pending' 정렬 픽업 — 부분 실패 재시도 단순 (cursor 되돌림 X)
  *   - idempotencyKey unique (스키마) — 멱등성 1차 방어
  *   - applyChange 내부 자연키 사전 검사 — 멱등성 2차 방어 (시간차 외부 변경)
@@ -61,6 +66,8 @@ type RunResponse = {
   batchId?: string
   processed?: number
   remaining?: number
+  /** heartbeat 가 0행 → lease 를 다른 워커에게 상실. 정리 없이 조기 종료했음을 표시. */
+  leaseLost?: boolean
   error?: string
 }
 
@@ -90,8 +97,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
   //     · 'approval_queue.apply' — F-12 D.4 ApprovalQueue 승인 (Keyword CREATE — search_term_promote)
   //     · 'sync_keywords'       — F-3.1 키워드 동기화 (광고그룹별 listKeywords + Keyword upsert)
   //   다른 액션은 동기 처리(Server Action 안에서 SA 호출) 그대로 두어 보호.
-  // lease 90s — 함수 timeout 시 다음 cron(매 분) 이 빠르게 회수. 기존 5분은 maxDuration
-  // 미적용 환경에서 73분 동안 14 attempt 누적 사례 발생 → 90s 로 단축.
+  // lease 90s — 죽은 워커가 heartbeat 를 멈춘 뒤 최대 90s 후 만료 → 다음 cron(매 분)이
+  // 빠르게 회수. 활성 워커는 아래 while 루프에서 item 마다 heartbeat 로 lease 를 갱신하므로
+  // TIME_BUDGET_MS(250s) 처리 중에도 만료되지 않는다(재획득·이중 처리 차단). 기존 5분은
+  // maxDuration 미적용 환경에서 73분 동안 14 attempt 누적 사례 발생 → 90s 로 단축.
+  // ※ 아래 heartbeat UPDATE 의 interval 과 반드시 동일(90 seconds)하게 유지.
   const acquired = await prisma.$queryRaw<{ id: string }[]>`
     UPDATE "ChangeBatch"
        SET "leaseOwner" = ${workerId},
@@ -117,12 +127,16 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
 
   // -- 3. chunk 처리 ---------------------------------------------------------
   // Vercel 함수 한계 300s 가정 (maxDuration export). 250s 안전 마진. 도달 시 즉시 종료
-  // + lease 해제. maxDuration 미적용 환경(빌드 캐시 등) 에서도 lease 90s 가 회복 보장.
+  // + lease 해제. 처리 중에는 item 마다 heartbeat 로 lease(90s)를 갱신하므로 활성 워커가
+  // 250s 도는 동안 다음 cron 이 재획득할 수 없다. maxDuration 미적용 환경(빌드 캐시 등)에서
+  // 워커가 죽으면 heartbeat 중단 → 90s 만료 → 다음 cron 회수.
   const startedAt = Date.now()
   const TIME_BUDGET_MS = 250_000
   const CHUNK_SIZE = 100
 
   let processedThisRun = 0
+  // heartbeat UPDATE 가 0행 → lease 를 다른 워커에게 상실. 즉시 중단 후 조기 종료.
+  let leaseLost = false
 
   while (Date.now() - startedAt < TIME_BUDGET_MS) {
     const items = await prisma.changeItem.findMany({
@@ -168,17 +182,45 @@ export async function GET(req: NextRequest): Promise<NextResponse<RunResponse>> 
         })
       }
       processedThisRun++
-      // 항목 단위로 progress 증분 — 함수 timeout 으로 chunk 중간 종료 시에도 UI 진행률
-      // 정확히 보존. chunk 단위 일괄 증분은 race condition 위험 (lease 5분 hold 시 다음
-      // cron 이 같은 batch 보고 중복 카운트할 수 있음).
-      await prisma.changeBatch.update({
-        where: { id: batchId },
-        data: { processed: { increment: 1 } },
-      })
+      // 항목 단위 heartbeat + progress 증분 (원자적 1쿼리):
+      //   · leaseExpiresAt 갱신 → 활성 워커는 lease(90s)를 계속 살려 재획득 불가 (안전장치 #2).
+      //     heartbeat 를 item 마다 두는 이유: 청크(최대 100건) 단위로만 갱신하면 1건이 최대
+      //     ~30s(sync_keywords 대형 광고그룹) 걸릴 수 있어 청크가 lease 를 초과 → mid-chunk
+      //     만료 위험. item 단위(≤~30s < 90s)면 heartbeat 사이 만료가 발생하지 않는다.
+      //   · WHERE leaseOwner=workerId — 우리가 소유한 동안만 갱신/증분. 만료돼 다른 워커가
+      //     회수했다면 0행 → leaseLost 로 즉시 중단(동일 ChangeItem 이중 처리 방지).
+      //   · progress 증분도 여기서 — chunk 단위 일괄 증분은 중복 카운트 위험.
+      //   · interval '90 seconds' 는 위 lease 획득 쿼리와 동일하게 유지할 것.
+      const beat = await prisma.$executeRaw`
+        UPDATE "ChangeBatch"
+           SET "processed" = "processed" + 1,
+               "leaseExpiresAt" = now() + interval '90 seconds'
+         WHERE "id" = ${batchId}
+           AND "leaseOwner" = ${workerId}
+      `
+      if (beat === 0) {
+        // lease 상실 — 새 소유자가 이어서 처리·finalize 한다. 우리가 lease/status 를
+        // 건드리면 새 소유자와 충돌하므로 정리 없이 즉시 중단.
+        leaseLost = true
+        break
+      }
     }
+    if (leaseLost) break
   }
 
   // -- 4. 종료 처리 ----------------------------------------------------------
+  if (leaseLost) {
+    // heartbeat 0행 → 이미 다른 워커가 lease 를 소유. lease/status 를 건드리지 않고 조기
+    // 종료 (remaining 처리·finalize 는 새 소유자 책임). 이중 처리·이중 finalize 방지.
+    return NextResponse.json({
+      ok: true,
+      picked: 1,
+      batchId,
+      processed: processedThisRun,
+      leaseLost: true,
+    })
+  }
+
   const remaining = await prisma.changeItem.count({
     where: { batchId, status: "pending" },
   })
