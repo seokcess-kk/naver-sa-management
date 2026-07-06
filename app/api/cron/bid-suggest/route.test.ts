@@ -942,7 +942,7 @@ describe("cron bid-suggest — rank suggestions (5순위 미달 인상 권고)",
     expect(arg.data.action.rankWindowHours).toBeNull()
     expect(arg.data.action.rankSampleImpressions).toBeNull()
     // reason 본문 fallback suffix.
-    expect(arg.data.reason).toContain("최근 1시간 측정값")
+    expect(arg.data.reason).toContain("최근 평균 순위 측정값")
   })
 
   it("Estimate < currentBid → hold (rankHoldNotReached=1, create 호출 X)", async () => {
@@ -1291,7 +1291,7 @@ describe("cron bid-suggest — adgroup rank suggestions (Phase 2A)", () => {
     expect(arg.data.action.currentAvgRank).toBe(7.5)
     expect(arg.data.severity).toBe("info")
     expect(arg.data.reason).toContain("광고그룹 2개 키워드")
-    expect(arg.data.reason).toContain("최근 1시간 측정값 단순 평균")
+    expect(arg.data.reason).toContain("최근 평균 순위 측정값 단순 평균")
   })
 
   it("StatHourly 데이터 없음 → fallback (last non-null 단순 평균, rankWindowHours=null)", async () => {
@@ -1335,7 +1335,7 @@ describe("cron bid-suggest — adgroup rank suggestions (Phase 2A)", () => {
     expect(arg.data.action.rankSampleImpressions).toBeNull()
     // last non-null 단순 평균 7
     expect(arg.data.action.currentAvgRank).toBe(7)
-    expect(arg.data.reason).toContain("최근 1시간 측정값 단순 평균")
+    expect(arg.data.reason).toContain("최근 평균 순위 측정값 단순 평균")
     expect(arg.data.reason).toContain("광고그룹 2개 키워드")
   })
 

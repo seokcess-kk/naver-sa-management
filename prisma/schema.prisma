@@ -1021,7 +1021,7 @@ model SearchTermReport {
 //
 // 적재 정책:
 //   - 동일 입력 캐시 hit 시에도 row 1건 추가 (cost=0, fromCache=true) — 호출 빈도 추적
-//   - inputHash: SHA-256(prompt + model + params) — 캐시 키 + 디버깅
+//   - inputHash: SHA-256(prompt + model + params) — 적재 dedup / 디버그 키
 //   - cost: USD 정밀 (Decimal) — Anthropic 가격표 기준 호출 시점 산출
 //   - purpose: "bid_suggestion_reason" / "rejection_classify" / "daily_summary" 등 호출자 분류
 //
@@ -1037,7 +1037,7 @@ model LlmCallLog {
   purpose      String
   /// 사용 모델 (예: "claude-sonnet-4-6", "claude-haiku-4-5-20251001")
   model        String
-  /// SHA-256(prompt + model + params) — 캐시 키 + 동일 입력 추적
+  /// SHA-256(prompt + model + params) — 적재 dedup / 디버그 키
   inputHash    String
   /// 입력 토큰 수 (Anthropic API usage.input_tokens)
   tokensIn     Int      @default(0)
@@ -1057,6 +1057,4 @@ model LlmCallLog {
   @@index([createdAt])
   @@index([model, createdAt])
   @@index([purpose, createdAt])
-  // 캐시 hit 검사 (inputHash 단일 조회)
-  @@index([inputHash])
 }

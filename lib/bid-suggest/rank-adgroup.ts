@@ -247,7 +247,7 @@ export async function processAdgroupRankSuggestions(args: {
     }
 
     // -- reason suffix (affectedCount) --------------------------------------
-    const reason = `${decision.reason} (광고그룹 ${affectedCount}개 키워드 / 최근 1시간 측정값 단순 평균)`
+    const reason = `${decision.reason} (광고그룹 ${affectedCount}개 키워드 / 최근 평균 순위 측정값 단순 평균)`
 
     // -- upsert (같은 광고그룹의 같은 kind pending 행만 1개 보장) -------------
     // 묶음 권고 (kind='keyword_bid_bundle') 와 광고그룹 default bid 권고 (kind='adgroup_default_bid_update')

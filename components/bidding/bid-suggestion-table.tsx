@@ -1935,16 +1935,16 @@ function formatBid(v: number | null | undefined): string {
 
 /**
  * rank 권고 측정 윈도우 출처 라벨.
- *   - rankWindowHours === 6 → "(최근 6시간 평균 · 노출 N회)"
- *   - rankWindowHours === null → "(최근 1시간 측정)" (fallback: StatHourly 데이터 없음, last non-null 사용)
+ *   - rankWindowHours === null → "(최근 평균 순위 측정)" (현행: Keyword.recentAvgRnk 측정값 기반)
  *   - rankWindowHours === undefined → "" (출처 표기 생략, 기존 동작 유지)
+ *   - rankWindowHours === 6 → 레거시(6시간 가중) 라벨. 6h 가중경로 제거로 현재 미도달(항상 null).
  */
 function formatRankWindowLabel(
   rankWindowHours: number | null | undefined,
   rankSampleImpressions: number | null | undefined,
 ): string {
   if (rankWindowHours === undefined) return ""
-  if (rankWindowHours === null) return "(최근 1시간 측정)"
+  if (rankWindowHours === null) return "(최근 평균 순위 측정)"
   if (rankWindowHours === 6) {
     if (
       typeof rankSampleImpressions === "number" &&

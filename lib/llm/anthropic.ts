@@ -209,7 +209,6 @@ export async function callLlm(input: CallLlmInput): Promise<CallLlmResult> {
     data: {
       purpose: input.purpose,
       model: input.model,
-      // (미사용) inputHash 인덱스는 후속 정리 대상
       inputHash,
       tokensIn,
       tokensOut,

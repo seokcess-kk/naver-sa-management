@@ -237,7 +237,7 @@ export async function processRankSuggestions(args: {
     }
 
     // -- reason 본문 출처 suffix (텔레그램 / 감사 로그용) ---------------------
-    const reason = `${decision.reason} (최근 1시간 측정값)`
+    const reason = `${decision.reason} (최근 평균 순위 측정값)`
 
     // -- 적재 (upsert: 같은 키워드 pending 1개 보장) ------------------------
     // marginal 권고 (engineSource='bid', scope='keyword', status='pending') 가 있으면
